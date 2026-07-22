@@ -13,7 +13,8 @@ import {
   trendStatusLabel,
 } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
-import { fetchState, huntTrends, setSheetStatus } from "@/lib/api/local";
+import { appendIdea, fetchState, huntTrends, setSheetStatus } from "@/lib/api/local";
+import type { Idea } from "@/lib/mock-data";
 import type {
   Prioridade,
   ThemeFamily,
@@ -133,24 +134,32 @@ function RadarPage() {
   trends.forEach((t) => (statusCounts[t.status] += 1));
 
   function gerarIdeia(t: Trend) {
-    const nid = genId("i");
-    addIdea({
-      id: nid,
+    const idea: Idea = {
+      id: genId("i"),
       trendId: t.id,
       titulo: `Ideia a partir de: ${t.titulo}`,
       familia: t.familia,
       hook: "Hook educativo sugerido — revise antes de aprovar.",
       angulo:
         "Angulo educativo: contextualizar o tema sem prescrever, reforcando avaliacao individual.",
+      tipo: "Reel",
+      publicoDor: t.dorPublico,
       cta: "Procure avaliacao individualizada com profissional de saude.",
       observacaoCompliance:
         "Rascunho gerado localmente. Revisar linguagem antes de virar roteiro.",
       prioridade: t.prioridade,
       status: "novo",
       criadoEm: new Date().toISOString(),
-    });
+    };
+    addIdea(idea);
     updateTrend(t.id, { status: "em_analise" });
-    toast.success("Ideia criada — veja no topo da lista de Ideias.");
+    appendIdea(idea)
+      .then(() => toast.success("Ideia criada e salva no Sheets."))
+      .catch((err) =>
+        toast.error(
+          `Ideia criada localmente, mas falhou ao salvar: ${err instanceof Error ? err.message : ""}`,
+        ),
+      );
     navigate({ to: "/ideias" });
   }
 

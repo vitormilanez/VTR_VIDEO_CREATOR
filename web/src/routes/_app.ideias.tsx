@@ -13,8 +13,8 @@ import {
   prioridadeLabel,
 } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
-import { setSheetStatus } from "@/lib/api/local";
-import type { Idea, IdeaStatus, ThemeFamily } from "@/lib/mock-data";
+import { appendScript, setSheetStatus } from "@/lib/api/local";
+import type { Idea, IdeaStatus, Script, ThemeFamily } from "@/lib/mock-data";
 import {
   Table,
   TableBody,
@@ -90,9 +90,8 @@ function IdeiasPage() {
   ideas.forEach((i) => (counts[i.status] += 1));
 
   function gerarRoteiro(i: Idea) {
-    const id = genId("s");
-    addScript({
-      id,
+    const script: Script = {
+      id: genId("s"),
       ideaId: i.id,
       categoria: i.familia,
       tema: i.titulo,
@@ -113,10 +112,17 @@ function IdeiasPage() {
       formatoSugerido: i.tipo || "Reels",
       status: "aguardando_validacao",
       criadoEm: new Date().toISOString(),
-    });
+    };
+    addScript(script);
     updateIdea(i.id, { status: "aprovado" });
-    toast.success("Roteiro criado como rascunho.");
-    navigate({ to: "/roteiros/$id", params: { id } });
+    appendScript(script)
+      .then(() => toast.success("Roteiro criado e salvo no Sheets."))
+      .catch((err) =>
+        toast.error(
+          `Roteiro criado localmente, mas falhou ao salvar: ${err instanceof Error ? err.message : ""}`,
+        ),
+      );
+    navigate({ to: "/roteiros/$id", params: { id: script.id } });
   }
 
   async function descartarIdeia(i: Idea) {

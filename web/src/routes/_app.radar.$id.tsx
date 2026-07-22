@@ -8,7 +8,8 @@ import {
   trendStatusLabel,
 } from "@/lib/status";
 import { Button } from "@/components/ui/button";
-import { setSheetStatus } from "@/lib/api/local";
+import { appendIdea, setSheetStatus } from "@/lib/api/local";
+import type { Idea } from "@/lib/mock-data";
 import { ArrowLeft, ExternalLink, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
@@ -43,24 +44,32 @@ function TendenciaDetalhe() {
 
   function gerarIdeia() {
     if (!trend) return;
-    const id = genId("i");
-    addIdea({
-      id,
+    const idea: Idea = {
+      id: genId("i"),
       trendId: trend.id,
       titulo: `Ideia a partir de: ${trend.titulo}`,
       familia: trend.familia,
       hook: "Hook educativo sugerido — revise antes de aprovar.",
       angulo:
         "Angulo educativo: contextualizar o tema sem prescrever, reforcando avaliacao individual.",
+      tipo: "Reel",
+      publicoDor: trend.dorPublico,
       cta: "Procure avaliacao individualizada com profissional de saude.",
       observacaoCompliance: "Rascunho gerado localmente. Revisar linguagem.",
       prioridade: trend.prioridade,
       status: "novo",
       criadoEm: new Date().toISOString(),
-    });
+    };
+    addIdea(idea);
     updateTrend(trend.id, { status: "em_analise" });
-    toast.success("Ideia criada a partir desta tendencia.");
-    navigate({ to: "/ideias/$id", params: { id } });
+    appendIdea(idea)
+      .then(() => toast.success("Ideia criada e salva no Sheets."))
+      .catch((err) =>
+        toast.error(
+          `Ideia criada localmente, mas falhou ao salvar: ${err instanceof Error ? err.message : ""}`,
+        ),
+      );
+    navigate({ to: "/ideias" });
   }
 
   async function atualizarStatus(status: "em_analise" | "descartado") {

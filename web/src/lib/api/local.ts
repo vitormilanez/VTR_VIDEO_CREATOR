@@ -1,6 +1,7 @@
 // Cliente da API local (FastAPI em api/server.py) que serve os dados reais
 // do Google Sheets. Base configuravel via VITE_API_URL.
 import type { HydratePayload } from "../store";
+import type { Idea, Script } from "../mock-data";
 
 const BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 
@@ -42,6 +43,35 @@ export async function setSheetStatus(
     throw new Error(detail);
   }
   return (await res.json()) as { ok: boolean };
+}
+
+async function postJson(path: string, body: unknown): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `API ${path} -> ${res.status}`;
+    try {
+      const b = (await res.json()) as { detail?: string };
+      if (b.detail) detail = b.detail;
+    } catch {
+      /* corpo nao-JSON */
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as { ok: boolean };
+}
+
+/** Persiste uma ideia gerada na aba Ideias do Sheets. */
+export function appendIdea(idea: Idea): Promise<{ ok: boolean }> {
+  return postJson("/api/sheets/ideias", idea);
+}
+
+/** Persiste um roteiro gerado na aba Roteiros do Sheets. */
+export function appendScript(script: Script): Promise<{ ok: boolean }> {
+  return postJson("/api/sheets/roteiros", script);
 }
 
 export async function huntTrends(): Promise<{ ok: boolean; added?: number }> {

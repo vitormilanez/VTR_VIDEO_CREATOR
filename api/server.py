@@ -471,6 +471,115 @@ def set_status(tab: str, item_id: str, payload: StatusUpdate) -> dict:
     return {"ok": True, "cell": cell, "status": label}
 
 
+# --------------------------------------------------------------------------- #
+# Escrita de NOVOS itens no Google Sheets (persistir ideias/roteiros gerados)
+# --------------------------------------------------------------------------- #
+_PRIORIDADE = {"alta": "Alta", "media": "Média", "baixa": "Baixa"}
+_RISCO = {"alto": "Alto", "medio": "Médio", "baixo": "Baixo"}
+_FAMILIA = {
+    "medicamento": "Medicamento",
+    "comportamento": "Comportamento",
+    "metabolismo": "Metabolismo",
+    "obesidade": "Obesidade",
+    "educativo": "Educativo",
+}
+_IDEIA_STATUS = {
+    "novo": "Nova",
+    "em_analise": "Em análise",
+    "aprovado": "Ideia gerada",
+    "descartado": "Descartado",
+}
+_ROTEIRO_STATUS = {
+    "aguardando_validacao": "Rascunho",
+    "em_revisao": "Em edição",
+    "aprovado_clinicamente": "Pronto",
+    "rejeitado": "Arquivado",
+}
+
+
+class IdeaIn(BaseModel):
+    titulo: str
+    hook: str = ""
+    angulo: str = ""
+    tipo: str | None = None
+    publicoDor: str | None = None
+    cta: str = ""
+    linkOrigem: str | None = None
+    observacaoCompliance: str = ""
+    prioridade: str = "media"
+    status: str = "novo"
+
+
+class ScriptIn(BaseModel):
+    categoria: str = "educativo"
+    tema: str = ""
+    titulo: str
+    hook: str = ""
+    dorConflito: str = ""
+    explicacaoSimples: str = ""
+    virada: str = ""
+    cta: str = ""
+    cuidadosMedicos: str = ""
+    risco: str = "medio"
+    formatoSugerido: str = "Reels"
+    aprovador: str | None = None
+    validadoEm: str | None = None
+    link: str | None = None
+    status: str = "aguardando_validacao"
+
+
+def _append(range_name: str, row: list) -> None:
+    from integrations.google_sheets_rest_client import GoogleSheetsRestClient
+
+    try:
+        GoogleSheetsRestClient().append_rows(range_name, [row])
+    except Exception as exc:  # credenciais / rede
+        raise HTTPException(status_code=503, detail=f"falha ao gravar no Sheets: {exc}")
+
+
+@app.post("/api/sheets/ideias")
+def append_idea(payload: IdeaIn) -> dict:
+    """Grava uma nova ideia na aba 'Ideias' (colunas reais)."""
+    row = [
+        payload.titulo,                       # Tema
+        payload.hook,                         # Hook
+        payload.angulo,                       # Ângulo
+        payload.tipo or "",                   # Tipo
+        payload.publicoDor or "",             # Público/Dor
+        payload.cta,                          # CTA
+        _PRIORIDADE.get(payload.prioridade, "Média"),   # Prioridade
+        _IDEIA_STATUS.get(payload.status, "Nova"),      # Status
+        payload.linkOrigem or "",             # Link origem
+        payload.observacaoCompliance,         # Observações
+    ]
+    _append("'Ideias'!A:J", row)
+    return {"ok": True, "appended": 1}
+
+
+@app.post("/api/sheets/roteiros")
+def append_script(payload: ScriptIn) -> dict:
+    """Grava um novo roteiro na aba 'Roteiros' (colunas reais)."""
+    row = [
+        _FAMILIA.get(payload.categoria, "Educativo"),   # Categoria
+        payload.tema,                         # Tema
+        payload.titulo,                       # Título
+        payload.hook,                         # Hook
+        payload.dorConflito,                  # Dor/Conflito
+        payload.explicacaoSimples,            # Explicação simples
+        payload.virada,                       # Virada/Provocação
+        payload.cta,                          # CTA
+        payload.cuidadosMedicos,              # Cuidados médicos
+        _RISCO.get(payload.risco, "Médio"),   # Risco
+        payload.formatoSugerido,              # Formato sugerido
+        _ROTEIRO_STATUS.get(payload.status, "Rascunho"),  # Status
+        payload.aprovador or "",              # Aprovador
+        payload.validadoEm or "",             # Data aprovação
+        payload.link or "",                   # Link doc/video
+    ]
+    _append("'Roteiros'!A:O", row)
+    return {"ok": True, "appended": 1}
+
+
 if __name__ == "__main__":
     import uvicorn
 
