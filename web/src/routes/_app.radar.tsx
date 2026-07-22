@@ -1,4 +1,4 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
@@ -78,7 +78,7 @@ export const Route = createFileRoute("/_app/radar")({
       { property: "og:description", content: "Captura de tendencias para reels medicos." },
     ],
   }),
-  component: RadarPage,
+  component: RadarLayout,
 });
 
 const familias: ThemeFamily[] = [
@@ -90,7 +90,11 @@ const familias: ThemeFamily[] = [
 ];
 const prioridades: Prioridade[] = ["alta", "media", "baixa"];
 
-function RadarPage() {
+function RadarLayout() {
+  return <Outlet />;
+}
+
+export function RadarPage() {
   const trends = useStore((s) => s.trends);
   const addTrend = useStore((s) => s.addTrend);
   const addIdea = useStore((s) => s.addIdea);

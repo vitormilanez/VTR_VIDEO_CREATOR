@@ -97,6 +97,10 @@ def _save_video_jobs(jobs: list[dict[str, Any]]) -> None:
 def _heygen_cli() -> str:
     command = shutil.which("heygen")
     if not command:
+        local_command = Path.home() / ".local" / "bin" / "heygen"
+        if local_command.is_file() and os.access(local_command, os.X_OK):
+            command = str(local_command)
+    if not command:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -425,12 +429,49 @@ DEFAULT_SETTINGS = {
 }
 
 
+HEYGEN_CATALOG = {
+    "avatars": [
+        {"id": "883356edef07402ab7be3c39920868ab", "name": "Dr Guilherme - Formal sorrindo", "orientation": "portrait"},
+        {"id": "3836fbbca6994dae91f02b3e9926a62a", "name": "Dr Guilherme - Camisa branca close", "orientation": "portrait"},
+        {"id": "68773738aa9b45ce9d619d743d1d77af", "name": "Dr Guilherme - Casual serio", "orientation": "portrait"},
+        {"id": "2835cbcbdd65484c809bd0f6f80313e2", "name": "Confident gentleman in a smart outfit", "orientation": "portrait"},
+        {"id": "a88d9b04f9964218b6889a7e10507edb", "name": "drguilhermeia smiling in the gym", "orientation": "landscape"},
+        {"id": "1c00c73aad1d4decaa24407758fc5c35", "name": "drguilhermeia smiling in the gym (2)", "orientation": "landscape"},
+        {"id": "587ea824d7764ef3b6acd618db89bc78", "name": "Photo Avatar", "orientation": "portrait"},
+        {"id": "8d0f249218b648cbb8a5f2bc0c0fb1d3", "name": "Podcaster in a grey hoodie", "orientation": "landscape"},
+        {"id": "69db99c0495f4dba9d08a267db636664", "name": "Grey Quarter-Zip Studio Host", "orientation": "landscape"},
+        {"id": "5cf53de5717943669098c6b27199ec98", "name": "Man in black zip hoodie", "orientation": "landscape"},
+        {"id": "2038b644953f4937afea78e3a7ccd8f8", "name": "Podcaster in blue hoodie", "orientation": "landscape"},
+        {"id": "0e2646b2584640e4a56c01c72c85cec7", "name": "Man in olive green shirt", "orientation": "landscape"},
+        {"id": "61e130873d2345a79a7d538147064154", "name": "drguilhermeia (digital twin)", "orientation": "landscape"},
+    ],
+    "voices": [
+        {"id": "33a98f732fe144d9a40f5cf33a7e95ec", "name": "drguilhermeia", "gender": "male"},
+        {"id": "2f31eb4f4d644a9b9f22cbdb63430cc0", "name": "Doutor Guilherme Intel Artificia", "gender": "unknown"},
+        {"id": "47788d6e0a224eb9b2ee74fcc30fd1f8", "name": "Voice Clone", "gender": "male"},
+        {"id": "a21ea127df6649ee9e333697761e0b29", "name": "voice-name-here", "gender": "male"},
+        {"id": "a5dc4150b5a14c5393ee8c166f5028c8", "name": "voice-name-here (2)", "gender": "male"},
+        {"id": "a816446b92424300a325f8940606aea2", "name": "4 - Bioplastia Glutea", "gender": "male"},
+    ],
+}
+
+
 # --------------------------------------------------------------------------- #
 # Rotas
 # --------------------------------------------------------------------------- #
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True, "snapshot_exists": SNAPSHOT.exists()}
+
+
+@app.get("/api/heygen/catalog")
+def heygen_catalog() -> dict:
+    """Catalogo de avatares e vozes privados disponiveis para producao."""
+    return {
+        **HEYGEN_CATALOG,
+        "defaultAvatarId": os.getenv("HEYGEN_DEFAULT_AVATAR_ID"),
+        "defaultVoiceId": os.getenv("HEYGEN_DEFAULT_VOICE_ID"),
+    }
 
 
 @app.get("/api/state")
@@ -540,7 +581,7 @@ def refresh_video(job_id: str) -> dict:
         raise HTTPException(status_code=500, detail="Job sem sessao HeyGen.")
     try:
         proc = subprocess.run(
-            [command, "video-agent", "get", "--session-id", str(session_id)],
+            [command, "video-agent", "get", str(session_id)],
             cwd=str(ROOT),
             capture_output=True,
             text=True,

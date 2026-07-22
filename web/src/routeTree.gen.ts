@@ -18,9 +18,13 @@ import { Route as AppPerformanceRouteImport } from './routes/_app.performance'
 import { Route as AppProducaoRouteImport } from './routes/_app.producao'
 import { Route as AppRadarRouteImport } from './routes/_app.radar'
 import { Route as AppRoteirosRouteImport } from './routes/_app.roteiros'
+import { Route as AppIdeiasIndexRouteImport } from './routes/_app.ideias.index'
 import { Route as AppIdeiasIdRouteImport } from './routes/_app.ideias.$id'
+import { Route as AppProducaoIndexRouteImport } from './routes/_app.producao.index'
 import { Route as AppProducaoIdRouteImport } from './routes/_app.producao.$id'
+import { Route as AppRadarIndexRouteImport } from './routes/_app.radar.index'
 import { Route as AppRadarIdRouteImport } from './routes/_app.radar.$id'
+import { Route as AppRoteirosIndexRouteImport } from './routes/_app.roteiros.index'
 import { Route as AppRoteirosIdRouteImport } from './routes/_app.roteiros.$id'
 
 const AppRoute = AppRouteImport.update({
@@ -67,20 +71,40 @@ const AppRoteirosRoute = AppRoteirosRouteImport.update({
   path: '/roteiros',
   getParentRoute: () => AppRoute,
 } as any)
+const AppIdeiasIndexRoute = AppIdeiasIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppIdeiasRoute,
+} as any)
 const AppIdeiasIdRoute = AppIdeiasIdRouteImport.update({
   id: '/$id',
   path: '/$id',
   getParentRoute: () => AppIdeiasRoute,
+} as any)
+const AppProducaoIndexRoute = AppProducaoIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppProducaoRoute,
 } as any)
 const AppProducaoIdRoute = AppProducaoIdRouteImport.update({
   id: '/$id',
   path: '/$id',
   getParentRoute: () => AppProducaoRoute,
 } as any)
+const AppRadarIndexRoute = AppRadarIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppRadarRoute,
+} as any)
 const AppRadarIdRoute = AppRadarIdRouteImport.update({
   id: '/$id',
   path: '/$id',
   getParentRoute: () => AppRadarRoute,
+} as any)
+const AppRoteirosIndexRoute = AppRoteirosIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppRoteirosRoute,
 } as any)
 const AppRoteirosIdRoute = AppRoteirosIdRouteImport.update({
   id: '/$id',
@@ -101,20 +125,24 @@ export interface FileRoutesByFullPath {
   '/producao/$id': typeof AppProducaoIdRoute
   '/radar/$id': typeof AppRadarIdRoute
   '/roteiros/$id': typeof AppRoteirosIdRoute
+  '/ideias/': typeof AppIdeiasIndexRoute
+  '/producao/': typeof AppProducaoIndexRoute
+  '/radar/': typeof AppRadarIndexRoute
+  '/roteiros/': typeof AppRoteirosIndexRoute
 }
 export interface FileRoutesByTo {
   '/calendario': typeof AppCalendarioRoute
   '/configuracoes': typeof AppConfiguracoesRoute
-  '/ideias': typeof AppIdeiasRouteWithChildren
   '/performance': typeof AppPerformanceRoute
-  '/producao': typeof AppProducaoRouteWithChildren
-  '/radar': typeof AppRadarRouteWithChildren
-  '/roteiros': typeof AppRoteirosRouteWithChildren
   '/': typeof AppIndexRoute
   '/ideias/$id': typeof AppIdeiasIdRoute
   '/producao/$id': typeof AppProducaoIdRoute
   '/radar/$id': typeof AppRadarIdRoute
   '/roteiros/$id': typeof AppRoteirosIdRoute
+  '/ideias': typeof AppIdeiasIndexRoute
+  '/producao': typeof AppProducaoIndexRoute
+  '/radar': typeof AppRadarIndexRoute
+  '/roteiros': typeof AppRoteirosIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -131,6 +159,10 @@ export interface FileRoutesById {
   '/_app/producao/$id': typeof AppProducaoIdRoute
   '/_app/radar/$id': typeof AppRadarIdRoute
   '/_app/roteiros/$id': typeof AppRoteirosIdRoute
+  '/_app/ideias/': typeof AppIdeiasIndexRoute
+  '/_app/producao/': typeof AppProducaoIndexRoute
+  '/_app/radar/': typeof AppRadarIndexRoute
+  '/_app/roteiros/': typeof AppRoteirosIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -147,20 +179,24 @@ export interface FileRouteTypes {
     | '/producao/$id'
     | '/radar/$id'
     | '/roteiros/$id'
+    | '/ideias/'
+    | '/producao/'
+    | '/radar/'
+    | '/roteiros/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/calendario'
     | '/configuracoes'
-    | '/ideias'
     | '/performance'
-    | '/producao'
-    | '/radar'
-    | '/roteiros'
     | '/'
     | '/ideias/$id'
     | '/producao/$id'
     | '/radar/$id'
     | '/roteiros/$id'
+    | '/ideias'
+    | '/producao'
+    | '/radar'
+    | '/roteiros'
   id:
     | '__root__'
     | '/_app'
@@ -176,6 +212,10 @@ export interface FileRouteTypes {
     | '/_app/producao/$id'
     | '/_app/radar/$id'
     | '/_app/roteiros/$id'
+    | '/_app/ideias/'
+    | '/_app/producao/'
+    | '/_app/radar/'
+    | '/_app/roteiros/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -247,12 +287,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppRoteirosRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/ideias/': {
+      id: '/_app/ideias/'
+      path: '/'
+      fullPath: '/ideias/'
+      preLoaderRoute: typeof AppIdeiasIndexRouteImport
+      parentRoute: typeof AppIdeiasRoute
+    }
     '/_app/ideias/$id': {
       id: '/_app/ideias/$id'
       path: '/$id'
       fullPath: '/ideias/$id'
       preLoaderRoute: typeof AppIdeiasIdRouteImport
       parentRoute: typeof AppIdeiasRoute
+    }
+    '/_app/producao/': {
+      id: '/_app/producao/'
+      path: '/'
+      fullPath: '/producao/'
+      preLoaderRoute: typeof AppProducaoIndexRouteImport
+      parentRoute: typeof AppProducaoRoute
     }
     '/_app/producao/$id': {
       id: '/_app/producao/$id'
@@ -261,12 +315,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProducaoIdRouteImport
       parentRoute: typeof AppProducaoRoute
     }
+    '/_app/radar/': {
+      id: '/_app/radar/'
+      path: '/'
+      fullPath: '/radar/'
+      preLoaderRoute: typeof AppRadarIndexRouteImport
+      parentRoute: typeof AppRadarRoute
+    }
     '/_app/radar/$id': {
       id: '/_app/radar/$id'
       path: '/$id'
       fullPath: '/radar/$id'
       preLoaderRoute: typeof AppRadarIdRouteImport
       parentRoute: typeof AppRadarRoute
+    }
+    '/_app/roteiros/': {
+      id: '/_app/roteiros/'
+      path: '/'
+      fullPath: '/roteiros/'
+      preLoaderRoute: typeof AppRoteirosIndexRouteImport
+      parentRoute: typeof AppRoteirosRoute
     }
     '/_app/roteiros/$id': {
       id: '/_app/roteiros/$id'
@@ -280,10 +348,12 @@ declare module '@tanstack/react-router' {
 
 interface AppIdeiasRouteChildren {
   AppIdeiasIdRoute: typeof AppIdeiasIdRoute
+  AppIdeiasIndexRoute: typeof AppIdeiasIndexRoute
 }
 
 const AppIdeiasRouteChildren: AppIdeiasRouteChildren = {
   AppIdeiasIdRoute: AppIdeiasIdRoute,
+  AppIdeiasIndexRoute: AppIdeiasIndexRoute,
 }
 
 const AppIdeiasRouteWithChildren = AppIdeiasRoute._addFileChildren(
@@ -292,10 +362,12 @@ const AppIdeiasRouteWithChildren = AppIdeiasRoute._addFileChildren(
 
 interface AppProducaoRouteChildren {
   AppProducaoIdRoute: typeof AppProducaoIdRoute
+  AppProducaoIndexRoute: typeof AppProducaoIndexRoute
 }
 
 const AppProducaoRouteChildren: AppProducaoRouteChildren = {
   AppProducaoIdRoute: AppProducaoIdRoute,
+  AppProducaoIndexRoute: AppProducaoIndexRoute,
 }
 
 const AppProducaoRouteWithChildren = AppProducaoRoute._addFileChildren(
@@ -304,10 +376,12 @@ const AppProducaoRouteWithChildren = AppProducaoRoute._addFileChildren(
 
 interface AppRadarRouteChildren {
   AppRadarIdRoute: typeof AppRadarIdRoute
+  AppRadarIndexRoute: typeof AppRadarIndexRoute
 }
 
 const AppRadarRouteChildren: AppRadarRouteChildren = {
   AppRadarIdRoute: AppRadarIdRoute,
+  AppRadarIndexRoute: AppRadarIndexRoute,
 }
 
 const AppRadarRouteWithChildren = AppRadarRoute._addFileChildren(
@@ -316,10 +390,12 @@ const AppRadarRouteWithChildren = AppRadarRoute._addFileChildren(
 
 interface AppRoteirosRouteChildren {
   AppRoteirosIdRoute: typeof AppRoteirosIdRoute
+  AppRoteirosIndexRoute: typeof AppRoteirosIndexRoute
 }
 
 const AppRoteirosRouteChildren: AppRoteirosRouteChildren = {
   AppRoteirosIdRoute: AppRoteirosIdRoute,
+  AppRoteirosIndexRoute: AppRoteirosIndexRoute,
 }
 
 const AppRoteirosRouteWithChildren = AppRoteirosRoute._addFileChildren(

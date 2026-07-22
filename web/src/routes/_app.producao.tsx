@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
@@ -31,10 +31,14 @@ export const Route = createFileRoute("/_app/producao")({
       { property: "og:description", content: "Fila HeyGen para reels medicos." },
     ],
   }),
-  component: ProducaoPage,
+  component: ProducaoLayout,
 });
 
-function ProducaoPage() {
+function ProducaoLayout() {
+  return <Outlet />;
+}
+
+export function ProducaoPage() {
   const jobs = useStore((s) => s.videoJobs);
   const scripts = useStore((s) => s.scripts);
   const updateVideoJob = useStore((s) => s.updateVideoJob);

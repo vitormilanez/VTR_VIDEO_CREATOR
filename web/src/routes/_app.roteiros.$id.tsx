@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel, HighlightedText } from "@/components/compliance-panel";
@@ -12,7 +12,7 @@ import {
   scriptStatusLabel,
 } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { createHeyGenVideo } from "@/lib/api/local";
+import { createHeyGenVideo, fetchHeyGenCatalog, type HeyGenCatalog } from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +48,23 @@ function RoteiroDetalhe() {
 
   const [draft, setDraft] = useState<Script | undefined>(script);
   const [sending, setSending] = useState(false);
+  const [catalog, setCatalog] = useState<HeyGenCatalog | null>(null);
+  const [avatarId, setAvatarId] = useState("");
+  const [voiceId, setVoiceId] = useState("");
+
+  useEffect(() => {
+    if (script) setDraft(script);
+  }, [script]);
+
+  useEffect(() => {
+    fetchHeyGenCatalog()
+      .then((data) => {
+        setCatalog(data);
+        setAvatarId(data.defaultAvatarId || data.avatars[0]?.id || "");
+        setVoiceId(data.defaultVoiceId || data.voices[0]?.id || "");
+      })
+      .catch((err) => toast.error(err instanceof Error ? err.message : "Falha ao carregar HeyGen."));
+  }, []);
   const dirty = useMemo(
     () => JSON.stringify(draft) !== JSON.stringify(script),
     [draft, script],
@@ -87,7 +104,7 @@ function RoteiroDetalhe() {
     if (!draft || !script) return;
     setSending(true);
     try {
-      const job = await createHeyGenVideo(script.id);
+      const job = await createHeyGenVideo(script.id, { avatarId, voiceId });
       addVideoJob(job);
       toast.success("Roteiro enviado para producao no HeyGen.");
       navigate({ to: "/producao/$id", params: { id: job.id } });
@@ -129,17 +146,13 @@ function RoteiroDetalhe() {
             confirmLabel="Enviar"
             onConfirm={enviarProducao}
             trigger={
-              <WithTooltip
-                label={
-                  dirty
-                    ? "Salve as alteracoes antes de enviar"
-                    : "Enviar roteiro ao HeyGen"
-                }
+              <Button
+                size="sm"
+                title={dirty ? "Salve as alteracoes antes de enviar" : "Enviar roteiro ao HeyGen"}
+                disabled={dirty || sending || !avatarId || !voiceId}
               >
-                <Button size="sm" disabled={dirty || sending}>
-                  <Film className="mr-1 h-4 w-4" /> Enviar para producao
-                </Button>
-              </WithTooltip>
+                <Film className="mr-1 h-4 w-4" /> Enviar para producao
+              </Button>
             }
           />
         </>
@@ -200,6 +213,28 @@ function RoteiroDetalhe() {
                     <SelectItem value="em_revisao">Em edicao</SelectItem>
                     <SelectItem value="aprovado_clinicamente">Pronto</SelectItem>
                     <SelectItem value="rejeitado">Arquivado</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Avatar HeyGen">
+                <Select value={avatarId} onValueChange={setAvatarId} disabled={!catalog}>
+                  <SelectTrigger><SelectValue placeholder="Carregando avatares..." /></SelectTrigger>
+                  <SelectContent>
+                    {catalog?.avatars.map((avatar) => (
+                      <SelectItem key={avatar.id} value={avatar.id}>
+                        {avatar.name} ({avatar.orientation === "portrait" ? "vertical" : "horizontal"})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Voz HeyGen">
+                <Select value={voiceId} onValueChange={setVoiceId} disabled={!catalog}>
+                  <SelectTrigger><SelectValue placeholder="Carregando vozes..." /></SelectTrigger>
+                  <SelectContent>
+                    {catalog?.voices.map((voice) => (
+                      <SelectItem key={voice.id} value={voice.id}>{voice.name}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </Field>

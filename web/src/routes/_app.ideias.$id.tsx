@@ -1,9 +1,10 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel } from "@/components/compliance-panel";
 import { genId, useStore } from "@/lib/store";
+import { appendScript } from "@/lib/api/local";
 import {
   familiaLabel,
   ideaStatusLabel,
@@ -14,7 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { ArrowLeft, Save, Sparkles } from "lucide-react";
-import type { Idea } from "@/lib/mock-data";
+import type { Idea, Script } from "@/lib/mock-data";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/ideias/$id")({
@@ -34,6 +35,10 @@ function IdeiaDetalhe() {
 
   const [draft, setDraft] = useState(idea);
 
+  useEffect(() => {
+    if (idea) setDraft(idea);
+  }, [idea]);
+
   if (!idea || !draft) {
     return (
       <AppShell title="Ideia">
@@ -51,7 +56,7 @@ function IdeiaDetalhe() {
   function gerarRoteiro() {
     if (!idea || !draft) return;
     const nid = genId("s");
-    addScript({
+    const script: Script = {
       id: nid,
       ideaId: idea.id,
       categoria: draft.familia,
@@ -68,9 +73,16 @@ function IdeiaDetalhe() {
       formatoSugerido: "Reels",
       status: "aguardando_validacao",
       criadoEm: new Date().toISOString(),
-    });
+    };
+    addScript(script);
     updateIdea(idea.id, { status: "aprovado" });
-    toast.success("Roteiro criado.");
+    appendScript(script)
+      .then(() => toast.success("Roteiro criado e salvo no Sheets."))
+      .catch((err) =>
+        toast.error(
+          `Roteiro criado localmente, mas falhou ao salvar: ${err instanceof Error ? err.message : ""}`,
+        ),
+      );
     navigate({ to: "/roteiros/$id", params: { id: nid } });
   }
 

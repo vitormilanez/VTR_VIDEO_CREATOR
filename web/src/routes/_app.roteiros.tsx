@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
@@ -35,10 +35,14 @@ export const Route = createFileRoute("/_app/roteiros")({
       { property: "og:description", content: "Fila de roteiros medicos." },
     ],
   }),
-  component: RoteirosPage,
+  component: RoteirosLayout,
 });
 
-function RoteirosPage() {
+function RoteirosLayout() {
+  return <Outlet />;
+}
+
+export function RoteirosPage() {
   const scripts = useStore((s) => s.scripts);
   const [status, setStatus] = useState("todos");
   const [prioridade, setPrioridade] = useState("todas");

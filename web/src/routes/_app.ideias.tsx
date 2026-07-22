@@ -1,4 +1,4 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
@@ -50,7 +50,7 @@ export const Route = createFileRoute("/_app/ideias")({
       { property: "og:description", content: "Funil de ideias educativas." },
     ],
   }),
-  component: IdeiasPage,
+  component: IdeiasLayout,
 });
 
 const familias: ThemeFamily[] = [
@@ -61,7 +61,11 @@ const familias: ThemeFamily[] = [
   "educativo",
 ];
 
-function IdeiasPage() {
+function IdeiasLayout() {
+  return <Outlet />;
+}
+
+export function IdeiasPage() {
   const ideas = useStore((s) => s.ideas);
   const updateIdea = useStore((s) => s.updateIdea);
   const addScript = useStore((s) => s.addScript);

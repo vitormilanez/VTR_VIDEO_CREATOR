@@ -90,11 +90,27 @@ export async function huntTrends(): Promise<{ ok: boolean; added?: number }> {
   return (await res.json()) as { ok: boolean; added?: number };
 }
 
-export async function createHeyGenVideo(scriptId: string): Promise<VideoJob> {
+export interface HeyGenCatalog {
+  avatars: Array<{ id: string; name: string; orientation: "portrait" | "landscape" }>;
+  voices: Array<{ id: string; name: string; gender: string }>;
+  defaultAvatarId?: string | null;
+  defaultVoiceId?: string | null;
+}
+
+export async function fetchHeyGenCatalog(): Promise<HeyGenCatalog> {
+  const res = await fetch(`${BASE}/api/heygen/catalog`);
+  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel carregar avatares e vozes."));
+  return (await res.json()) as HeyGenCatalog;
+}
+
+export async function createHeyGenVideo(
+  scriptId: string,
+  selection: { avatarId?: string; voiceId?: string },
+): Promise<VideoJob> {
   const res = await fetch(`${BASE}/api/videos`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scriptId }),
+    body: JSON.stringify({ scriptId, ...selection }),
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel enviar ao HeyGen."));
   return ((await res.json()) as { job: VideoJob }).job;
