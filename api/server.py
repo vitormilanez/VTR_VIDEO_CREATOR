@@ -511,10 +511,78 @@ def _find_script(script_id: str) -> dict[str, Any]:
     return script
 
 
+def _heygen_wallet(command: str) -> tuple[float | None, str | None]:
+    proc = subprocess.run(
+        [command, "user", "me", "get"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr or proc.stdout)
+    response = _read_json_output(proc)
+    wallet = _find_value(response, "wallet") or {}
+    if not isinstance(wallet, dict):
+        return None, None
+    balance = wallet.get("remaining_balance")
+    currency = wallet.get("currency")
+    return (float(balance) if isinstance(balance, (int, float)) else None, currency if isinstance(currency, str) else None)
+
+
+@app.get("/api/ai-costs")
+def ai_costs() -> dict:
+    """Retorna o saldo real dos provedores de IA conectados ao projeto."""
+    heygen: dict[str, Any] = {
+        "id": "heygen",
+        "name": "HeyGen",
+        "description": "Videos com avatar e voz",
+        "status": "conectado",
+        "currency": "USD",
+        "remainingBalance": None,
+        "trackedSpend": 0.0,
+        "note": "O custo e registrado pela diferenca de saldo em cada novo video.",
+    }
+    try:
+        command = _heygen_cli()
+        balance, currency = _heygen_wallet(command)
+        heygen["remainingBalance"] = balance
+        if currency:
+            heygen["currency"] = currency.upper()
+        heygen["trackedSpend"] = round(
+            sum(float(job.get("costUsd", 0)) for job in _load_video_jobs()),
+            2,
+        )
+    except (HTTPException, OSError, RuntimeError, subprocess.TimeoutExpired):
+        heygen["status"] = "indisponivel"
+        heygen["note"] = "Nao foi possivel consultar o saldo agora."
+
+    return {
+        "updatedAt": _now(),
+        "providers": [
+            heygen,
+            {
+                "id": "gemini",
+                "name": "Gemini via Lovable AI Gateway",
+                "description": "Geracao de ideias e roteiros",
+                "status": "nao_conectado",
+                "currency": None,
+                "remainingBalance": None,
+                "trackedSpend": None,
+                "note": "Nenhuma chamada Gemini esta conectada a esta versao do app.",
+            },
+        ],
+    }
+
+
 @app.post("/api/videos")
 def create_video(payload: VideoCreateIn) -> dict:
     """Cria um job real no HeyGen somente apos o clique de enviar para producao."""
     command = _heygen_cli()
+    try:
+        balance_before, currency_before = _heygen_wallet(command)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
+        balance_before, currency_before = None, None
     script = _find_script(payload.scriptId)
     avatar_id = payload.avatarId or os.getenv("HEYGEN_DEFAULT_AVATAR_ID")
     voice_id = payload.voiceId or os.getenv("HEYGEN_DEFAULT_VOICE_ID")
@@ -562,6 +630,13 @@ def create_video(payload: VideoCreateIn) -> dict:
         "remoteSessionId": session_id,
         "remoteVideoId": video_id or None,
     }
+    try:
+        balance_after, currency_after = _heygen_wallet(command)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
+        balance_after, currency_after = None, None
+    if balance_before is not None and balance_after is not None and balance_after <= balance_before:
+        job["costUsd"] = round(balance_before - balance_after, 2)
+        job["currency"] = (currency_after or currency_before or "USD").upper()
     jobs = _load_video_jobs()
     jobs.insert(0, job)
     _save_video_jobs(jobs)

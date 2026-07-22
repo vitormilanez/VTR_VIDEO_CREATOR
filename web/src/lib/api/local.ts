@@ -122,6 +122,28 @@ export async function refreshHeyGenVideo(jobId: string): Promise<VideoJob> {
   return ((await res.json()) as { job: VideoJob }).job;
 }
 
+export interface AiCostProvider {
+  id: string;
+  name: string;
+  description: string;
+  status: "conectado" | "nao_conectado" | "indisponivel";
+  currency: string | null;
+  remainingBalance: number | null;
+  trackedSpend: number | null;
+  note: string;
+}
+
+export interface AiCosts {
+  updatedAt: string;
+  providers: AiCostProvider[];
+}
+
+export async function fetchAiCosts(): Promise<AiCosts> {
+  const res = await fetch(`${BASE}/api/ai-costs`);
+  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel consultar os custos de IA."));
+  return (await res.json()) as AiCosts;
+}
+
 async function errorDetail(res: Response, fallback: string): Promise<string> {
   try {
     const body = (await res.json()) as { detail?: string };

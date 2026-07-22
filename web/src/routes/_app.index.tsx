@@ -1,10 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
 import { PipelineFlow, type PipelineStep } from "@/components/pipeline-flow";
 import { EmptyState } from "@/components/empty-state";
 import { useStore } from "@/lib/store";
+import { fetchAiCosts, type AiCosts } from "@/lib/api/local";
 import {
   familiaLabel,
   postStatusLabel,
@@ -19,6 +21,8 @@ import {
   CalendarDays,
   ShieldAlert,
   TrendingUp,
+  RefreshCcw,
+  WalletCards,
 } from "lucide-react";
 import {
   Table,
@@ -56,6 +60,25 @@ function Dashboard() {
   const jobs = useStore((s) => s.videoJobs);
   const posts = useStore((s) => s.calendarPosts);
   const performance = useStore((s) => s.performance);
+  const [aiCosts, setAiCosts] = useState<AiCosts | null>(null);
+  const [aiCostsError, setAiCostsError] = useState("");
+  const [loadingAiCosts, setLoadingAiCosts] = useState(false);
+
+  async function loadAiCosts() {
+    setLoadingAiCosts(true);
+    try {
+      setAiCosts(await fetchAiCosts());
+      setAiCostsError("");
+    } catch (err) {
+      setAiCostsError(err instanceof Error ? err.message : "Nao foi possivel consultar os custos de IA.");
+    } finally {
+      setLoadingAiCosts(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadAiCosts();
+  }, []);
 
   const novasTendencias = trends.filter((t) => t.status !== "descartado").length;
   const ideiasNovas = ideas.filter((i) => i.status !== "descartado").length;
@@ -129,6 +152,65 @@ function Dashboard() {
           hint={`${engajamento.toLocaleString("pt-BR")} interacoes`}
         />
       </div>
+
+      <section className="mt-6 rounded-xl border bg-card shadow-sm">
+        <div className="flex items-center justify-between gap-3 border-b px-4 py-2.5">
+          <div>
+            <h2 className="font-display text-sm font-semibold">Custos de IA</h2>
+            <p className="text-[11px] text-muted-foreground">
+              Saldo e uso dos provedores conectados ao aplicativo.
+            </p>
+          </div>
+          <Button variant="secondary" size="sm" onClick={() => void loadAiCosts()} disabled={loadingAiCosts}>
+            <RefreshCcw className={`mr-1 h-3.5 w-3.5 ${loadingAiCosts ? "animate-spin" : ""}`} />
+            Atualizar
+          </Button>
+        </div>
+        {aiCostsError ? (
+          <p className="px-4 py-4 text-sm text-destructive">{aiCostsError}</p>
+        ) : !aiCosts ? (
+          <p className="px-4 py-4 text-sm text-muted-foreground">Consultando provedores...</p>
+        ) : (
+          <div>
+            {aiCosts.providers.map((provider) => (
+              <div key={provider.id} className="flex items-center justify-between gap-4 border-b px-4 py-3 last:border-b-0">
+                <div className="flex min-w-0 items-center gap-3">
+                  <WalletCards className="h-4 w-4 shrink-0 text-status-info" />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">{provider.name}</p>
+                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${provider.status === "conectado" ? "bg-status-success/10 text-status-success" : provider.status === "nao_conectado" ? "bg-muted text-muted-foreground" : "bg-destructive/10 text-destructive"}`}>
+                        {provider.status === "conectado" ? "Conectado" : provider.status === "nao_conectado" ? "Nao conectado" : "Indisponivel"}
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{provider.description}. {provider.note}</p>
+                  </div>
+                </div>
+                <div className="shrink-0 text-right">
+                  {provider.remainingBalance !== null && provider.currency ? (
+                    <>
+                      <p className="font-display text-base font-semibold tabular-nums">
+                        {formatCurrency(provider.remainingBalance, provider.currency)}
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">saldo disponivel</p>
+                      {provider.trackedSpend !== null ? (
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          Gasto rastreado: {formatCurrency(provider.trackedSpend, provider.currency)}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">Sem uso registrado</p>
+                  )}
+                </div>
+              </div>
+            ))}
+            <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
+              Atualizado em {new Date(aiCosts.updatedAt).toLocaleString("pt-BR")}. O total gasto so aparece quando o provedor informar custo por chamada ou video.
+            </p>
+          </div>
+        )}
+      </section>
 
       <section className="mt-6 grid gap-4 lg:grid-cols-2">
         <div className="rounded-xl border bg-card shadow-sm">
@@ -318,7 +400,7 @@ function Dashboard() {
       </section>
 
       <p className="mt-4 flex items-center gap-1 text-[11px] text-muted-foreground">
-        Dados do Radar sao sincronizados do Google Sheets. Producao e performance seguem em modo mockado. Use{" "}
+        Dados do Radar sao sincronizados do Google Sheets. A producao usa HeyGen; performance segue em modo mockado. Use{" "}
         <Link to="/configuracoes" className="text-status-info underline">
           Configuracoes
         </Link>{" "}
@@ -336,4 +418,8 @@ function fonteLabel(fonte: string): string {
   } catch {
     return fonte;
   }
+}
+
+function formatCurrency(value: number, currency: string): string {
+  return new Intl.NumberFormat("pt-BR", { style: "currency", currency }).format(value);
 }

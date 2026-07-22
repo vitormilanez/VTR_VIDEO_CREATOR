@@ -24,7 +24,7 @@ export function MetricCard({
   };
   const t = toneStyles[tone];
   return (
-    <Card className={cn("relative overflow-hidden rounded-xl border shadow-sm transition-shadow hover:shadow-md", t.border)}>
+    <Card className={cn("relative overflow-hidden rounded-xl border bg-gradient-to-br from-card to-muted/40 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md", t.border)}>
       {tone !== "default" && <div className={cn("absolute inset-x-0 top-0 h-0.5", t.accent)} />}
       <CardContent className="flex items-start justify-between gap-3 p-4">
         <div className="min-w-0">
