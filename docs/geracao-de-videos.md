@@ -45,19 +45,27 @@ Este e o caminho mais rapido para gerar alguns videos de teste:
 7. Baixar o video final.
 8. Colar o link na aba `Roteiros` ou `Calendario`.
 
-## Automacao futura com API
+## Integracao pelo app local
 
-Quando a conta/API do HeyGen estiver pronta, a automacao deve seguir este fluxo:
+A tela de roteiro envia videos somente apos o clique explicito em `Enviar para producao`.
+O backend cria um job local, consulta o status sob demanda e preserva o link e o preview retornados pelo HeyGen.
 
-1. Ler linhas da aba `Roteiros` com status `Aprovado para video`.
-2. Enviar roteiro para o HeyGen.
-3. Criar job de video.
-4. Atualizar status para `Video solicitado`.
-5. Consultar o job ate ficar pronto.
-6. Salvar o link do video na planilha.
-7. Atualizar status para `Video pronto`.
+Para habilitar a conta nesta maquina, instale e autentique o CLI oficial uma unica vez:
 
-Regra: nao enviar para HeyGen sem aprovacao humana, porque isso pode gastar creditos.
+```bash
+curl -fsSL https://static.heygen.ai/cli/install.sh | bash
+heygen auth login
+```
+
+Mantenha estas variaveis preenchidas apenas no `.env` local:
+
+```bash
+HEYGEN_API_KEY="..."
+HEYGEN_DEFAULT_AVATAR_ID="..."
+HEYGEN_DEFAULT_VOICE_ID="..."
+```
+
+Depois reinicie `./dev.sh`. O fluxo e manual: criar video pode consumir creditos; atualizar status apenas consulta o job ja existente.
 
 ## HeyGen API
 

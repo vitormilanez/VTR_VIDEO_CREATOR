@@ -93,6 +93,8 @@ export interface VideoJob {
   thumbnailUrl?: string;
   duracaoSegundos?: number;
   erro?: string;
+  remoteSessionId?: string;
+  remoteVideoId?: string;
 }
 
 export interface CalendarPost {
@@ -104,16 +106,30 @@ export interface CalendarPost {
   canal: Canal;
   status: PostStatus;
   publicadoEm?: string;
+  // Campos reais da aba Calendario
+  tema?: string;
+  formato?: string;
+  responsavel?: string;
+  link?: string;
 }
 
 export interface PerformanceMetric {
   id: string;
   postId: string;
+  tema?: string;
+  canal?: Canal;
   views: number;
   likes: number;
+  retencao?: number; // %
   comments: number;
   shares: number;
   saves: number;
+  novosSeguidores?: number;
+  cliques?: number;
+  leads?: number;
+  nota?: string;
+  aprendizado?: string;
+  link?: string;
   coletadoEm: string;
 }
 

@@ -7,6 +7,7 @@ import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import { videoJobStatusLabel, canalLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
+import { refreshHeyGenVideo } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
@@ -26,7 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ArrowLeft, CalendarPlus, Film, PlayCircle } from "lucide-react";
+import { ArrowLeft, CalendarPlus, ExternalLink, Film, RefreshCcw } from "lucide-react";
 import type { Canal, VideoJobStatus } from "@/lib/mock-data";
 import { toast } from "sonner";
 
@@ -41,7 +42,7 @@ function VideoDetalhe() {
   const { id } = Route.useParams();
   const job = useStore((s) => s.videoJobs.find((v) => v.id === id));
   const script = useStore((s) => (job ? s.scripts.find((x) => x.id === job.scriptId) : undefined));
-  const advance = useStore((s) => s.advanceVideoJob);
+  const updateVideoJob = useStore((s) => s.updateVideoJob);
   const agendar = useStore((s) => s.agendarPost);
   const navigate = useNavigate();
 
@@ -73,21 +74,21 @@ function VideoDetalhe() {
           <Button variant="ghost" size="sm" asChild>
             <Link to="/producao"><ArrowLeft className="mr-1 h-4 w-4" /> Voltar</Link>
           </Button>
-          <WithTooltip label={job.status === "pronto" ? "Video ja concluido" : "Avancar status mockado"}>
+          <WithTooltip label="Consultar status no HeyGen">
             <Button
               size="sm"
               variant="secondary"
-              disabled={job.status === "pronto"}
-              onClick={() => {
+              onClick={async () => {
                 try {
-                  const next = advance(job.id);
-                  if (next) toast.success(`Status: ${videoJobStatusLabel[next].label}`);
-                } catch {
-                  toast.error("Falha ao avancar status.");
+                  const updated = await refreshHeyGenVideo(job.id);
+                  updateVideoJob(job.id, updated);
+                  toast.success(`Status: ${videoJobStatusLabel[updated.status].label}`);
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : "Falha ao consultar o HeyGen.");
                 }
               }}
             >
-              <PlayCircle className="mr-1 h-4 w-4" /> Avancar status
+              <RefreshCcw className="mr-1 h-4 w-4" /> Atualizar status
             </Button>
           </WithTooltip>
           <Dialog open={open} onOpenChange={setOpen}>
@@ -169,17 +170,35 @@ function VideoDetalhe() {
               <Info label="Criado em" value={new Date(job.criadoEm).toLocaleString("pt-BR")} />
               <Info label="Atualizado em" value={new Date(job.atualizadoEm).toLocaleString("pt-BR")} />
               {job.duracaoSegundos ? <Info label="Duracao" value={`${job.duracaoSegundos}s`} /> : null}
-              {job.videoUrl ? <Info label="Arquivo" value={job.videoUrl} /> : null}
+              {job.videoUrl ? <Info label="Arquivo" value="Video disponivel" /> : null}
             </div>
+            {job.videoUrl ? (
+              <a
+                href={job.videoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-3 inline-flex items-center gap-1 text-xs text-status-info hover:underline"
+              >
+                Abrir video <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            ) : null}
           </div>
 
           <div className="rounded-xl border bg-card p-4 shadow-sm">
-            <h3 className="mb-2 font-display text-sm font-semibold">Preview (mock)</h3>
-            <div className="flex aspect-[9/16] max-w-[240px] items-center justify-center rounded-lg bg-linear-to-br from-primary/30 via-primary/10 to-transparent text-primary">
-              <Film className="h-10 w-10" />
-            </div>
+            <h3 className="mb-2 font-display text-sm font-semibold">Preview</h3>
+            {job.thumbnailUrl ? (
+              <img
+                src={job.thumbnailUrl}
+                alt={`Preview de ${script?.titulo ?? "video"}`}
+                className="aspect-[9/16] max-w-[240px] rounded-lg object-cover"
+              />
+            ) : (
+              <div className="flex aspect-[9/16] max-w-[240px] items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                <Film className="h-10 w-10" />
+              </div>
+            )}
             <p className="mt-2 text-[11px] text-muted-foreground">
-              Preview real disponivel apos integracao com HeyGen.
+              {job.thumbnailUrl ? "Preview retornado pelo HeyGen." : "O preview aparece quando o HeyGen disponibiliza o video."}
             </p>
           </div>
         </div>

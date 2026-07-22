@@ -11,7 +11,8 @@ import {
   riskLabel,
   scriptStatusLabel,
 } from "@/lib/status";
-import { genId, useStore } from "@/lib/store";
+import { useStore } from "@/lib/store";
+import { createHeyGenVideo } from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,6 +47,7 @@ function RoteiroDetalhe() {
   const navigate = useNavigate();
 
   const [draft, setDraft] = useState<Script | undefined>(script);
+  const [sending, setSending] = useState(false);
   const dirty = useMemo(
     () => JSON.stringify(draft) !== JSON.stringify(script),
     [draft, script],
@@ -81,20 +83,19 @@ function RoteiroDetalhe() {
     validadoEm: draft.validadoEm,
   });
 
-  function enviarProducao() {
+  async function enviarProducao() {
     if (!draft || !script) return;
-    const nid = genId("v");
-    addVideoJob({
-      id: nid,
-      scriptId: script.id,
-      status: "fila",
-      provider: "heygen",
-      progresso: 0,
-      criadoEm: new Date().toISOString(),
-      atualizadoEm: new Date().toISOString(),
-    });
-    toast.success("Roteiro enviado para producao (mock).");
-    navigate({ to: "/producao/$id", params: { id: nid } });
+    setSending(true);
+    try {
+      const job = await createHeyGenVideo(script.id);
+      addVideoJob(job);
+      toast.success("Roteiro enviado para producao no HeyGen.");
+      navigate({ to: "/producao/$id", params: { id: job.id } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel enviar ao HeyGen.");
+    } finally {
+      setSending(false);
+    }
   }
 
   return (
@@ -124,12 +125,18 @@ function RoteiroDetalhe() {
           </WithTooltip>
           <ConfirmAction
             title="Enviar para producao?"
-            description="Um job mockado sera criado na fila do HeyGen. Sem consumo de creditos reais."
+            description="Este clique envia o roteiro ao HeyGen e pode consumir creditos da conta."
             confirmLabel="Enviar"
             onConfirm={enviarProducao}
             trigger={
-              <WithTooltip label="Enviar para producao">
-                <Button size="sm">
+              <WithTooltip
+                label={
+                  dirty
+                    ? "Salve as alteracoes antes de enviar"
+                    : "Enviar roteiro ao HeyGen"
+                }
+              >
+                <Button size="sm" disabled={dirty || sending}>
                   <Film className="mr-1 h-4 w-4" /> Enviar para producao
                 </Button>
               </WithTooltip>

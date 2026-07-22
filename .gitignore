@@ -12,6 +12,7 @@ credentials.json
 .google_sheets_token.json
 client_secret*.json
 data/sheets_snapshot.json
+data/video_jobs.json
 *.log
 *.jsonl
 *.mp4

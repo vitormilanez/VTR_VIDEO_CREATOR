@@ -2,6 +2,7 @@
 // do Google Sheets. Base configuravel via VITE_API_URL.
 import type { HydratePayload } from "../store";
 import type { Idea, Script } from "../mock-data";
+import type { VideoJob } from "../mock-data";
 
 const BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 
@@ -23,7 +24,7 @@ export async function refreshSnapshot(): Promise<{ ok: boolean }> {
 
 /** Grava o novo status de um item de volta no Google Sheets. */
 export async function setSheetStatus(
-  tab: "radar" | "ideias" | "roteiros",
+  tab: "radar" | "ideias" | "roteiros" | "calendario",
   itemId: string,
   status: string,
 ): Promise<{ ok: boolean }> {
@@ -87,4 +88,29 @@ export async function huntTrends(): Promise<{ ok: boolean; added?: number }> {
     throw new Error(detail);
   }
   return (await res.json()) as { ok: boolean; added?: number };
+}
+
+export async function createHeyGenVideo(scriptId: string): Promise<VideoJob> {
+  const res = await fetch(`${BASE}/api/videos`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scriptId }),
+  });
+  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel enviar ao HeyGen."));
+  return ((await res.json()) as { job: VideoJob }).job;
+}
+
+export async function refreshHeyGenVideo(jobId: string): Promise<VideoJob> {
+  const res = await fetch(`${BASE}/api/videos/${jobId}/refresh`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel consultar o HeyGen."));
+  return ((await res.json()) as { job: VideoJob }).job;
+}
+
+async function errorDetail(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await res.json()) as { detail?: string };
+    return body.detail || fallback;
+  } catch {
+    return fallback;
+  }
 }

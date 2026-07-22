@@ -7,6 +7,7 @@ import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { videoJobStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
+import { refreshHeyGenVideo } from "@/lib/api/local";
 import type { VideoJobStatus } from "@/lib/mock-data";
 import {
   Table,
@@ -18,14 +19,14 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { ExternalLink, Film, PlayCircle } from "lucide-react";
+import { ExternalLink, Film, RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/producao")({
   head: () => ({
     meta: [
       { title: "Producao de videos | AI Video Creator" },
-      { name: "description", content: "Fila de producao HeyGen (mock)." },
+      { name: "description", content: "Fila de producao de videos no HeyGen." },
       { property: "og:title", content: "Producao de videos | AI Video Creator" },
       { property: "og:description", content: "Fila HeyGen para reels medicos." },
     ],
@@ -36,7 +37,7 @@ export const Route = createFileRoute("/_app/producao")({
 function ProducaoPage() {
   const jobs = useStore((s) => s.videoJobs);
   const scripts = useStore((s) => s.scripts);
-  const advance = useStore((s) => s.advanceVideoJob);
+  const updateVideoJob = useStore((s) => s.updateVideoJob);
   const [status, setStatus] = useState("todos");
 
   const counts: Record<VideoJobStatus, number> = { fila: 0, processando: 0, pronto: 0, erro: 0 };
@@ -49,7 +50,7 @@ function ProducaoPage() {
       title="Producao de videos"
       actions={
         <div className="text-[11px] text-muted-foreground">
-          Modo mockado — nenhum credito HeyGen consumido.
+          Jobs reais sao criados somente pelo envio explicito de um roteiro.
         </div>
       }
     >
@@ -69,7 +70,7 @@ function ProducaoPage() {
         <EmptyState
           icon={<Film className="h-4 w-4" />}
           title="Nenhum video nesta lista"
-          description="Aprove clinicamente um roteiro e envie para producao."
+          description="Envie um roteiro da tela de Roteiros para iniciar a producao."
           action={
             <Button asChild size="sm" variant="secondary">
               <Link to="/roteiros">Ir para Roteiros</Link>
@@ -118,30 +119,21 @@ function ProducaoPage() {
                     <TableCell><StatusBadge {...videoJobStatusLabel[j.status]} /></TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
-                        <WithTooltip
-                          label={
-                            j.status === "pronto"
-                              ? "Video ja esta pronto"
-                              : "Avancar status (mock)"
-                          }
-                        >
+                        <WithTooltip label="Consultar status no HeyGen">
                           <Button
                             size="sm"
                             variant="secondary"
-                            disabled={j.status === "pronto"}
-                            onClick={() => {
+                            onClick={async () => {
                               try {
-                                const next = advance(j.id);
-                                if (next)
-                                  toast.success(
-                                    `Status: ${videoJobStatusLabel[next].label}`,
-                                  );
-                              } catch {
-                                toast.error("Falha ao avancar o video.");
+                                const updated = await refreshHeyGenVideo(j.id);
+                                updateVideoJob(j.id, updated);
+                                toast.success(`Status: ${videoJobStatusLabel[updated.status].label}`);
+                              } catch (err) {
+                                toast.error(err instanceof Error ? err.message : "Falha ao consultar o HeyGen.");
                               }
                             }}
                           >
-                            <PlayCircle className="mr-1 h-3.5 w-3.5" /> Avancar
+                            <RefreshCcw className="mr-1 h-3.5 w-3.5" /> Atualizar
                           </Button>
                         </WithTooltip>
                         <Button asChild size="sm" variant="ghost" title="Abrir detalhe do video">

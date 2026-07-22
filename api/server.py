@@ -13,9 +13,13 @@ ou:
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +29,7 @@ from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT = ROOT / "data" / "sheets_snapshot.json"
+VIDEO_JOBS = ROOT / "data" / "video_jobs.json"
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
 
@@ -40,6 +45,22 @@ app.add_middleware(
 # --------------------------------------------------------------------------- #
 # Helpers de normalizacao (colunas PT-BR do Sheets -> tipos do frontend)
 # --------------------------------------------------------------------------- #
+def _load_env_file() -> None:
+    """Carrega variaveis locais sem sobrescrever variaveis ja definidas."""
+    env_file = ROOT / ".env"
+    if not env_file.exists():
+        return
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_env_file()
+
+
 def _load_snapshot() -> dict[str, Any]:
     if not SNAPSHOT.exists():
         raise HTTPException(
@@ -50,6 +71,104 @@ def _load_snapshot() -> dict[str, Any]:
             ),
         )
     return json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_video_jobs() -> list[dict[str, Any]]:
+    if not VIDEO_JOBS.exists():
+        return []
+    try:
+        data = json.loads(VIDEO_JOBS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_video_jobs(jobs: list[dict[str, Any]]) -> None:
+    VIDEO_JOBS.parent.mkdir(parents=True, exist_ok=True)
+    temporary = VIDEO_JOBS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(VIDEO_JOBS)
+
+
+def _heygen_cli() -> str:
+    command = shutil.which("heygen")
+    if not command:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "CLI do HeyGen nao encontrado. Instale-o e autentique a conta antes de enviar "
+                "videos para producao."
+            ),
+        )
+    if not os.getenv("HEYGEN_API_KEY"):
+        raise HTTPException(status_code=503, detail="Defina HEYGEN_API_KEY no arquivo .env.")
+    return command
+
+
+def _read_json_output(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    raw = (proc.stdout or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"Resposta invalida do HeyGen: {raw[-300:]}") from exc
+    return data if isinstance(data, dict) else {"data": data}
+
+
+def _find_value(value: Any, *keys: str) -> Any:
+    if isinstance(value, dict):
+        for key in keys:
+            if value.get(key) not in (None, ""):
+                return value[key]
+        for child in value.values():
+            found = _find_value(child, *keys)
+            if found not in (None, ""):
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = _find_value(child, *keys)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+def _job_status(payload: dict[str, Any]) -> tuple[str, int]:
+    raw = str(_find_value(payload, "status", "state") or "").lower()
+    if raw in {"completed", "complete", "success", "done"}:
+        return "pronto", 100
+    if raw in {"failed", "error", "cancelled", "canceled"}:
+        return "erro", 0
+    if raw in {"thinking", "generating", "processing", "in_progress"}:
+        return "processando", 50
+    return "fila", 0
+
+
+def _script_text(script: dict[str, Any]) -> str:
+    parts = [
+        script.get("hook"),
+        script.get("dorConflito"),
+        script.get("explicacaoSimples"),
+        script.get("virada"),
+        script.get("cta"),
+    ]
+    return "\n\n".join(str(part).strip() for part in parts if str(part or "").strip())
+
+
+def _video_prompt(script: dict[str, Any]) -> str:
+    texto = _script_text(script)
+    return "\n\n".join(
+        [
+            "Create a portrait educational video in Brazilian Portuguese for social media.",
+            "The selected presenter explains one health topic with a clear, calm and non-prescriptive tone.",
+            "Do not mention medication doses, promise outcomes, or make sensational claims.",
+            "This script is a concept and theme to convey - not a verbatim transcript. You have full creative freedom to expand, elaborate, add examples, and fill the duration naturally. Do not pad with silence or pauses.",
+            f"SCRIPT (Portuguese):\n{texto}",
+            "Use minimal, clean styled visuals. Blue, black, and white as main colors. Leverage motion graphics as B-rolls and A-roll overlays. Include an intro sequence and an outro with a gentle call to action.",
+        ]
+    )
 
 
 def _int(value: Any) -> int:
@@ -253,6 +372,10 @@ def map_calendar(rows: list[dict]) -> list[dict]:
             {
                 "id": f"p-{i}",
                 "titulo": r.get("Título/Hook") or r.get("Tema") or "Post",
+                "tema": r.get("Tema") or None,
+                "formato": r.get("Formato") or None,
+                "responsavel": r.get("Responsável") or None,
+                "link": _link(r.get("Link post")),
                 "dataAgendada": _iso(r.get("Data publicação")),
                 "canal": _canal(r.get("Canal")),
                 "status": _post_status(r.get("Status")),
@@ -268,11 +391,20 @@ def map_performance(rows: list[dict]) -> list[dict]:
             {
                 "id": f"m-{i}",
                 "postId": f"perf-{i}",
+                "tema": r.get("Tema") or None,
+                "canal": _canal(r.get("Canal")),
                 "views": _int(r.get("Views")),
                 "likes": 0,
+                "retencao": _int(r.get("Retenção %")),
                 "comments": _int(r.get("Comentários")),
                 "shares": _int(r.get("Compartilhamentos")),
                 "saves": _int(r.get("Salvamentos")),
+                "novosSeguidores": _int(r.get("Novos seguidores")),
+                "cliques": _int(r.get("Cliques")),
+                "leads": _int(r.get("Leads")),
+                "nota": r.get("Nota") or None,
+                "aprendizado": r.get("Aprendizado") or None,
+                "link": _link(r.get("Link post")),
                 "coletadoEm": _iso(r.get("Data")),
             }
         )
@@ -310,12 +442,127 @@ def state() -> dict:
         "trends": map_trends(sheets.get("radar", [])),
         "ideas": map_ideas(sheets.get("ideias", [])),
         "scripts": map_scripts(sheets.get("roteiros", [])),
-        "videoJobs": [],  # produzidos sob demanda (HeyGen)
+        "videoJobs": _load_video_jobs(),
         "calendarPosts": map_calendar(sheets.get("calendario", [])),
         "performance": map_performance(sheets.get("performance", [])),
         "settings": DEFAULT_SETTINGS,
         "updatedAt": snap.get("updated_at"),
     }
+
+
+# --------------------------------------------------------------------------- #
+# HeyGen: envio e consulta somente por acao explicita do usuario
+# --------------------------------------------------------------------------- #
+class VideoCreateIn(BaseModel):
+    scriptId: str
+    avatarId: str | None = None
+    voiceId: str | None = None
+
+
+def _find_script(script_id: str) -> dict[str, Any]:
+    snapshot = _load_snapshot()
+    scripts = map_scripts(snapshot.get("sheets", {}).get("roteiros", []))
+    script = next((item for item in scripts if item["id"] == script_id), None)
+    if not script:
+        raise HTTPException(status_code=404, detail="Roteiro nao encontrado no snapshot.")
+    if not _script_text(script):
+        raise HTTPException(status_code=400, detail="O roteiro nao possui texto para gerar o video.")
+    return script
+
+
+@app.post("/api/videos")
+def create_video(payload: VideoCreateIn) -> dict:
+    """Cria um job real no HeyGen somente apos o clique de enviar para producao."""
+    command = _heygen_cli()
+    script = _find_script(payload.scriptId)
+    avatar_id = payload.avatarId or os.getenv("HEYGEN_DEFAULT_AVATAR_ID")
+    voice_id = payload.voiceId or os.getenv("HEYGEN_DEFAULT_VOICE_ID")
+    if not avatar_id or not voice_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Configure HEYGEN_DEFAULT_AVATAR_ID e HEYGEN_DEFAULT_VOICE_ID no .env.",
+        )
+
+    args = [
+        command,
+        "video-agent",
+        "create",
+        "--prompt",
+        _video_prompt(script),
+        "--avatar-id",
+        avatar_id,
+        "--voice-id",
+        voice_id,
+        "--orientation",
+        "portrait",
+    ]
+    try:
+        proc = subprocess.run(args, cwd=str(ROOT), capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="HeyGen demorou demais para aceitar o job.") from exc
+    if proc.returncode != 0:
+        raise HTTPException(status_code=502, detail=(proc.stderr or proc.stdout or "Falha ao criar video no HeyGen.")[-500:])
+
+    response = _read_json_output(proc)
+    session_id = _find_value(response, "session_id", "sessionId")
+    video_id = _find_value(response, "video_id", "videoId", "id")
+    if not session_id:
+        raise HTTPException(status_code=502, detail="HeyGen nao retornou o identificador da sessao.")
+
+    now = _now()
+    job = {
+        "id": f"v-{uuid.uuid4().hex[:12]}",
+        "scriptId": payload.scriptId,
+        "status": "fila",
+        "provider": "heygen",
+        "progresso": 0,
+        "criadoEm": now,
+        "atualizadoEm": now,
+        "remoteSessionId": session_id,
+        "remoteVideoId": video_id or None,
+    }
+    jobs = _load_video_jobs()
+    jobs.insert(0, job)
+    _save_video_jobs(jobs)
+    return {"ok": True, "job": job}
+
+
+@app.post("/api/videos/{job_id}/refresh")
+def refresh_video(job_id: str) -> dict:
+    """Consulta o HeyGen e atualiza um job local ja criado."""
+    command = _heygen_cli()
+    jobs = _load_video_jobs()
+    job = next((item for item in jobs if item.get("id") == job_id), None)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de video nao encontrado.")
+    session_id = job.get("remoteSessionId")
+    if not session_id:
+        raise HTTPException(status_code=500, detail="Job sem sessao HeyGen.")
+    try:
+        proc = subprocess.run(
+            [command, "video-agent", "get", "--session-id", str(session_id)],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="HeyGen demorou demais para responder.") from exc
+    if proc.returncode != 0:
+        raise HTTPException(status_code=502, detail=(proc.stderr or proc.stdout or "Falha ao consultar video no HeyGen.")[-500:])
+
+    response = _read_json_output(proc)
+    status, progress = _job_status(response)
+    job["status"] = status
+    job["progresso"] = progress
+    job["atualizadoEm"] = _now()
+    job["remoteVideoId"] = _find_value(response, "video_id", "videoId") or job.get("remoteVideoId")
+    job["videoUrl"] = _find_value(response, "video_url", "videoUrl", "video_page_url", "videoPageUrl") or job.get("videoUrl")
+    job["thumbnailUrl"] = _find_value(response, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
+    if status == "erro":
+        job["erro"] = str(_find_value(response, "error", "message", "detail") or "HeyGen nao concluiu o video.")
+    _save_video_jobs(jobs)
+    return {"ok": True, "job": job}
 
 
 def _run(script_args: list[str], timeout: int) -> subprocess.CompletedProcess:
@@ -383,8 +630,14 @@ TAB_RANGE = {
     "radar": "'Radar Tendencias'!A:K",
     "ideias": "'Ideias'!A:J",
     "roteiros": "'Roteiros'!A:O",
+    "calendario": "'Calendario'!A:J",
 }
-TAB_TITLE = {"radar": "Radar Tendencias", "ideias": "Ideias", "roteiros": "Roteiros"}
+TAB_TITLE = {
+    "radar": "Radar Tendencias",
+    "ideias": "Ideias",
+    "roteiros": "Roteiros",
+    "calendario": "Calendario",
+}
 
 # Enum interno do frontend -> rotulo PT-BR gravado na planilha.
 STATUS_LABELS = {
@@ -404,6 +657,11 @@ STATUS_LABELS = {
         "em_revisao": "Em revisão",
         "aprovado_clinicamente": "Aprovado clinicamente",
         "rejeitado": "Rejeitado",
+    },
+    "calendario": {
+        "pendente": "Pendente",
+        "agendado": "Agendado",
+        "publicado": "Publicado",
     },
 }
 

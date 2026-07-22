@@ -18,6 +18,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { ConfirmAction } from "@/components/confirm-action";
 import { canalLabel, postStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
+import { setSheetStatus } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, CheckCircle2, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -56,10 +57,19 @@ function CalendarioPage() {
   const posts = useStore((s) => s.calendarPosts);
   const updatePost = useStore((s) => s.updateCalendarPost);
   const marcarPublicado = useStore((s) => s.marcarPublicado);
-  const registrarMetricas = useStore((s) => s.registrarMetricasFake);
   const [cursor, setCursor] = useState(new Date());
   const [editing, setEditing] = useState<CalendarPost | null>(null);
   const [novaData, setNovaData] = useState("");
+
+  async function publicar(id: string) {
+    marcarPublicado(id);
+    try {
+      await setSheetStatus("calendario", id, "publicado");
+      toast.success("Publicado e sincronizado com o Sheets.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao sincronizar.");
+    }
+  }
 
   const start = startOfWeek(startOfMonth(cursor), { weekStartsOn: 0 });
   const end = endOfWeek(endOfMonth(cursor), { weekStartsOn: 0 });
@@ -147,17 +157,9 @@ function CalendarioPage() {
                   <div className="mt-2 flex gap-1">
                     <ConfirmAction
                       title="Marcar como publicado?"
-                      description="Registra metricas fake automaticamente. Voce podera visualizar em Performance."
+                      description="Atualiza o status na aba Calendario do Google Sheets."
                       confirmLabel="Marcar publicado"
-                      onConfirm={() => {
-                        try {
-                          marcarPublicado(p.id);
-                          registrarMetricas(p.id);
-                          toast.success("Publicado (mock) e metricas registradas.");
-                        } catch {
-                          toast.error("Falha ao publicar.");
-                        }
-                      }}
+                      onConfirm={() => publicar(p.id)}
                       trigger={
                         <Button size="sm" variant="secondary" className="h-7 flex-1 text-xs">
                           <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Marcar publicado
@@ -177,8 +179,8 @@ function CalendarioPage() {
           </div>
 
           <div className="rounded-xl border bg-card p-3 text-[11px] text-muted-foreground shadow-sm">
-            Marcar como publicado registra metricas fake automaticamente — visualize em
-            Performance.
+            Marcar como publicado atualiza o status na aba Calendario do Sheets.
+            As metricas aparecem em Performance quando preenchidas na planilha.
             <BarChart3 className="ml-1 inline h-3 w-3 align-text-bottom" />
           </div>
         </div>
@@ -210,9 +212,7 @@ function CalendarioPage() {
                 variant="secondary"
                 onClick={() => {
                   if (!editing) return;
-                  marcarPublicado(editing.id);
-                  registrarMetricas(editing.id);
-                  toast.success("Publicado (mock).");
+                  void publicar(editing.id);
                   setEditing(null);
                 }}
               >
