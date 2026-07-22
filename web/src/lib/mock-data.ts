@@ -1,0 +1,152 @@
+// Tipos e seeds do AI Video Creator. Todos os dados sao mockados nesta fase.
+// TODO(cloud): substituir por tabelas Supabase (trends, ideas, scripts, ...).
+
+export type ThemeFamily =
+  | "medicamento"
+  | "comportamento"
+  | "metabolismo"
+  | "obesidade"
+  | "educativo";
+
+export type RiskLevel = "baixo" | "medio" | "alto";
+export type Prioridade = "alta" | "media" | "baixa";
+
+export type TrendStatus = "novo" | "em_analise" | "descartado";
+export type IdeaStatus = "novo" | "em_analise" | "aprovado" | "descartado";
+export type ScriptStatus =
+  | "aguardando_validacao"
+  | "aprovado_clinicamente"
+  | "rejeitado"
+  | "em_revisao";
+export type VideoJobStatus = "fila" | "processando" | "pronto" | "erro";
+export type PostStatus = "pendente" | "agendado" | "publicado";
+export type Canal = "instagram" | "tiktok" | "youtube_shorts";
+
+export interface Trend {
+  id: string;
+  titulo: string;
+  fonte: string;
+  volume: number;
+  familia: ThemeFamily;
+  risco: RiskLevel;
+  prioridade: Prioridade;
+  status: TrendStatus;
+  criadoEm: string;
+  notas?: string;
+  // Campos do radar real (Google Sheets)
+  subtema?: string;
+  sinal?: string;
+  dorPublico?: string;
+  link?: string;
+  potencial?: number; // 0..10
+}
+
+export interface Idea {
+  id: string;
+  trendId?: string;
+  titulo: string;
+  familia: ThemeFamily;
+  hook: string;
+  angulo: string;
+  tipo?: string;
+  publicoDor?: string;
+  cta: string;
+  linkOrigem?: string;
+  observacaoCompliance: string;
+  prioridade: Prioridade;
+  status: IdeaStatus;
+  criadoEm: string;
+}
+
+export interface Script {
+  id: string;
+  ideaId?: string;
+  categoria: ThemeFamily;
+  tema: string;
+  titulo: string;
+  hook: string;
+  dorConflito: string;
+  explicacaoSimples: string;
+  virada: string;
+  cta: string;
+  cuidadosMedicos: string;
+  risco: RiskLevel;
+  prioridade: Prioridade;
+  formatoSugerido: string;
+  aprovador?: string;
+  link?: string;
+  status: ScriptStatus;
+  criadoEm: string;
+  validadoEm?: string;
+  motivoRejeicao?: string;
+}
+
+export interface VideoJob {
+  id: string;
+  scriptId: string;
+  status: VideoJobStatus;
+  provider: "heygen";
+  progresso: number; // 0..100
+  criadoEm: string;
+  atualizadoEm: string;
+  videoUrl?: string;
+  thumbnailUrl?: string;
+  duracaoSegundos?: number;
+  erro?: string;
+}
+
+export interface CalendarPost {
+  id: string;
+  scriptId?: string;
+  videoJobId?: string;
+  titulo: string;
+  dataAgendada: string; // ISO
+  canal: Canal;
+  status: PostStatus;
+  publicadoEm?: string;
+}
+
+export interface PerformanceMetric {
+  id: string;
+  postId: string;
+  views: number;
+  likes: number;
+  comments: number;
+  shares: number;
+  saves: number;
+  coletadoEm: string;
+}
+
+export interface AppSettings {
+  temasPrioritarios: string[];
+  palavrasProibidas: string[];
+  integracoes: {
+    heygen: boolean;
+    meta: boolean;
+    googleSheets: boolean;
+  };
+}
+
+// Configuracoes padrao (nao sao dados mock de dominio; sao defaults de app).
+export const defaultSettings: AppSettings = {
+  temasPrioritarios: [
+    "obesidade",
+    "GLP-1",
+    "Mounjaro",
+    "Ozempic",
+    "Wegovy",
+    "dieta",
+    "metabolismo",
+    "comportamento alimentar",
+  ],
+  palavrasProibidas: [
+    "cura",
+    "milagre",
+    "garantido",
+    "sem esforco",
+    "resultado certo",
+    "emagrece rapido",
+    "prometo",
+  ],
+  integracoes: { heygen: false, meta: false, googleSheets: true },
+};

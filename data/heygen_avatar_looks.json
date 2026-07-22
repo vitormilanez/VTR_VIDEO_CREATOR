@@ -1,0 +1,27 @@
+{
+  "avatar_group_id": "6cfd960b8d8d45bcae1ce3bbe4bd74dd",
+  "created_at": "2026-07-20T17:05:00-03:00",
+  "selected_photos": [
+    {
+      "name": "Dr Guilherme - Formal sorrindo",
+      "source_path": "assets/personas/dr-guilherme/raw/IMG_6223 TRATADA.jpg",
+      "asset_id": "713ea3a672b94818803a34172e4f288c",
+      "avatar_id": "883356edef07402ab7be3c39920868ab",
+      "status": "completed"
+    },
+    {
+      "name": "Dr Guilherme - Camisa branca close",
+      "source_path": "assets/personas/dr-guilherme/raw/IMG_6506 TRATADA.jpg",
+      "asset_id": "023239d815df42f6a069497d8e32660d",
+      "avatar_id": "3836fbbca6994dae91f02b3e9926a62a",
+      "status": "completed"
+    },
+    {
+      "name": "Dr Guilherme - Casual serio",
+      "source_path": "assets/personas/dr-guilherme/raw/IMG_6518 TRATADA.jpg",
+      "asset_id": "e762648a74be4c8c80113f6dd402bfac",
+      "avatar_id": "68773738aa9b45ce9d619d743d1d77af",
+      "status": "completed"
+    }
+  ]
+}
