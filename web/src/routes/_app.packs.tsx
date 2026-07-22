@@ -17,15 +17,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { familiaLabel, prioridadeLabel, riskLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { generatePack, type GeneratedPack, type PackCompliance } from "@/lib/api/local";
 import type { Script } from "@/lib/mock-data";
 import {
   CalendarPlus,
   CheckCircle2,
   Copy,
   FileText,
-  Loader2,
-  Sparkles,
   Image,
   Instagram,
   Layers3,
@@ -210,62 +207,27 @@ function PacksPage() {
   const search = Route.useSearch();
   const navigate = useNavigate();
   const [selectedId, setSelectedId] = useState(search.scriptId ?? scripts[0]?.id ?? "");
-  const [aiPack, setAiPack] = useState<GeneratedPack | null>(null);
-  const [compliance, setCompliance] = useState<PackCompliance | null>(null);
-  const [gerando, setGerando] = useState(false);
 
   const script = scripts.find((item) => item.id === selectedId);
   const mockPack = useMemo(() => (script ? buildPack(script) : null), [script]);
-  const pack: Pack | null = aiPack ?? mockPack;
+  const pack: Pack | null = mockPack;
   const videoJob = script ? jobs.find((job) => job.scriptId === script.id) : undefined;
   const scheduledPost = script ? posts.find((post) => post.scriptId === script.id) : undefined;
 
   function selectScript(id: string) {
     setSelectedId(id);
-    setAiPack(null); // volta ao rascunho ao trocar de roteiro
-    setCompliance(null);
     navigate({ to: "/packs", search: { scriptId: id }, replace: true });
-  }
-
-  async function gerarComClaude() {
-    if (!script) return;
-    setGerando(true);
-    const aviso = toast.loading("Gerando pack com o Claude...");
-    try {
-      const gerado = await generatePack(script);
-      setAiPack(gerado.pack);
-      setCompliance(gerado.compliance);
-      if (gerado.compliance.blocked) {
-        toast.warning("Pack gerado, mas precisa de revisao de compliance.", { id: aviso });
-      } else {
-        toast.success("Pack gerado pelo Claude.", { id: aviso });
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Falha ao gerar o pack.", { id: aviso });
-    } finally {
-      setGerando(false);
-    }
   }
 
   return (
     <AppShell
       title="Pack de conteudo"
       actions={
-        <>
-          <Button size="sm" onClick={gerarComClaude} disabled={!script || gerando}>
-            {gerando ? (
-              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Sparkles className="mr-1 h-3.5 w-3.5" />
-            )}
-            Gerar com Claude
-          </Button>
-          <Button asChild size="sm" variant="secondary">
-            <Link to="/roteiros">
-              <FileText className="mr-1 h-3.5 w-3.5" /> Roteiros
-            </Link>
-          </Button>
-        </>
+        <Button asChild size="sm" variant="secondary">
+          <Link to="/roteiros">
+            <FileText className="mr-1 h-3.5 w-3.5" /> Roteiros
+          </Link>
+        </Button>
       }
     >
       {scripts.length === 0 ? (
@@ -285,7 +247,7 @@ function PacksPage() {
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
               <div className="min-w-0">
                 <div className="mb-3 flex flex-wrap items-center gap-2">
-                  <StatusBadge label={aiPack ? "Pack Claude" : "Rascunho"} tone={aiPack ? "success" : "neutral"} />
+                  <StatusBadge label="Pack offline" tone="info" />
                   {script ? <StatusBadge {...riskLabel[script.risco]} /> : null}
                   {script ? <StatusBadge {...prioridadeLabel[script.prioridade]} /> : null}
                 </div>
@@ -295,13 +257,6 @@ function PacksPage() {
                 <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
                   Uma ideia vira um conjunto de pecas para revisar, produzir e agendar.
                 </p>
-                {compliance?.blocked ? (
-                  <div className="mt-3 rounded-lg border border-status-danger/30 bg-status-danger/10 p-3 text-sm text-status-danger">
-                    <strong>Revisao necessaria:</strong> {compliance.issues.join("; ")}
-                  </div>
-                ) : aiPack ? (
-                  <div className="mt-3 text-sm text-status-success">Pack passou pelo checker de compliance.</div>
-                ) : null}
               </div>
               <div>
                 <Select value={selectedId} onValueChange={selectScript}>

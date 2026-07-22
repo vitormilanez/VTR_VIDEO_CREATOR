@@ -1080,7 +1080,9 @@ def generate_pack(payload: PackIn) -> dict:
     try:
         client = anthropic.Anthropic()
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+            # Sonnet 5: bom custo/qualidade e suporta structured outputs.
+            # Troque para claude-opus-4-8 via ANTHROPIC_MODEL se quiser o topo de linha.
+            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
             max_tokens=2000,
             system=_PACK_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _PACK_SCHEMA}},
