@@ -75,24 +75,24 @@ function stripEnd(value: string) {
 function reinforcementSlide(script: Script): { title: string; body: string } {
   const map: Record<string, { title: string; body: string }> = {
     medicamento: {
-      title: "Nao existe atalho magico",
-      body: "Medicamento pode ajudar, mas indicacao, acompanhamento e mudanca de habito andam juntos. Cada caso e um caso.",
+      title: "Não existe atalho mágico",
+      body: "Medicamento pode ajudar, mas indicação, acompanhamento e mudança de hábito andam juntos. Cada caso é um caso.",
     },
     comportamento: {
-      title: "Nao e falta de forca de vontade",
-      body: "Comportamento alimentar envolve sono, rotina, emocoes e contexto. Julgar so atrapalha o cuidado.",
+      title: "Não é falta de força de vontade",
+      body: "Comportamento alimentar envolve sono, rotina, emoções e contexto. Julgar só atrapalha o cuidado.",
     },
     metabolismo: {
-      title: "Seu corpo tem sinais",
-      body: "O metabolismo responde a varios fatores. Entender os sinais ajuda a buscar avaliacao no momento certo.",
+      title: "Seu corpo dá sinais",
+      body: "O metabolismo responde a vários fatores. Entender os sinais ajuda a buscar avaliação no momento certo.",
     },
     obesidade: {
-      title: "Obesidade e multifatorial",
-      body: "Genetica, ambiente, hormonios e rotina influenciam o peso. Cuidado de verdade comeca sem culpa.",
+      title: "Obesidade é multifatorial",
+      body: "Genética, ambiente, hormônios e rotina influenciam o peso. Cuidado de verdade começa sem culpa.",
     },
     educativo: {
-      title: "Cada pessoa e unica",
-      body: "O que funciona para um pode nao servir para outro. Por isso a avaliacao individual importa tanto.",
+      title: "Cada pessoa é única",
+      body: "O que funciona para um pode não servir para outro. Por isso a avaliação individual importa tanto.",
     },
   };
   return map[script.categoria] ?? map.educativo;
@@ -128,27 +128,27 @@ function hashtags(script: Script): string {
 function buildPack(script: Script): Pack {
   const tema = clean(script.tema) || clean(script.titulo) || "tema principal";
   const hook = sentence(script.hook, `Entenda um ponto importante sobre ${tema}`);
-  const dor = sentence(script.dorConflito, "Muita gente sente isso e acha que o problema e so com ela");
+  const dor = sentence(script.dorConflito, "Muita gente sente isso e acha que o problema é só com ela");
   const explicacao = sentence(
     script.explicacaoSimples,
-    "A explicacao precisa ser educativa, simples e individualizada",
+    "A explicação precisa ser educativa, simples e individualizada",
   );
-  const virada = sentence(script.virada, "A virada e trocar promessa por clareza e cuidado real");
-  const cta = sentence(script.cta, "Procure avaliacao individual com um profissional de saude");
+  const virada = sentence(script.virada, "A virada é trocar promessa por clareza e cuidado real");
+  const cta = sentence(script.cta, "Procure avaliação individual com um profissional de saúde");
   const cuidados = sentence(
     script.cuidadosMedicos,
-    "Conteudo educativo: sem dose, sem prescricao e sem promessa de resultado",
+    "Conteúdo educativo: sem dose, sem prescrição e sem promessa de resultado",
   );
   const reforco = reinforcementSlide(script);
 
   const carousel: Pack["carousel"] = [
     { title: stripEnd(hook), body: "Arraste para entender por que isso importa. 👉" },
-    { title: "A real situacao", body: dor },
-    { title: "O que quase ninguem explica", body: explicacao },
+    { title: "A real situação", body: dor },
+    { title: "O que quase ninguém explica", body: explicacao },
     { title: "A virada de chave", body: virada },
     { title: "Importante saber", body: cuidados },
     reforco,
-    { title: "Seu proximo passo", body: `${cta} Salve este post e envie para quem precisa. 💙` },
+    { title: "Seu próximo passo", body: `${cta} Salve este post e envie para quem precisa. 💙` },
   ];
 
   const caption = [
@@ -163,7 +163,7 @@ function buildPack(script: Script): Pack {
     "",
     cta,
     "",
-    "Conteudo educativo. Nao substitui avaliacao medica individual.",
+    "Conteúdo educativo. Não substitui avaliação médica individual.",
     "",
     hashtags(script),
   ].join("\n");
@@ -178,16 +178,16 @@ function buildPack(script: Script): Pack {
     stories: [
       { title: "Capa", body: hook },
       { title: "A dor real", body: dor },
-      { title: "Enquete", body: "Voce ja passou por isso? Responda: 👉 Sim / Ainda nao" },
+      { title: "Enquete", body: "Você já passou por isso? Responda: 👉 Sim / Ainda não" },
       { title: "Em 1 frase", body: explicacao },
-      { title: "Proximo passo", body: `${cta} Toque no link da bio.` },
+      { title: "Próximo passo", body: `${cta} Toque no link da bio.` },
     ],
     checklist: [
       `Carrossel com ${carousel.length} slides educativos`,
       "Post fixo com frase central de impacto",
       "Legenda pronta com hashtags e aviso de compliance",
       "5 stories com enquete e CTA",
-      "Tudo alinhado ao roteiro e as regras de compliance medico",
+      "Tudo alinhado ao roteiro e às regras de compliance médico",
     ],
   };
 }
