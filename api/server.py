@@ -559,19 +559,7 @@ def ai_costs() -> dict:
 
     return {
         "updatedAt": _now(),
-        "providers": [
-            heygen,
-            {
-                "id": "gemini",
-                "name": "Gemini via Lovable AI Gateway",
-                "description": "Geracao de ideias e roteiros",
-                "status": "nao_conectado",
-                "currency": None,
-                "remainingBalance": None,
-                "trackedSpend": None,
-                "note": "Nenhuma chamada Gemini esta conectada a esta versao do app.",
-            },
-        ],
+        "providers": [heygen],
     }
 
 
@@ -675,6 +663,18 @@ def refresh_video(job_id: str) -> dict:
     job["remoteVideoId"] = _find_value(response, "video_id", "videoId") or job.get("remoteVideoId")
     job["videoUrl"] = _find_value(response, "video_url", "videoUrl", "video_page_url", "videoPageUrl") or job.get("videoUrl")
     job["thumbnailUrl"] = _find_value(response, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
+    if job.get("remoteVideoId") and not job.get("videoUrl"):
+        video_proc = subprocess.run(
+            [command, "video", "get", str(job["remoteVideoId"])],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        if video_proc.returncode == 0:
+            video_details = _read_json_output(video_proc)
+            job["videoUrl"] = _find_value(video_details, "video_url", "videoUrl") or job.get("videoUrl")
+            job["thumbnailUrl"] = _find_value(video_details, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
     if status == "erro":
         job["erro"] = str(_find_value(response, "error", "message", "detail") or "HeyGen nao concluiu o video.")
     _save_video_jobs(jobs)
@@ -952,6 +952,151 @@ def append_script(payload: ScriptIn) -> dict:
     ]
     _append("'Roteiros'!A:O", row)
     return {"ok": True, "appended": 1}
+
+
+# --------------------------------------------------------------------------- #
+# Geracao real do Pack de Conteudo com Claude (server-side)
+# --------------------------------------------------------------------------- #
+class PackIn(BaseModel):
+    titulo: str
+    tema: str = ""
+    categoria: str = "educativo"
+    hook: str = ""
+    dorConflito: str = ""
+    explicacaoSimples: str = ""
+    virada: str = ""
+    cta: str = ""
+    cuidadosMedicos: str = ""
+    formatoSugerido: str = "Reels"
+
+
+def _pack_text(pack: dict[str, Any]) -> str:
+    values: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, dict):
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(pack)
+    return "\n".join(values)
+
+
+def _pack_compliance(pack: dict[str, Any]) -> dict[str, Any]:
+    text = _norm(_pack_text(pack))
+    issues: list[str] = []
+    for term in DEFAULT_SETTINGS["palavrasProibidas"]:
+        if _norm(term) in text:
+            issues.append(f"Palavra ou promessa proibida: {term}")
+    if re.search(r"\b\d+\s?(mg|mcg|ml|g)\b|\bdose\b|\bcomprimid|\bampola", text):
+        issues.append("Possivel mencao de dose ou forma de administracao")
+    if re.search(r"\b(prescreva|tome|use|aumente|reduza|pare|comece)\b", text):
+        issues.append("Possivel linguagem prescritiva")
+    return {"ok": not issues, "blocked": bool(issues), "issues": list(dict.fromkeys(issues))}
+
+
+_PACK_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "carousel": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
+                "required": ["title", "body"],
+            },
+        },
+        "staticPost": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"headline": {"type": "string"}, "subline": {"type": "string"}},
+            "required": ["headline", "subline"],
+        },
+        "caption": {"type": "string"},
+        "stories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
+                "required": ["title", "body"],
+            },
+        },
+        "checklist": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["carousel", "staticPost", "caption", "stories", "checklist"],
+}
+
+_PACK_SYSTEM = """Voce e um editor de conteudo medico do Dr. Guilherme, focado em \
+obesidade, GLP-1, Mounjaro, Ozempic, metabolismo e comportamento alimentar, em \
+portugues-BR.
+
+Regras de compliance OBRIGATORIAS em TODAS as pecas:
+- Nao prescrever medicamentos nem citar doses (mg, ml, comprimidos).
+- Nao prometer resultado ("cura", "milagre", "garantido", "emagrece rapido").
+- Nao fazer sensacionalismo medico.
+- Reforcar avaliacao individual com profissional.
+- Tratar obesidade como condicao multifatorial, com linguagem acolhedora.
+- Conteudo educativo, nao prescritivo.
+
+A partir do roteiro fornecido, gere um pacote de conteudo para redes sociais:
+- carousel: 5 a 7 slides educativos (title curto + body 1-2 frases).
+- staticPost: headline forte + subline (1 frase).
+- caption: legenda pronta para Instagram/LinkedIn, com quebras de linha.
+- stories: 3 a 5 telas curtas (title + body), incluindo uma com pergunta/enquete.
+- checklist: 4 a 6 itens do que o pacote entrega.
+Responda apenas no formato JSON pedido."""
+
+
+@app.post("/api/packs/generate")
+def generate_pack(payload: PackIn) -> dict:
+    """Gera o pack de conteudo real via Claude a partir de um roteiro."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="Defina ANTHROPIC_API_KEY no arquivo .env para gerar com o Claude.",
+        )
+    import anthropic
+
+    roteiro = (
+        f"Titulo: {payload.titulo}\n"
+        f"Tema: {payload.tema}\n"
+        f"Categoria: {payload.categoria}\n"
+        f"Hook: {payload.hook}\n"
+        f"Dor/Conflito: {payload.dorConflito}\n"
+        f"Explicacao simples: {payload.explicacaoSimples}\n"
+        f"Virada/Provocacao: {payload.virada}\n"
+        f"CTA: {payload.cta}\n"
+        f"Cuidados medicos: {payload.cuidadosMedicos}\n"
+        f"Formato do video: {payload.formatoSugerido}"
+    )
+    try:
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+            max_tokens=2000,
+            system=_PACK_SYSTEM,
+            output_config={"format": {"type": "json_schema", "schema": _PACK_SCHEMA}},
+            messages=[{"role": "user", "content": f"ROTEIRO:\n{roteiro}"}],
+        )
+    except anthropic.APIStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
+    except Exception as exc:  # rede / credencial
+        raise HTTPException(status_code=502, detail=f"Falha ao chamar o Claude: {exc}")
+
+    texto = "".join(getattr(b, "text", "") for b in message.content)
+    try:
+        pack = json.loads(texto)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="Resposta do Claude nao veio em JSON valido.")
+    return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as AppCalendarioRouteImport } from './routes/_app.calendario'
 import { Route as AppConfiguracoesRouteImport } from './routes/_app.configuracoes'
 import { Route as AppIdeiasRouteImport } from './routes/_app.ideias'
+import { Route as AppPacksRouteImport } from './routes/_app.packs'
 import { Route as AppPerformanceRouteImport } from './routes/_app.performance'
 import { Route as AppProducaoRouteImport } from './routes/_app.producao'
 import { Route as AppRadarRouteImport } from './routes/_app.radar'
@@ -49,6 +50,11 @@ const AppConfiguracoesRoute = AppConfiguracoesRouteImport.update({
 const AppIdeiasRoute = AppIdeiasRouteImport.update({
   id: '/ideias',
   path: '/ideias',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppPacksRoute = AppPacksRouteImport.update({
+  id: '/packs',
+  path: '/packs',
   getParentRoute: () => AppRoute,
 } as any)
 const AppPerformanceRoute = AppPerformanceRouteImport.update({
@@ -117,6 +123,7 @@ export interface FileRoutesByFullPath {
   '/calendario': typeof AppCalendarioRoute
   '/configuracoes': typeof AppConfiguracoesRoute
   '/ideias': typeof AppIdeiasRouteWithChildren
+  '/packs': typeof AppPacksRoute
   '/performance': typeof AppPerformanceRoute
   '/producao': typeof AppProducaoRouteWithChildren
   '/radar': typeof AppRadarRouteWithChildren
@@ -133,6 +140,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/calendario': typeof AppCalendarioRoute
   '/configuracoes': typeof AppConfiguracoesRoute
+  '/packs': typeof AppPacksRoute
   '/performance': typeof AppPerformanceRoute
   '/': typeof AppIndexRoute
   '/ideias/$id': typeof AppIdeiasIdRoute
@@ -150,6 +158,7 @@ export interface FileRoutesById {
   '/_app/calendario': typeof AppCalendarioRoute
   '/_app/configuracoes': typeof AppConfiguracoesRoute
   '/_app/ideias': typeof AppIdeiasRouteWithChildren
+  '/_app/packs': typeof AppPacksRoute
   '/_app/performance': typeof AppPerformanceRoute
   '/_app/producao': typeof AppProducaoRouteWithChildren
   '/_app/radar': typeof AppRadarRouteWithChildren
@@ -171,6 +180,7 @@ export interface FileRouteTypes {
     | '/calendario'
     | '/configuracoes'
     | '/ideias'
+    | '/packs'
     | '/performance'
     | '/producao'
     | '/radar'
@@ -187,6 +197,7 @@ export interface FileRouteTypes {
   to:
     | '/calendario'
     | '/configuracoes'
+    | '/packs'
     | '/performance'
     | '/'
     | '/ideias/$id'
@@ -203,6 +214,7 @@ export interface FileRouteTypes {
     | '/_app/calendario'
     | '/_app/configuracoes'
     | '/_app/ideias'
+    | '/_app/packs'
     | '/_app/performance'
     | '/_app/producao'
     | '/_app/radar'
@@ -257,6 +269,13 @@ declare module '@tanstack/react-router' {
       path: '/ideias'
       fullPath: '/ideias'
       preLoaderRoute: typeof AppIdeiasRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/packs': {
+      id: '/_app/packs'
+      path: '/packs'
+      fullPath: '/packs'
+      preLoaderRoute: typeof AppPacksRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/performance': {
@@ -406,6 +425,7 @@ interface AppRouteChildren {
   AppCalendarioRoute: typeof AppCalendarioRoute
   AppConfiguracoesRoute: typeof AppConfiguracoesRoute
   AppIdeiasRoute: typeof AppIdeiasRouteWithChildren
+  AppPacksRoute: typeof AppPacksRoute
   AppPerformanceRoute: typeof AppPerformanceRoute
   AppProducaoRoute: typeof AppProducaoRouteWithChildren
   AppRadarRoute: typeof AppRadarRouteWithChildren
@@ -417,6 +437,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppCalendarioRoute: AppCalendarioRoute,
   AppConfiguracoesRoute: AppConfiguracoesRoute,
   AppIdeiasRoute: AppIdeiasRouteWithChildren,
+  AppPacksRoute: AppPacksRoute,
   AppPerformanceRoute: AppPerformanceRoute,
   AppProducaoRoute: AppProducaoRouteWithChildren,
   AppRadarRoute: AppRadarRouteWithChildren,

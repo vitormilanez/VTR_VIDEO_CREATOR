@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, Radar, Lightbulb, FileText, Film, CalendarDays, BarChart3, Settings } from "lucide-react";
+import { LayoutDashboard, Radar, Lightbulb, FileText, Film, CalendarDays, BarChart3, Settings, PanelsTopLeft } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -22,6 +22,7 @@ const nav: Array<{ title: string; url: string; icon: typeof LayoutDashboard; exa
   { title: "Ideias", url: "/ideias", icon: Lightbulb },
   { title: "Roteiros", url: "/roteiros", icon: FileText },
   { title: "Producao de videos", url: "/producao", icon: Film },
+  { title: "Pack de conteudo", url: "/packs", icon: PanelsTopLeft },
   { title: "Calendario", url: "/calendario", icon: CalendarDays },
   { title: "Performance", url: "/performance", icon: BarChart3 },
   { title: "Configuracoes", url: "/configuracoes", icon: Settings },

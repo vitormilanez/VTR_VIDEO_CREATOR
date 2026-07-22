@@ -24,7 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ExternalLink, FileText } from "lucide-react";
+import { ExternalLink, FileText, PanelsTopLeft } from "lucide-react";
 
 export const Route = createFileRoute("/_app/roteiros")({
   head: () => ({
@@ -139,11 +139,18 @@ export function RoteirosPage() {
                   <TableCell><StatusBadge {...riskLabel[s.risco]} /></TableCell>
                   <TableCell><StatusBadge {...scriptStatusLabel[s.status]} /></TableCell>
                   <TableCell className="text-right">
-                    <Button asChild size="sm" variant="secondary">
-                      <Link to="/roteiros/$id" params={{ id: s.id }}>
-                        <ExternalLink className="mr-1 h-3.5 w-3.5" /> Abrir
-                      </Link>
-                    </Button>
+                    <div className="flex justify-end gap-1">
+                      <Button asChild size="sm" variant="secondary">
+                        <Link to="/packs" search={{ scriptId: s.id }}>
+                          <PanelsTopLeft className="mr-1 h-3.5 w-3.5" /> Pack
+                        </Link>
+                      </Button>
+                      <Button asChild size="sm" variant="ghost">
+                        <Link to="/roteiros/$id" params={{ id: s.id }}>
+                          <ExternalLink className="h-3.5 w-3.5" />
+                        </Link>
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}

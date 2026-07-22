@@ -75,6 +75,33 @@ export function appendScript(script: Script): Promise<{ ok: boolean }> {
   return postJson("/api/sheets/roteiros", script);
 }
 
+export interface GeneratedPack {
+  carousel: Array<{ title: string; body: string }>;
+  staticPost: { headline: string; subline: string };
+  caption: string;
+  stories: Array<{ title: string; body: string }>;
+  checklist: string[];
+}
+
+export interface PackCompliance {
+  ok: boolean;
+  blocked: boolean;
+  issues: string[];
+}
+
+/** Gera o pack de conteudo real via Claude (server-side) a partir de um roteiro. */
+export async function generatePack(
+  script: Script,
+): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+  const res = await fetch(`${BASE}/api/packs/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(script),
+  });
+  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel gerar o pack."));
+  return (await res.json()) as { pack: GeneratedPack; compliance: PackCompliance };
+}
+
 export async function huntTrends(): Promise<{ ok: boolean; added?: number }> {
   const res = await fetch(`${BASE}/api/trends/hunt`, { method: "POST" });
   if (!res.ok) {
