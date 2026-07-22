@@ -38,10 +38,10 @@ def load_env(path: Path) -> None:
 load_env(ROOT / ".env")
 
 SHEETS = {
-    "radar": "'Radar Tendencias'!A:K",
-    "ideias": "'Ideias'!A:J",
-    "roteiros": "'Roteiros'!A:O",
-    "calendario": "'Calendario'!A:J",
+    "radar": "'Radar Tendencias'!A:L",
+    "ideias": "'Ideias'!A:K",
+    "roteiros": "'Roteiros'!A:P",
+    "calendario": "'Calendario'!A:K",
     "performance": "'Performance'!A:N",
 }
 

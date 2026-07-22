@@ -2,11 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { genId, useStore } from "@/lib/store";
-import {
-  familiaLabel,
-  prioridadeLabel,
-  trendStatusLabel,
-} from "@/lib/status";
+import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { Button } from "@/components/ui/button";
 import { appendIdea, setSheetStatus } from "@/lib/api/local";
 import type { Idea } from "@/lib/mock-data";
@@ -36,13 +32,15 @@ function TendenciaDetalhe() {
       <AppShell title="Tendencia">
         <p className="text-sm text-muted-foreground">
           Tendencia nao encontrada.{" "}
-          <Link to="/radar" className="text-status-info underline">Voltar</Link>
+          <Link to="/radar" className="text-status-info underline">
+            Voltar
+          </Link>
         </p>
       </AppShell>
     );
   }
 
-  function gerarIdeia() {
+  async function gerarIdeia() {
     if (!trend) return;
     const idea: Idea = {
       id: genId("i"),
@@ -60,16 +58,20 @@ function TendenciaDetalhe() {
       status: "novo",
       criadoEm: new Date().toISOString(),
     };
-    addIdea(idea);
-    updateTrend(trend.id, { status: "em_analise" });
-    appendIdea(idea)
-      .then(() => toast.success("Ideia criada e salva no Sheets."))
-      .catch((err) =>
-        toast.error(
-          `Ideia criada localmente, mas falhou ao salvar: ${err instanceof Error ? err.message : ""}`,
-        ),
-      );
-    navigate({ to: "/ideias" });
+    try {
+      const saved = await appendIdea(idea);
+      addIdea(saved);
+      updateTrend(trend.id, { status: "em_analise" });
+      try {
+        await setSheetStatus("radar", trend.id, "em_analise");
+      } catch {
+        toast.warning("Ideia salva, mas o status da tendencia nao foi atualizado.");
+      }
+      toast.success("Ideia criada e salva no Sheets.");
+      navigate({ to: "/ideias" });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel criar a ideia.");
+    }
   }
 
   async function atualizarStatus(status: "em_analise" | "descartado") {
@@ -95,7 +97,9 @@ function TendenciaDetalhe() {
       actions={
         <>
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/radar"><ArrowLeft className="mr-1 h-4 w-4" /> Voltar</Link>
+            <Link to="/radar">
+              <ArrowLeft className="mr-1 h-4 w-4" /> Voltar
+            </Link>
           </Button>
           <Button size="sm" onClick={gerarIdeia}>
             <Sparkles className="mr-1 h-4 w-4" /> Gerar ideia
@@ -113,38 +117,54 @@ function TendenciaDetalhe() {
           <div className="rounded-xl border bg-card p-4 shadow-sm">
             <dl className="grid gap-3 text-sm sm:grid-cols-2">
               <div>
-                <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Fonte</dt>
+                <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Fonte
+                </dt>
                 <dd className="break-words">{fonteLabel(trend.fonte)}</dd>
               </div>
               <div>
-                <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Familia</dt>
+                <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Familia
+                </dt>
                 <dd>{familiaLabel[trend.familia]}</dd>
               </div>
               <div>
-                <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Potencial viral</dt>
-                <dd className="tabular-nums">{trend.potencial == null ? "—" : `${trend.potencial}/10`}</dd>
+                <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Potencial viral
+                </dt>
+                <dd className="tabular-nums">
+                  {trend.potencial == null ? "—" : `${trend.potencial}/10`}
+                </dd>
               </div>
               {trend.subtema ? (
                 <div>
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Subtema</dt>
+                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Subtema
+                  </dt>
                   <dd className="break-words">{trend.subtema}</dd>
                 </div>
               ) : null}
               {trend.sinal ? (
                 <div className="sm:col-span-2">
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Sinal de tendencia</dt>
+                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Sinal de tendencia
+                  </dt>
                   <dd className="break-words">{trend.sinal}</dd>
                 </div>
               ) : null}
               {trend.dorPublico ? (
                 <div className="sm:col-span-2">
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Dor do publico</dt>
+                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Dor do publico
+                  </dt>
                   <dd className="break-words text-muted-foreground">{trend.dorPublico}</dd>
                 </div>
               ) : null}
               {trend.link ? (
                 <div className="sm:col-span-2">
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Link de referencia</dt>
+                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Link de referencia
+                  </dt>
                   <dd>
                     <a
                       href={trend.link}
@@ -158,14 +178,18 @@ function TendenciaDetalhe() {
                 </div>
               ) : null}
               <div>
-                <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Capturado em</dt>
+                <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Capturado em
+                </dt>
                 <dd className="text-muted-foreground">
                   {new Date(trend.criadoEm).toLocaleString("pt-BR")}
                 </dd>
               </div>
               {trend.notas ? (
                 <div className="col-span-2">
-                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Notas</dt>
+                  <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Notas
+                  </dt>
                   <dd className="text-sm text-muted-foreground">{trend.notas}</dd>
                 </div>
               ) : null}
@@ -184,7 +208,11 @@ function TendenciaDetalhe() {
               <ul className="space-y-2">
                 {ideas.map((i) => (
                   <li key={i.id} className="rounded-md border p-2 text-sm">
-                    <Link to="/ideias/$id" params={{ id: i.id }} className="font-medium hover:underline">
+                    <Link
+                      to="/ideias/$id"
+                      params={{ id: i.id }}
+                      className="font-medium hover:underline"
+                    >
                       {i.titulo}
                     </Link>
                     <div className="mt-1 text-xs text-muted-foreground">{i.hook}</div>
@@ -199,10 +227,20 @@ function TendenciaDetalhe() {
           <div className="rounded-xl border bg-card p-3 text-xs text-muted-foreground shadow-sm">
             O status e salvo no Google Sheets para manter o Radar sincronizado.
           </div>
-          <Button size="sm" variant="secondary" className="w-full" onClick={() => atualizarStatus("em_analise")}>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="w-full"
+            onClick={() => atualizarStatus("em_analise")}
+          >
             Marcar como em analise
           </Button>
-          <Button size="sm" variant="ghost" className="w-full" onClick={() => atualizarStatus("descartado")}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="w-full"
+            onClick={() => atualizarStatus("descartado")}
+          >
             Descartar tendencia
           </Button>
         </aside>

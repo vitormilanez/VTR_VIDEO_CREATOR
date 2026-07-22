@@ -135,18 +135,44 @@ def _story_html(index: int, title: str, body: str, width: int, height: int) -> s
     return _page(inner, css, width, height)
 
 
+def _static_post_html(headline: str, subline: str, width: int, height: int) -> str:
+    """Peca estatica quadrada (1080x1080) para post unico."""
+    inner = f"""
+    <div class="wrap">
+      <div class="bar"></div>
+      <h1 class="display">{html.escape(headline)}</h1>
+      <p class="sub">{html.escape(subline)}</p>
+      <div class="foot">Dr. Guilherme · conteúdo educativo</div>
+    </div>"""
+    css = f"""
+    body {{ background:{NAVY}; color:#fff; }}
+    .wrap {{ flex:1; display:flex; flex-direction:column; justify-content:center; padding:96px 88px; }}
+    .bar {{ width:110px; height:10px; background:{TEAL}; border-radius:999px; margin-bottom:44px; }}
+    h1 {{ font-size:{78 if len(headline) < 50 else 62}px; font-weight:800; line-height:1.1; }}
+    .sub {{ margin-top:36px; font-size:36px; line-height:1.45; color:rgba(255,255,255,.78); }}
+    .foot {{ margin-top:auto; font-size:26px; color:rgba(255,255,255,.45); }}
+    """
+    return _page(inner, css, width, height)
+
+
 def render_pack_images(
-    folder: Path,
+    img_root: Path,
     carousel: Iterable[dict],
     stories: Iterable[dict],
+    static_post: dict | None = None,
 ) -> dict:
-    """Gera PNGs do carrossel (1080x1350) e dos stories (1080x1920)."""
+    """
+    Gera as imagens prontas para postar dentro de `img_root`:
+      carrossel/carrossel-NN.png (1080x1350)
+      stories/story-NN.png       (1080x1920)
+      post-fixo.png              (1080x1080)
+    """
     from playwright.sync_api import sync_playwright
 
     carousel = list(carousel)
     stories = list(stories)
-    car_dir = folder / "carrossel" / "png"
-    sto_dir = folder / "stories" / "png"
+    car_dir = img_root / "carrossel"
+    sto_dir = img_root / "stories"
     car_dir.mkdir(parents=True, exist_ok=True)
     sto_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,7 +193,22 @@ def render_pack_images(
                     doc = _content_html(i, total, titulo, corpo, 1080, 1350)
                 page.set_content(doc, wait_until="load")
                 page.wait_for_timeout(220)  # deixa a fonte do Google carregar
-                page.screenshot(path=str(car_dir / f"slide-{i:02d}.png"))
+                page.screenshot(path=str(car_dir / f"carrossel-{i:02d}.png"))
+                gerados += 1
+
+            if static_post:
+                page.set_viewport_size({"width": 1080, "height": 1080})
+                page.set_content(
+                    _static_post_html(
+                        str(static_post.get("headline") or ""),
+                        str(static_post.get("subline") or ""),
+                        1080,
+                        1080,
+                    ),
+                    wait_until="load",
+                )
+                page.wait_for_timeout(220)
+                page.screenshot(path=str(img_root / "post-fixo.png"))
                 gerados += 1
 
             page.set_viewport_size({"width": 1080, "height": 1920})
@@ -182,4 +223,4 @@ def render_pack_images(
         finally:
             browser.close()
 
-    return {"images": gerados, "carrossel_dir": str(car_dir), "stories_dir": str(sto_dir)}
+    return {"images": gerados}

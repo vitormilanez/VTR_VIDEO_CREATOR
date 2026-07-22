@@ -7,20 +7,11 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
-import {
-  familiaLabel,
-  prioridadeLabel,
-  trendStatusLabel,
-} from "@/lib/status";
+import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
 import { appendIdea, fetchState, huntTrends, setSheetStatus } from "@/lib/api/local";
 import type { Idea } from "@/lib/mock-data";
-import type {
-  Prioridade,
-  ThemeFamily,
-  Trend,
-  TrendStatus,
-} from "@/lib/mock-data";
+import type { Prioridade, ThemeFamily, Trend, TrendStatus } from "@/lib/mock-data";
 import {
   Table,
   TableBody,
@@ -55,15 +46,7 @@ import {
 } from "@/components/ui/sheet";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  ExternalLink,
-  Loader2,
-  Plus,
-  Radar,
-  RefreshCcw,
-  Sparkles,
-  Trash2,
-} from "lucide-react";
+import { ExternalLink, Loader2, Plus, Radar, RefreshCcw, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/radar")({
@@ -137,7 +120,7 @@ export function RadarPage() {
   };
   trends.forEach((t) => (statusCounts[t.status] += 1));
 
-  function gerarIdeia(t: Trend) {
+  async function gerarIdeia(t: Trend) {
     const idea: Idea = {
       id: genId("i"),
       trendId: t.id,
@@ -149,22 +132,25 @@ export function RadarPage() {
       tipo: "Reel",
       publicoDor: t.dorPublico,
       cta: "Procure avaliacao individualizada com profissional de saude.",
-      observacaoCompliance:
-        "Rascunho gerado localmente. Revisar linguagem antes de virar roteiro.",
+      observacaoCompliance: "Rascunho gerado localmente. Revisar linguagem antes de virar roteiro.",
       prioridade: t.prioridade,
       status: "novo",
       criadoEm: new Date().toISOString(),
     };
-    addIdea(idea);
-    updateTrend(t.id, { status: "em_analise" });
-    appendIdea(idea)
-      .then(() => toast.success("Ideia criada e salva no Sheets."))
-      .catch((err) =>
-        toast.error(
-          `Ideia criada localmente, mas falhou ao salvar: ${err instanceof Error ? err.message : ""}`,
-        ),
-      );
-    navigate({ to: "/ideias" });
+    try {
+      const saved = await appendIdea(idea);
+      addIdea(saved);
+      updateTrend(t.id, { status: "em_analise" });
+      try {
+        await setSheetStatus("radar", t.id, "em_analise");
+      } catch {
+        toast.warning("Ideia salva, mas o status da tendencia nao foi atualizado.");
+      }
+      toast.success("Ideia criada e salva no Sheets.");
+      navigate({ to: "/ideias" });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel criar a ideia.");
+    }
   }
 
   async function descartarTrend(t: Trend) {
@@ -185,15 +171,13 @@ export function RadarPage() {
       const res = await huntTrends();
       const data = await fetchState();
       hydrate(data);
-      toast.success(
-        res.added ? `${res.added} novas tendencias capturadas.` : "Radar atualizado.",
-        { id: aviso },
-      );
+      toast.success(res.added ? `${res.added} novas tendencias capturadas.` : "Radar atualizado.", {
+        id: aviso,
+      });
     } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Nao foi possivel buscar tendencias.",
-        { id: aviso },
-      );
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel buscar tendencias.", {
+        id: aviso,
+      });
     } finally {
       setLoading(false);
     }
@@ -240,8 +224,18 @@ export function RadarPage() {
         onChange={setStatus}
         options={[
           { value: "novo", label: "Novas", tone: "info", count: statusCounts.novo },
-          { value: "em_analise", label: "Em analise", tone: "warn", count: statusCounts.em_analise },
-          { value: "descartado", label: "Descartadas", tone: "neutral", count: statusCounts.descartado },
+          {
+            value: "em_analise",
+            label: "Em analise",
+            tone: "warn",
+            count: statusCounts.em_analise,
+          },
+          {
+            value: "descartado",
+            label: "Descartadas",
+            tone: "neutral",
+            count: statusCounts.descartado,
+          },
         ]}
       />
       <DataToolbar search={busca} onSearch={setBusca} placeholder="Buscar por titulo...">
@@ -300,11 +294,7 @@ export function RadarPage() {
             </TableHeader>
             <TableBody>
               {ordered.map((t) => (
-                <TableRow
-                  key={t.id}
-                  className="cursor-pointer"
-                  onClick={() => setPreview(t)}
-                >
+                <TableRow key={t.id} className="cursor-pointer" onClick={() => setPreview(t)}>
                   <TableCell className="align-top">
                     <div className="truncate font-medium">{t.titulo}</div>
                     {t.subtema ? (
@@ -355,10 +345,7 @@ export function RadarPage() {
                   <TableCell>
                     <StatusBadge {...trendStatusLabel[t.status]} />
                   </TableCell>
-                  <TableCell
-                    className="text-right"
-                    onClick={(e) => e.stopPropagation()}
-                  >
+                  <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                     <div className="flex justify-end gap-1">
                       <WithTooltip label="Gerar ideia a partir desta tendencia">
                         <Button size="sm" variant="secondary" onClick={() => gerarIdeia(t)}>
@@ -407,7 +394,10 @@ export function RadarPage() {
                 <Meta label="Fonte" value={fonteLabel(preview.fonte)} />
                 <Meta label="Familia" value={familiaLabel[preview.familia]} />
                 {preview.subtema ? <Meta label="Subtema" value={preview.subtema} /> : null}
-                <Meta label="Capturado" value={new Date(preview.criadoEm).toLocaleDateString("pt-BR")} />
+                <Meta
+                  label="Capturado"
+                  value={new Date(preview.criadoEm).toLocaleDateString("pt-BR")}
+                />
               </dl>
               {preview.sinal ? (
                 <div className="mt-4">
@@ -444,7 +434,13 @@ export function RadarPage() {
                 </div>
               ) : null}
               <div className="mt-6 flex flex-col gap-2">
-                <Button size="sm" onClick={() => { gerarIdeia(preview); setPreview(null); }}>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    gerarIdeia(preview);
+                    setPreview(null);
+                  }}
+                >
                   <Sparkles className="mr-1 h-4 w-4" /> Gerar ideia
                 </Button>
                 <Button asChild size="sm" variant="secondary">
@@ -574,10 +570,14 @@ function NovaTendenciaDialog({
           <div>
             <Label>Familia</Label>
             <Select value={familia} onValueChange={(v) => setFamilia(v as ThemeFamily)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 {familias.map((f) => (
-                  <SelectItem key={f} value={f}>{familiaLabel[f]}</SelectItem>
+                  <SelectItem key={f} value={f}>
+                    {familiaLabel[f]}
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -585,10 +585,14 @@ function NovaTendenciaDialog({
           <div>
             <Label>Prioridade</Label>
             <Select value={prioridade} onValueChange={(v) => setPrioridade(v as Prioridade)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 {prioridades.map((p) => (
-                  <SelectItem key={p} value={p}>{prioridadeLabel[p].label}</SelectItem>
+                  <SelectItem key={p} value={p}>
+                    {prioridadeLabel[p].label}
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -600,7 +604,9 @@ function NovaTendenciaDialog({
         </div>
       </div>
       <DialogFooter>
-        <Button variant="ghost" onClick={onClose}>Cancelar</Button>
+        <Button variant="ghost" onClick={onClose}>
+          Cancelar
+        </Button>
         <Button
           disabled={!titulo || !fonte}
           onClick={() =>

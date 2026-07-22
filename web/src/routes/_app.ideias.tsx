@@ -7,11 +7,7 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
-import {
-  familiaLabel,
-  ideaStatusLabel,
-  prioridadeLabel,
-} from "@/lib/status";
+import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
 import { appendScript, setSheetStatus } from "@/lib/api/local";
 import type { Idea, IdeaStatus, Script, ThemeFamily } from "@/lib/mock-data";
@@ -93,7 +89,7 @@ export function IdeiasPage() {
   const counts: Record<IdeaStatus, number> = { novo: 0, em_analise: 0, aprovado: 0, descartado: 0 };
   ideas.forEach((i) => (counts[i.status] += 1));
 
-  function gerarRoteiro(i: Idea) {
+  async function gerarRoteiro(i: Idea) {
     const script: Script = {
       id: genId("s"),
       ideaId: i.id,
@@ -109,24 +105,27 @@ export function IdeiasPage() {
       virada: "Rascunho: virada educativa reforcando avaliacao individual.",
       cta: i.cta,
       cuidadosMedicos:
-        i.observacaoCompliance ||
-        "Nao prescrever. Nao citar doses. Nao prometer resultado.",
+        i.observacaoCompliance || "Nao prescrever. Nao citar doses. Nao prometer resultado.",
       risco: i.familia === "medicamento" ? "alto" : "medio",
       prioridade: i.prioridade,
       formatoSugerido: i.tipo || "Reels",
       status: "aguardando_validacao",
       criadoEm: new Date().toISOString(),
     };
-    addScript(script);
-    updateIdea(i.id, { status: "aprovado" });
-    appendScript(script)
-      .then(() => toast.success("Roteiro criado e salvo no Sheets."))
-      .catch((err) =>
-        toast.error(
-          `Roteiro criado localmente, mas falhou ao salvar: ${err instanceof Error ? err.message : ""}`,
-        ),
-      );
-    navigate({ to: "/roteiros/$id", params: { id: script.id } });
+    try {
+      const saved = await appendScript(script);
+      addScript(saved);
+      updateIdea(i.id, { status: "aprovado" });
+      try {
+        await setSheetStatus("ideias", i.id, "aprovado");
+      } catch {
+        toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
+      }
+      toast.success("Roteiro criado e salvo no Sheets.");
+      navigate({ to: "/roteiros/$id", params: { id: saved.id } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel criar o roteiro.");
+    }
   }
 
   async function descartarIdeia(i: Idea) {
@@ -161,7 +160,9 @@ export function IdeiasPage() {
           <SelectContent>
             <SelectItem value="todas">Todas as familias</SelectItem>
             {familias.map((f) => (
-              <SelectItem key={f} value={f}>{familiaLabel[f]}</SelectItem>
+              <SelectItem key={f} value={f}>
+                {familiaLabel[f]}
+              </SelectItem>
             ))}
           </SelectContent>
         </Select>
@@ -222,8 +223,12 @@ export function IdeiasPage() {
                   <TableCell className="text-xs text-muted-foreground">
                     {i.publicoDor || "—"}
                   </TableCell>
-                  <TableCell><StatusBadge {...prioridadeLabel[i.prioridade]} /></TableCell>
-                  <TableCell><StatusBadge {...ideaStatusLabel[i.status]} /></TableCell>
+                  <TableCell>
+                    <StatusBadge {...prioridadeLabel[i.prioridade]} />
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge {...ideaStatusLabel[i.status]} />
+                  </TableCell>
                   <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                     <div className="flex justify-end gap-1">
                       <WithTooltip label="Gerar roteiro a partir da ideia">
@@ -275,7 +280,9 @@ export function IdeiasPage() {
                 </span>
               </div>
               <Block label="Hook" text={preview.hook} />
-              {preview.publicoDor ? <Block label="Publico / Dor" text={preview.publicoDor} /> : null}
+              {preview.publicoDor ? (
+                <Block label="Publico / Dor" text={preview.publicoDor} />
+              ) : null}
               <Block label="Angulo" text={preview.angulo} />
               <Block label="CTA" text={preview.cta} />
               {preview.observacaoCompliance ? (
@@ -295,7 +302,10 @@ export function IdeiasPage() {
                 <Button
                   size="sm"
                   disabled={preview.status === "descartado"}
-                  onClick={() => { gerarRoteiro(preview); setPreview(null); }}
+                  onClick={() => {
+                    gerarRoteiro(preview);
+                    setPreview(null);
+                  }}
                 >
                   <Sparkles className="mr-1 h-4 w-4" /> Gerar roteiro
                 </Button>

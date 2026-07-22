@@ -6,13 +6,14 @@ import { CompliancePanel, HighlightedText } from "@/components/compliance-panel"
 import { StatusTimeline, type TimelineStep } from "@/components/status-timeline";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
-import {
-  prioridadeLabel,
-  riskLabel,
-  scriptStatusLabel,
-} from "@/lib/status";
+import { prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { createHeyGenVideo, fetchHeyGenCatalog, type HeyGenCatalog } from "@/lib/api/local";
+import {
+  createHeyGenVideo,
+  fetchHeyGenCatalog,
+  saveScript,
+  type HeyGenCatalog,
+} from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +49,7 @@ function RoteiroDetalhe() {
 
   const [draft, setDraft] = useState<Script | undefined>(script);
   const [sending, setSending] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<HeyGenCatalog | null>(null);
   const [avatarId, setAvatarId] = useState("");
   const [voiceId, setVoiceId] = useState("");
@@ -63,19 +65,20 @@ function RoteiroDetalhe() {
         setAvatarId(data.defaultAvatarId || data.avatars[0]?.id || "");
         setVoiceId(data.defaultVoiceId || data.voices[0]?.id || "");
       })
-      .catch((err) => toast.error(err instanceof Error ? err.message : "Falha ao carregar HeyGen."));
+      .catch((err) =>
+        toast.error(err instanceof Error ? err.message : "Falha ao carregar HeyGen."),
+      );
   }, []);
-  const dirty = useMemo(
-    () => JSON.stringify(draft) !== JSON.stringify(script),
-    [draft, script],
-  );
+  const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(script), [draft, script]);
 
   if (!script || !draft) {
     return (
       <AppShell title="Roteiro">
         <p className="text-sm text-muted-foreground">
           Roteiro nao encontrado.{" "}
-          <Link to="/roteiros" className="text-status-info underline">Voltar</Link>
+          <Link to="/roteiros" className="text-status-info underline">
+            Voltar
+          </Link>
         </p>
       </AppShell>
     );
@@ -115,27 +118,37 @@ function RoteiroDetalhe() {
     }
   }
 
+  async function salvarRoteiro() {
+    if (!draft) return;
+    setSaving(true);
+    try {
+      const saved = await saveScript(draft);
+      updateScript(saved.id, saved);
+      setDraft(saved);
+      toast.success("Roteiro salvo no Sheets.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel salvar o roteiro.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <AppShell
       title={`Roteiro: ${script.titulo}`}
       actions={
         <>
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/roteiros"><ArrowLeft className="mr-1 h-4 w-4" /> Voltar</Link>
+            <Link to="/roteiros">
+              <ArrowLeft className="mr-1 h-4 w-4" /> Voltar
+            </Link>
           </Button>
           <WithTooltip label={dirty ? "Salvar alteracoes" : "Nenhuma alteracao pendente"}>
             <Button
               size="sm"
               variant="secondary"
-              disabled={!dirty}
-              onClick={() => {
-                try {
-                  updateScript(script.id, draft);
-                  toast.success("Roteiro salvo.");
-                } catch {
-                  toast.error("Nao foi possivel salvar.");
-                }
-              }}
+              disabled={!dirty || saving}
+              onClick={salvarRoteiro}
             >
               <Save className="mr-1 h-4 w-4" /> Salvar
             </Button>
@@ -175,29 +188,57 @@ function RoteiroDetalhe() {
                 <Input value={draft.tema} onChange={(e) => set("tema", e.target.value)} />
               </Field>
               <Field label="Hook">
-                <Textarea rows={2} value={draft.hook} onChange={(e) => set("hook", e.target.value)} />
+                <Textarea
+                  rows={2}
+                  value={draft.hook}
+                  onChange={(e) => set("hook", e.target.value)}
+                />
               </Field>
               <Field label="Dor / conflito">
-                <Textarea rows={2} value={draft.dorConflito} onChange={(e) => set("dorConflito", e.target.value)} />
+                <Textarea
+                  rows={2}
+                  value={draft.dorConflito}
+                  onChange={(e) => set("dorConflito", e.target.value)}
+                />
               </Field>
               <Field label="Explicacao simples">
-                <Textarea rows={3} value={draft.explicacaoSimples} onChange={(e) => set("explicacaoSimples", e.target.value)} />
+                <Textarea
+                  rows={3}
+                  value={draft.explicacaoSimples}
+                  onChange={(e) => set("explicacaoSimples", e.target.value)}
+                />
               </Field>
               <Field label="Virada / provocacao">
-                <Textarea rows={3} value={draft.virada} onChange={(e) => set("virada", e.target.value)} />
+                <Textarea
+                  rows={3}
+                  value={draft.virada}
+                  onChange={(e) => set("virada", e.target.value)}
+                />
               </Field>
               <Field label="CTA">
                 <Textarea rows={2} value={draft.cta} onChange={(e) => set("cta", e.target.value)} />
               </Field>
               <Field label="Cuidados medicos">
-                <Textarea rows={2} value={draft.cuidadosMedicos} onChange={(e) => set("cuidadosMedicos", e.target.value)} />
+                <Textarea
+                  rows={2}
+                  value={draft.cuidadosMedicos}
+                  onChange={(e) => set("cuidadosMedicos", e.target.value)}
+                />
               </Field>
               <Field label="Formato">
-                <Input value={draft.formatoSugerido} onChange={(e) => set("formatoSugerido", e.target.value)} />
+                <Input
+                  value={draft.formatoSugerido}
+                  onChange={(e) => set("formatoSugerido", e.target.value)}
+                />
               </Field>
               <Field label="Prioridade">
-                <Select value={draft.prioridade} onValueChange={(v) => set("prioridade", v as Prioridade)}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                <Select
+                  value={draft.prioridade}
+                  onValueChange={(v) => set("prioridade", v as Prioridade)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="alta">Alta</SelectItem>
                     <SelectItem value="media">Media</SelectItem>
@@ -206,8 +247,13 @@ function RoteiroDetalhe() {
                 </Select>
               </Field>
               <Field label="Status">
-                <Select value={draft.status} onValueChange={(v) => set("status", v as ScriptStatus)}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                <Select
+                  value={draft.status}
+                  onValueChange={(v) => set("status", v as ScriptStatus)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="aguardando_validacao">Rascunho</SelectItem>
                     <SelectItem value="em_revisao">Em edicao</SelectItem>
@@ -218,11 +264,14 @@ function RoteiroDetalhe() {
               </Field>
               <Field label="Avatar HeyGen">
                 <Select value={avatarId} onValueChange={setAvatarId} disabled={!catalog}>
-                  <SelectTrigger><SelectValue placeholder="Carregando avatares..." /></SelectTrigger>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Carregando avatares..." />
+                  </SelectTrigger>
                   <SelectContent>
                     {catalog?.avatars.map((avatar) => (
                       <SelectItem key={avatar.id} value={avatar.id}>
-                        {avatar.name} ({avatar.orientation === "portrait" ? "vertical" : "horizontal"})
+                        {avatar.name} (
+                        {avatar.orientation === "portrait" ? "vertical" : "horizontal"})
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -230,10 +279,14 @@ function RoteiroDetalhe() {
               </Field>
               <Field label="Voz HeyGen">
                 <Select value={voiceId} onValueChange={setVoiceId} disabled={!catalog}>
-                  <SelectTrigger><SelectValue placeholder="Carregando vozes..." /></SelectTrigger>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Carregando vozes..." />
+                  </SelectTrigger>
                   <SelectContent>
                     {catalog?.voices.map((voice) => (
-                      <SelectItem key={voice.id} value={voice.id}>{voice.name}</SelectItem>
+                      <SelectItem key={voice.id} value={voice.id}>
+                        {voice.name}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -276,11 +329,7 @@ function buildScriptTimeline(
       { key: "validado", label: "Arquivado", state: "error", hint: "Fora do fluxo de producao" },
     ];
   }
-  const order: ScriptStatus[] = [
-    "aguardando_validacao",
-    "em_revisao",
-    "aprovado_clinicamente",
-  ];
+  const order: ScriptStatus[] = ["aguardando_validacao", "em_revisao", "aprovado_clinicamente"];
   const currentIdx = order.indexOf(status);
   const labels: Record<ScriptStatus, string> = {
     aguardando_validacao: "Rascunho",
@@ -303,7 +352,10 @@ function buildScriptTimeline(
       key: "producao",
       label: "Enviar para producao",
       state: status === "aprovado_clinicamente" ? "current" : "pending",
-      hint: status === "aprovado_clinicamente" ? "Pronto para producao" : "Quando o roteiro estiver pronto",
+      hint:
+        status === "aprovado_clinicamente"
+          ? "Pronto para producao"
+          : "Quando o roteiro estiver pronto",
     },
   ];
 }
@@ -320,7 +372,9 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function Preview({ label, text, palavras }: { label: string; text: string; palavras: string[] }) {
   return (
     <div>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
       <div className="text-sm">
         <HighlightedText text={text} palavrasProibidas={palavras} />
       </div>

@@ -4,7 +4,7 @@ import type { HydratePayload } from "../store";
 import type { Idea, Script } from "../mock-data";
 import type { VideoJob } from "../mock-data";
 
-const BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+const BASE = import.meta.env.VITE_API_URL ?? "";
 
 export interface StatePayload extends HydratePayload {
   updatedAt?: string;
@@ -46,11 +46,10 @@ export async function setSheetStatus(
   return (await res.json()) as { ok: boolean };
 }
 
-async function postJson(path: string, body: unknown): Promise<{ ok: boolean }> {
+async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    ...init,
   });
   if (!res.ok) {
     let detail = `API ${path} -> ${res.status}`;
@@ -62,17 +61,32 @@ async function postJson(path: string, body: unknown): Promise<{ ok: boolean }> {
     }
     throw new Error(detail);
   }
-  return (await res.json()) as { ok: boolean };
+  return (await res.json()) as T;
+}
+
+async function postJson<T = { ok: boolean }>(path: string, body: unknown): Promise<T> {
+  return requestJson<T>(path, { method: "POST", body: JSON.stringify(body) });
 }
 
 /** Persiste uma ideia gerada na aba Ideias do Sheets. */
-export function appendIdea(idea: Idea): Promise<{ ok: boolean }> {
-  return postJson("/api/sheets/ideias", idea);
+export async function appendIdea(idea: Idea): Promise<Idea> {
+  const response = await postJson<{ ok: boolean; idea: Idea }>("/api/sheets/ideias", idea);
+  return response.idea;
 }
 
 /** Persiste um roteiro gerado na aba Roteiros do Sheets. */
-export function appendScript(script: Script): Promise<{ ok: boolean }> {
-  return postJson("/api/sheets/roteiros", script);
+export async function appendScript(script: Script): Promise<Script> {
+  const response = await postJson<{ ok: boolean; script: Script }>("/api/sheets/roteiros", script);
+  return response.script;
+}
+
+/** Atualiza o roteiro no Sheets e no snapshot usado para gerar o video. */
+export async function saveScript(script: Script): Promise<Script> {
+  const response = await requestJson<{ ok: boolean; script: Script }>(
+    `/api/sheets/roteiros/${encodeURIComponent(script.id)}`,
+    { method: "PUT", body: JSON.stringify(script) },
+  );
+  return response.script;
 }
 
 export interface GeneratedPack {
@@ -160,7 +174,8 @@ export interface HeyGenCatalog {
 
 export async function fetchHeyGenCatalog(): Promise<HeyGenCatalog> {
   const res = await fetch(`${BASE}/api/heygen/catalog`);
-  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel carregar avatares e vozes."));
+  if (!res.ok)
+    throw new Error(await errorDetail(res, "Nao foi possivel carregar avatares e vozes."));
   return (await res.json()) as HeyGenCatalog;
 }
 
@@ -201,7 +216,8 @@ export interface AiCosts {
 
 export async function fetchAiCosts(): Promise<AiCosts> {
   const res = await fetch(`${BASE}/api/ai-costs`);
-  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel consultar os custos de IA."));
+  if (!res.ok)
+    throw new Error(await errorDetail(res, "Nao foi possivel consultar os custos de IA."));
   return (await res.json()) as AiCosts;
 }
 

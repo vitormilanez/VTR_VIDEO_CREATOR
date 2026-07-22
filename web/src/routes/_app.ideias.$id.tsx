@@ -4,12 +4,8 @@ import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel } from "@/components/compliance-panel";
 import { genId, useStore } from "@/lib/store";
-import { appendScript } from "@/lib/api/local";
-import {
-  familiaLabel,
-  ideaStatusLabel,
-  prioridadeLabel,
-} from "@/lib/status";
+import { appendScript, setSheetStatus } from "@/lib/api/local";
+import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -43,7 +39,10 @@ function IdeiaDetalhe() {
     return (
       <AppShell title="Ideia">
         <p className="text-sm text-muted-foreground">
-          Ideia nao encontrada. <Link to="/ideias" className="text-status-info underline">Voltar</Link>
+          Ideia nao encontrada.{" "}
+          <Link to="/ideias" className="text-status-info underline">
+            Voltar
+          </Link>
         </p>
       </AppShell>
     );
@@ -53,7 +52,7 @@ function IdeiaDetalhe() {
     setDraft((d) => (d ? { ...d, [k]: v } : d));
   }
 
-  function gerarRoteiro() {
+  async function gerarRoteiro() {
     if (!idea || !draft) return;
     const nid = genId("s");
     const script: Script = {
@@ -74,16 +73,20 @@ function IdeiaDetalhe() {
       status: "aguardando_validacao",
       criadoEm: new Date().toISOString(),
     };
-    addScript(script);
-    updateIdea(idea.id, { status: "aprovado" });
-    appendScript(script)
-      .then(() => toast.success("Roteiro criado e salvo no Sheets."))
-      .catch((err) =>
-        toast.error(
-          `Roteiro criado localmente, mas falhou ao salvar: ${err instanceof Error ? err.message : ""}`,
-        ),
-      );
-    navigate({ to: "/roteiros/$id", params: { id: nid } });
+    try {
+      const saved = await appendScript(script);
+      addScript(saved);
+      updateIdea(idea.id, { status: "aprovado" });
+      try {
+        await setSheetStatus("ideias", idea.id, "aprovado");
+      } catch {
+        toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
+      }
+      toast.success("Roteiro criado e salvo no Sheets.");
+      navigate({ to: "/roteiros/$id", params: { id: saved.id } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel criar o roteiro.");
+    }
   }
 
   return (
@@ -92,9 +95,18 @@ function IdeiaDetalhe() {
       actions={
         <>
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/ideias"><ArrowLeft className="mr-1 h-4 w-4" /> Voltar</Link>
+            <Link to="/ideias">
+              <ArrowLeft className="mr-1 h-4 w-4" /> Voltar
+            </Link>
           </Button>
-          <Button size="sm" variant="secondary" onClick={() => { updateIdea(idea.id, draft); toast.success("Ideia salva."); }}>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              updateIdea(idea.id, draft);
+              toast.success("Ideia salva.");
+            }}
+          >
             <Save className="mr-1 h-4 w-4" /> Salvar
           </Button>
           <Button size="sm" onClick={gerarRoteiro}>
@@ -108,9 +120,7 @@ function IdeiaDetalhe() {
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge {...ideaStatusLabel[draft.status]} />
             <StatusBadge {...prioridadeLabel[draft.prioridade]} />
-            <span className="text-xs text-muted-foreground">
-              {familiaLabel[draft.familia]}
-            </span>
+            <span className="text-xs text-muted-foreground">{familiaLabel[draft.familia]}</span>
           </div>
           <div className="rounded-xl border bg-card p-4 shadow-sm">
             <div className="grid gap-3">
@@ -120,11 +130,19 @@ function IdeiaDetalhe() {
               </div>
               <div>
                 <Label className="text-xs">Hook</Label>
-                <Textarea rows={2} value={draft.hook} onChange={(e) => set("hook", e.target.value)} />
+                <Textarea
+                  rows={2}
+                  value={draft.hook}
+                  onChange={(e) => set("hook", e.target.value)}
+                />
               </div>
               <div>
                 <Label className="text-xs">Angulo</Label>
-                <Textarea rows={3} value={draft.angulo} onChange={(e) => set("angulo", e.target.value)} />
+                <Textarea
+                  rows={3}
+                  value={draft.angulo}
+                  onChange={(e) => set("angulo", e.target.value)}
+                />
               </div>
               <div>
                 <Label className="text-xs">CTA</Label>
@@ -132,7 +150,11 @@ function IdeiaDetalhe() {
               </div>
               <div>
                 <Label className="text-xs">Observacao de compliance</Label>
-                <Textarea rows={3} value={draft.observacaoCompliance} onChange={(e) => set("observacaoCompliance", e.target.value)} />
+                <Textarea
+                  rows={3}
+                  value={draft.observacaoCompliance}
+                  onChange={(e) => set("observacaoCompliance", e.target.value)}
+                />
               </div>
             </div>
           </div>

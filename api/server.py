@@ -94,6 +94,23 @@ def _save_video_jobs(jobs: list[dict[str, Any]]) -> None:
     temporary.replace(VIDEO_JOBS)
 
 
+def _migrate_video_job_script_ids(scripts: list[dict[str, Any]]) -> int:
+    """Converte referencias posicionais antigas (s-0, s-1...) para IDs permanentes."""
+    jobs = _load_video_jobs()
+    changed = 0
+    for job in jobs:
+        match = re.fullmatch(r"s-(\d+)", str(job.get("scriptId") or ""))
+        if not match:
+            continue
+        index = int(match.group(1))
+        if 0 <= index < len(scripts):
+            job["scriptId"] = scripts[index]["id"]
+            changed += 1
+    if changed:
+        _save_video_jobs(jobs)
+    return changed
+
+
 def _heygen_cli() -> str:
     command = shutil.which("heygen")
     if not command:
@@ -186,6 +203,12 @@ def _norm(value: Any) -> str:
     return (str(value or "")).strip().lower()
 
 
+def _row_id(row: dict[str, Any], prefix: str, index: int) -> str:
+    """Usa o ID persistido no Sheets e aceita snapshots antigos durante a migracao."""
+    value = str(row.get("ID") or "").strip()
+    return value or f"{prefix}-{index}"
+
+
 def _prioridade(value: Any) -> str:
     v = _norm(value)
     if "alt" in v:
@@ -259,7 +282,7 @@ def _link(value: Any) -> str | None:
 
 def _idea_status(value: Any) -> str:
     v = _norm(value)
-    if "aprov" in v:
+    if "aprov" in v or "gerad" in v:
         return "aprovado"
     if "descart" in v or "rejeit" in v:
         return "descartado"
@@ -270,11 +293,11 @@ def _idea_status(value: Any) -> str:
 
 def _script_status(value: Any) -> str:
     v = _norm(value)
-    if "aprov" in v:
+    if "aprov" in v or "pronto" in v:
         return "aprovado_clinicamente"
-    if "rejeit" in v:
+    if "rejeit" in v or "arquiv" in v:
         return "rejeitado"
-    if "revis" in v:
+    if "revis" in v or "edi" in v:
         return "em_revisao"
     return "aguardando_validacao"
 
@@ -298,7 +321,7 @@ def map_trends(rows: list[dict]) -> list[dict]:
     for i, r in enumerate(rows):
         out.append(
             {
-                "id": f"t-{i}",
+                "id": _row_id(r, "t", i),
                 "titulo": r.get("Tema") or r.get("Sinal de tendência") or "Tendencia",
                 "subtema": r.get("Subtema") or None,
                 "sinal": r.get("Sinal de tendência") or None,
@@ -323,7 +346,7 @@ def map_ideas(rows: list[dict]) -> list[dict]:
     for i, r in enumerate(rows):
         out.append(
             {
-                "id": f"i-{i}",
+                "id": _row_id(r, "i", i),
                 "titulo": r.get("Tema") or r.get("Hook") or "Ideia",
                 "familia": _familia(r.get("Tema"), r.get("Tipo")),
                 "hook": r.get("Hook") or "",
@@ -346,7 +369,7 @@ def map_scripts(rows: list[dict]) -> list[dict]:
     for i, r in enumerate(rows):
         out.append(
             {
-                "id": f"s-{i}",
+                "id": _row_id(r, "s", i),
                 "categoria": _familia(r.get("Categoria"), r.get("Tema")),
                 "tema": r.get("Tema") or "",
                 "titulo": r.get("Título") or r.get("Tema") or "Roteiro",
@@ -374,7 +397,7 @@ def map_calendar(rows: list[dict]) -> list[dict]:
     for i, r in enumerate(rows):
         out.append(
             {
-                "id": f"p-{i}",
+                "id": _row_id(r, "p", i),
                 "titulo": r.get("Título/Hook") or r.get("Tema") or "Post",
                 "tema": r.get("Tema") or None,
                 "formato": r.get("Formato") or None,
@@ -697,10 +720,24 @@ def refresh() -> dict:
     script = ROOT / "sync_sheets_snapshot.py"
     if not script.exists():
         raise HTTPException(status_code=404, detail="sync_sheets_snapshot.py nao encontrado")
+    try:
+        from integrations.google_sheets_rest_client import GoogleSheetsRestClient
+
+        client = GoogleSheetsRestClient()
+        for tab in TAB_RANGE:
+            _ensure_tab_ids(client, tab)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"falha ao preparar IDs permanentes: {exc}")
     proc = _run([str(script)], timeout=120)
     if proc.returncode != 0:
         raise HTTPException(status_code=500, detail=proc.stderr or "falha ao sincronizar")
-    return {"ok": True, "stdout": proc.stdout.strip()[-500:]}
+    scripts = map_scripts(_load_snapshot().get("sheets", {}).get("roteiros", []))
+    migrated_jobs = _migrate_video_job_script_ids(scripts)
+    return {
+        "ok": True,
+        "stdout": proc.stdout.strip()[-500:],
+        "migratedVideoJobs": migrated_jobs,
+    }
 
 
 @app.post("/api/trends/hunt")
@@ -743,10 +780,10 @@ def hunt_trends() -> dict:
 # Escrita de status de volta no Google Sheets
 # --------------------------------------------------------------------------- #
 TAB_RANGE = {
-    "radar": "'Radar Tendencias'!A:K",
-    "ideias": "'Ideias'!A:J",
-    "roteiros": "'Roteiros'!A:O",
-    "calendario": "'Calendario'!A:J",
+    "radar": "'Radar Tendencias'!A:L",
+    "ideias": "'Ideias'!A:K",
+    "roteiros": "'Roteiros'!A:P",
+    "calendario": "'Calendario'!A:K",
 }
 TAB_TITLE = {
     "radar": "Radar Tendencias",
@@ -754,6 +791,7 @@ TAB_TITLE = {
     "roteiros": "Roteiros",
     "calendario": "Calendario",
 }
+TAB_PREFIX = {"radar": "t", "ideias": "i", "roteiros": "s", "calendario": "p"}
 
 # Enum interno do frontend -> rotulo PT-BR gravado na planilha.
 STATUS_LABELS = {
@@ -795,6 +833,92 @@ class StatusUpdate(BaseModel):
     status: str
 
 
+def _sheet_row_number(values: list[list[Any]], item_id: str, prefix: str) -> int:
+    """Localiza pelo ID estavel; IDs posicionais antigos continuam funcionando."""
+    if not values:
+        raise HTTPException(status_code=404, detail="aba vazia")
+    headers = [str(value).strip() for value in values[0]]
+    id_col = headers.index("ID") if "ID" in headers else -1
+    data_rows: list[tuple[int, list[Any]]] = []
+    for rownum, row in enumerate(values[1:], start=2):
+        if any(str(value).strip() for value in row):
+            data_rows.append((rownum, row))
+            if id_col >= 0 and id_col < len(row) and str(row[id_col]).strip() == item_id:
+                return rownum
+
+    match = re.fullmatch(rf"{re.escape(prefix)}-(\d+)", item_id)
+    if match:
+        index = int(match.group(1))
+        if 0 <= index < len(data_rows):
+            return data_rows[index][0]
+    raise HTTPException(status_code=404, detail=f"item {item_id} nao encontrado")
+
+
+def _update_snapshot_row(tab: str, item_id: str, patch: dict[str, Any]) -> None:
+    snapshot = _load_snapshot()
+    rows = snapshot.setdefault("sheets", {}).setdefault(tab, [])
+    prefix = TAB_PREFIX[tab]
+    target: dict[str, Any] | None = next(
+        (row for index, row in enumerate(rows) if _row_id(row, prefix, index) == item_id),
+        None,
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"item {item_id} nao encontrado no snapshot")
+    target.update(patch)
+    snapshot["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    temporary = SNAPSHOT.with_suffix(".tmp")
+    temporary.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(SNAPSHOT)
+
+
+def _append_snapshot_row(tab: str, row: dict[str, Any]) -> None:
+    snapshot = _load_snapshot()
+    snapshot.setdefault("sheets", {}).setdefault(tab, []).append(row)
+    snapshot["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    temporary = SNAPSHOT.with_suffix(".tmp")
+    temporary.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(SNAPSHOT)
+
+
+def _ensure_tab_ids(client: Any, tab: str) -> int:
+    """Cria a coluna ID e preenche somente registros que ainda nao possuem ID."""
+    values = client.get_values(TAB_RANGE[tab])
+    if not values:
+        return 0
+    headers = [str(value).strip() for value in values[0]]
+    id_col = headers.index("ID") if "ID" in headers else len(headers)
+    ids: list[list[str]] = [["ID"]]
+    created = 0
+    for row in values[1:]:
+        existing = str(row[id_col]).strip() if id_col < len(row) else ""
+        has_data = any(str(value).strip() for index, value in enumerate(row) if index != id_col)
+        if has_data and not existing:
+            existing = f"{TAB_PREFIX[tab]}-{uuid.uuid4().hex[:12]}"
+            created += 1
+        ids.append([existing])
+    column = _col_letter(id_col)
+    client.update_values(f"'{TAB_TITLE[tab]}'!{column}1:{column}{len(ids)}", ids)
+    return created
+
+
+@app.post("/api/sheets/ensure-ids")
+def ensure_sheet_ids() -> dict:
+    """Migra as abas operacionais para IDs permanentes e atualiza o snapshot."""
+    from integrations.google_sheets_rest_client import GoogleSheetsRestClient
+
+    try:
+        client = GoogleSheetsRestClient()
+        created = {tab: _ensure_tab_ids(client, tab) for tab in TAB_RANGE}
+        proc = _run([str(ROOT / "sync_sheets_snapshot.py")], timeout=120)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"falha ao criar IDs permanentes: {exc}")
+    if proc.returncode != 0:
+        raise HTTPException(status_code=500, detail=proc.stderr or "falha ao atualizar snapshot")
+    scripts = map_scripts(_load_snapshot().get("sheets", {}).get("roteiros", []))
+    migrated_jobs = _migrate_video_job_script_ids(scripts)
+    return {"ok": True, "created": created, "migratedVideoJobs": migrated_jobs}
+
+
 @app.post("/api/sheets/{tab}/{item_id}/status")
 def set_status(tab: str, item_id: str, payload: StatusUpdate) -> dict:
     """Grava o novo status de um item (radar/ideias/roteiros) na planilha."""
@@ -803,11 +927,6 @@ def set_status(tab: str, item_id: str, payload: StatusUpdate) -> dict:
     label = STATUS_LABELS.get(tab, {}).get(payload.status)
     if not label:
         raise HTTPException(status_code=400, detail=f"status invalido: {payload.status}")
-    try:
-        idx = int(item_id.rsplit("-", 1)[-1])
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"id invalido: {item_id}")
-
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     try:
@@ -815,33 +934,18 @@ def set_status(tab: str, item_id: str, payload: StatusUpdate) -> dict:
         values = client.get_values(TAB_RANGE[tab])
     except Exception as exc:  # credenciais / rede
         raise HTTPException(status_code=503, detail=f"falha ao acessar Sheets: {exc}")
-    if not values:
-        raise HTTPException(status_code=404, detail="aba vazia")
-
     headers = [str(v).strip() for v in values[0]]
     if "Status" not in headers:
         raise HTTPException(status_code=500, detail="coluna 'Status' nao encontrada")
     status_col = headers.index("Status")
 
-    # Mesma regra de rows_to_dicts (pula linhas totalmente vazias),
-    # guardando o numero real da linha na planilha.
-    data_rownums: list[int] = []
-    for rownum, row in enumerate(values[1:], start=2):
-        record = {
-            h: (str(row[j]).strip() if j < len(row) else "")
-            for j, h in enumerate(headers)
-            if h
-        }
-        if any(record.values()):
-            data_rownums.append(rownum)
-
-    if idx < 0 or idx >= len(data_rownums):
-        raise HTTPException(status_code=404, detail=f"item {item_id} fora do intervalo")
-    cell = f"'{TAB_TITLE[tab]}'!{_col_letter(status_col)}{data_rownums[idx]}"
+    rownum = _sheet_row_number(values, item_id, TAB_PREFIX[tab])
+    cell = f"'{TAB_TITLE[tab]}'!{_col_letter(status_col)}{rownum}"
     try:
         client.update_values(cell, [[label]])
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"falha ao gravar: {exc}")
+    _update_snapshot_row(tab, item_id, {"Status": label})
     return {"ok": True, "cell": cell, "status": label}
 
 
@@ -872,6 +976,7 @@ _ROTEIRO_STATUS = {
 
 
 class IdeaIn(BaseModel):
+    id: str | None = None
     titulo: str
     hook: str = ""
     angulo: str = ""
@@ -885,6 +990,7 @@ class IdeaIn(BaseModel):
 
 
 class ScriptIn(BaseModel):
+    id: str | None = None
     categoria: str = "educativo"
     tema: str = ""
     titulo: str
@@ -902,11 +1008,13 @@ class ScriptIn(BaseModel):
     status: str = "aguardando_validacao"
 
 
-def _append(range_name: str, row: list) -> None:
+def _append(tab: str, row: list) -> None:
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     try:
-        GoogleSheetsRestClient().append_rows(range_name, [row])
+        client = GoogleSheetsRestClient()
+        _ensure_tab_ids(client, tab)
+        client.append_rows(TAB_RANGE[tab], [row])
     except Exception as exc:  # credenciais / rede
         raise HTTPException(status_code=503, detail=f"falha ao gravar no Sheets: {exc}")
 
@@ -914,6 +1022,7 @@ def _append(range_name: str, row: list) -> None:
 @app.post("/api/sheets/ideias")
 def append_idea(payload: IdeaIn) -> dict:
     """Grava uma nova ideia na aba 'Ideias' (colunas reais)."""
+    item_id = payload.id or f"i-{uuid.uuid4().hex[:12]}"
     row = [
         payload.titulo,                       # Tema
         payload.hook,                         # Hook
@@ -925,14 +1034,18 @@ def append_idea(payload: IdeaIn) -> dict:
         _IDEIA_STATUS.get(payload.status, "Nova"),      # Status
         payload.linkOrigem or "",             # Link origem
         payload.observacaoCompliance,         # Observações
+        item_id,                              # ID permanente
     ]
-    _append("'Ideias'!A:J", row)
-    return {"ok": True, "appended": 1}
+    _append("ideias", row)
+    raw = dict(zip(["Tema", "Hook", "Ângulo", "Tipo", "Público/Dor", "CTA", "Prioridade", "Status", "Link origem", "Observações", "ID"], row))
+    _append_snapshot_row("ideias", raw)
+    return {"ok": True, "idea": map_ideas([raw])[0]}
 
 
 @app.post("/api/sheets/roteiros")
 def append_script(payload: ScriptIn) -> dict:
     """Grava um novo roteiro na aba 'Roteiros' (colunas reais)."""
+    item_id = payload.id or f"s-{uuid.uuid4().hex[:12]}"
     row = [
         _FAMILIA.get(payload.categoria, "Educativo"),   # Categoria
         payload.tema,                         # Tema
@@ -949,9 +1062,42 @@ def append_script(payload: ScriptIn) -> dict:
         payload.aprovador or "",              # Aprovador
         payload.validadoEm or "",             # Data aprovação
         payload.link or "",                   # Link doc/video
+        item_id,                               # ID permanente
     ]
-    _append("'Roteiros'!A:O", row)
-    return {"ok": True, "appended": 1}
+    _append("roteiros", row)
+    headers = ["Categoria", "Tema", "Título", "Hook", "Dor/Conflito", "Explicação simples", "Virada/Provocação", "CTA", "Cuidados médicos", "Risco", "Formato sugerido", "Status", "Aprovador", "Data aprovação", "Link doc/video", "ID"]
+    raw = dict(zip(headers, row))
+    _append_snapshot_row("roteiros", raw)
+    return {"ok": True, "script": map_scripts([raw])[0]}
+
+
+@app.put("/api/sheets/roteiros/{item_id}")
+def update_script(item_id: str, payload: ScriptIn) -> dict:
+    """Atualiza o roteiro completo no Sheets e no snapshot usado pela producao."""
+    from integrations.google_sheets_rest_client import GoogleSheetsRestClient
+
+    item_id = payload.id or item_id
+    row = [
+        _FAMILIA.get(payload.categoria, "Educativo"), payload.tema, payload.titulo,
+        payload.hook, payload.dorConflito, payload.explicacaoSimples, payload.virada,
+        payload.cta, payload.cuidadosMedicos, _RISCO.get(payload.risco, "Médio"),
+        payload.formatoSugerido, _ROTEIRO_STATUS.get(payload.status, "Rascunho"),
+        payload.aprovador or "", payload.validadoEm or "", payload.link or "", item_id,
+    ]
+    try:
+        client = GoogleSheetsRestClient()
+        _ensure_tab_ids(client, "roteiros")
+        values = client.get_values(TAB_RANGE["roteiros"])
+        rownum = _sheet_row_number(values, item_id, "s")
+        client.update_values(f"'Roteiros'!A{rownum}:P{rownum}", [row])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"falha ao atualizar roteiro: {exc}")
+    headers = ["Categoria", "Tema", "Título", "Hook", "Dor/Conflito", "Explicação simples", "Virada/Provocação", "CTA", "Cuidados médicos", "Risco", "Formato sugerido", "Status", "Aprovador", "Data aprovação", "Link doc/video", "ID"]
+    raw = dict(zip(headers, row))
+    _update_snapshot_row("roteiros", item_id, raw)
+    return {"ok": True, "script": map_scripts([raw])[0]}
 
 
 # --------------------------------------------------------------------------- #
@@ -1143,99 +1289,125 @@ def _slug(value: str) -> str:
     return slug[:60] or "pack"
 
 
+def _limpar_export_antigo(folder: Path) -> None:
+    """Remove apenas os artefatos que este export cria (nao mexe no resto)."""
+    import shutil
+
+    for nome in ("1-imagens", "2-textos", "carrossel", "stories"):
+        alvo = folder / nome
+        if alvo.is_dir():
+            shutil.rmtree(alvo, ignore_errors=True)
+    for nome in ("LEIA-ME.md", "PACK.md", "legenda.txt", "post-fixo.txt"):
+        alvo = folder / nome
+        if alvo.is_file():
+            alvo.unlink()
+
+
 @app.post("/api/packs/export")
 def export_pack(payload: PackExportIn) -> dict:
-    """Grava o pack completo em content/packs/<data>_<slug>/."""
+    """
+    Grava o pack em content/packs/<data>_<slug>/ organizado por uso:
+
+        LEIA-ME.md      -> o que postar, em que ordem
+        1-imagens/      -> PNGs prontos (carrossel/, stories/, post-fixo.png)
+        2-textos/       -> legenda e textos para copiar
+    """
     data = datetime.now().strftime("%Y-%m-%d")
     folder = PACKS_DIR / f"{data}_{_slug(payload.titulo)}"
-    carrossel_dir = folder / "carrossel"
-    stories_dir = folder / "stories"
+    img_root = folder / "1-imagens"
+    txt_root = folder / "2-textos"
+    pack = payload.pack
+
     try:
-        carrossel_dir.mkdir(parents=True, exist_ok=True)
-        stories_dir.mkdir(parents=True, exist_ok=True)
+        folder.mkdir(parents=True, exist_ok=True)
+        _limpar_export_antigo(folder)
+        img_root.mkdir(parents=True, exist_ok=True)
+        txt_root.mkdir(parents=True, exist_ok=True)
 
-        escritos: list[str] = []
-
-        # Um arquivo por slide do carrossel (facil de colar no Canva).
-        for i, slide in enumerate(payload.pack.carousel, start=1):
-            caminho = carrossel_dir / f"slide-{i:02d}.txt"
-            caminho.write_text(f"{slide.title}\n\n{slide.body}\n", encoding="utf-8")
-            escritos.append(str(caminho.relative_to(folder)))
-
-        # Carrossel completo num arquivo so.
-        todos = "\n\n".join(
-            f"SLIDE {i}\n{s.title}\n\n{s.body}"
-            for i, s in enumerate(payload.pack.carousel, start=1)
+        # --- 2-textos: um arquivo por peca, sem repeticao ---
+        carrossel_txt = "\n\n".join(
+            f"── SLIDE {i:02d} ──\n{s.title}\n\n{s.body}"
+            for i, s in enumerate(pack.carousel, start=1)
         )
-        (carrossel_dir / "carrossel-completo.txt").write_text(todos + "\n", encoding="utf-8")
-        escritos.append("carrossel/carrossel-completo.txt")
+        (txt_root / "carrossel.txt").write_text(carrossel_txt + "\n", encoding="utf-8")
 
-        # Stories, um por tela.
-        for i, story in enumerate(payload.pack.stories, start=1):
-            caminho = stories_dir / f"story-{i:02d}.txt"
-            caminho.write_text(f"{story.title}\n\n{story.body}\n", encoding="utf-8")
-            escritos.append(str(caminho.relative_to(folder)))
-
-        (folder / "post-fixo.txt").write_text(
-            f"{payload.pack.staticPost.headline}\n\n{payload.pack.staticPost.subline}\n",
-            encoding="utf-8",
+        stories_txt = "\n\n".join(
+            f"── STORY {i:02d} · {s.title} ──\n{s.body}"
+            for i, s in enumerate(pack.stories, start=1)
         )
-        escritos.append("post-fixo.txt")
+        (txt_root / "stories.txt").write_text(stories_txt + "\n", encoding="utf-8")
 
-        (folder / "legenda.txt").write_text(payload.pack.caption + "\n", encoding="utf-8")
-        escritos.append("legenda.txt")
-
-        # Resumo legivel do pacote inteiro.
-        linhas = [
-            f"# Pack de Conteudo — {payload.titulo}",
-            "",
-            f"- Tema: {payload.tema}",
-            f"- Categoria: {payload.categoria}",
-            f"- Risco: {payload.risco}",
-            f"- Formato do video: {payload.formatoSugerido}",
-            f"- Exportado em: {data}",
-            "",
-            "> Conteudo educativo. Requer validacao medica antes de publicar.",
-            "",
-            f"## Carrossel ({len(payload.pack.carousel)} slides)",
-            "",
-        ]
-        for i, s in enumerate(payload.pack.carousel, start=1):
-            linhas += [f"**Slide {i} — {s.title}**", "", s.body, ""]
-        linhas += ["## Post fixo", "", f"**{payload.pack.staticPost.headline}**", "",
-                   payload.pack.staticPost.subline, "", "## Legenda", "", payload.pack.caption, "",
-                   f"## Stories ({len(payload.pack.stories)} telas)", ""]
-        for i, s in enumerate(payload.pack.stories, start=1):
-            linhas += [f"**{i}. {s.title}**", "", s.body, ""]
-        if payload.pack.checklist:
-            linhas += ["## Checklist", ""] + [f"- [ ] {item}" for item in payload.pack.checklist]
-        (folder / "PACK.md").write_text("\n".join(linhas) + "\n", encoding="utf-8")
-        escritos.append("PACK.md")
+        (txt_root / "legenda.txt").write_text(pack.caption + "\n", encoding="utf-8")
+        (txt_root / "post-fixo.txt").write_text(
+            f"{pack.staticPost.headline}\n\n{pack.staticPost.subline}\n", encoding="utf-8"
+        )
+        textos = 4
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Falha ao salvar o pack: {exc}")
 
-    # Renderiza os slides como PNG prontos para postar. Se o Chromium do
-    # Playwright nao estiver disponivel, o export de texto continua valendo.
+    # --- 1-imagens: PNGs prontos para postar ---
     imagens = 0
     aviso_imagens = ""
     try:
         from api.slides import render_pack_images
 
-        carrossel = [s.model_dump() for s in payload.pack.carousel]
+        carrossel = [s.model_dump() for s in pack.carousel]
         if carrossel:
             carrossel[0]["tema"] = payload.tema or payload.categoria
         resultado = render_pack_images(
-            folder, carrossel, [s.model_dump() for s in payload.pack.stories]
+            img_root,
+            carrossel,
+            [s.model_dump() for s in pack.stories],
+            pack.staticPost.model_dump(),
         )
         imagens = int(resultado.get("images", 0))
     except Exception as exc:  # playwright ausente / falha de render
         aviso_imagens = f"Textos salvos, mas nao consegui gerar as imagens: {exc}"
 
+    # --- LEIA-ME: guia de publicacao ---
+    leiame = [
+        f"# {payload.titulo}",
+        "",
+        f"Tema: {payload.tema} · Risco: {payload.risco} · Exportado em {data}",
+        "",
+        "> ⚠️ Conteúdo educativo. **Validar com o Dr. Guilherme antes de publicar.**",
+        "",
+        "## O que postar",
+        "",
+        f"**1. Carrossel** — `1-imagens/carrossel/` ({len(pack.carousel)} imagens, 1080×1350)",
+        "   Suba na ordem (carrossel-01 → carrossel-%02d) e use a legenda abaixo."
+        % len(pack.carousel),
+        "",
+        "**2. Legenda** — `2-textos/legenda.txt`",
+        "   Copie e cole na publicação. Já vem com hashtags.",
+        "",
+        f"**3. Stories** — `1-imagens/stories/` ({len(pack.stories)} imagens, 1080×1920)",
+        "   Publique no dia seguinte apontando para o post.",
+        "   Na tela de enquete, adicione o sticker de enquete do Instagram.",
+        "",
+        "**4. Post fixo (opcional)** — `1-imagens/post-fixo.png` (1080×1080)",
+        "   Peça única, para reforçar a mensagem principal.",
+        "",
+        f"**5. Vídeo** — gere na aba *Produção de vídeos* do app (formato: {payload.formatoSugerido}).",
+        "",
+        "## Pastas",
+        "",
+        "- `1-imagens/` → PNGs prontos para postar",
+        "- `2-textos/` → textos para copiar e colar (ou editar no Canva)",
+        "",
+    ]
+    if pack.checklist:
+        leiame += ["## Checklist", ""] + [f"- [ ] {item}" for item in pack.checklist] + [""]
+    try:
+        (folder / "LEIA-ME.md").write_text("\n".join(leiame), encoding="utf-8")
+    except OSError:
+        pass
+
     return {
         "ok": True,
         "folder": str(folder),
         "relative": str(folder.relative_to(ROOT)),
-        "files": len(escritos),
+        "files": textos + 1,
         "images": imagens,
         "warning": aviso_imagens,
     }
