@@ -66,51 +66,128 @@ function sentence(value: string, fallback: string) {
   return text.endsWith(".") || text.endsWith("?") || text.endsWith("!") ? text : `${text || fallback}.`;
 }
 
+/** Remove pontuacao final para usar como titulo/headline. */
+function stripEnd(value: string) {
+  return clean(value).replace(/[\s.?!:;,]+$/, "");
+}
+
+/** Titulo contextual do slide de reforco, conforme a familia do roteiro. */
+function reinforcementSlide(script: Script): { title: string; body: string } {
+  const map: Record<string, { title: string; body: string }> = {
+    medicamento: {
+      title: "Nao existe atalho magico",
+      body: "Medicamento pode ajudar, mas indicacao, acompanhamento e mudanca de habito andam juntos. Cada caso e um caso.",
+    },
+    comportamento: {
+      title: "Nao e falta de forca de vontade",
+      body: "Comportamento alimentar envolve sono, rotina, emocoes e contexto. Julgar so atrapalha o cuidado.",
+    },
+    metabolismo: {
+      title: "Seu corpo tem sinais",
+      body: "O metabolismo responde a varios fatores. Entender os sinais ajuda a buscar avaliacao no momento certo.",
+    },
+    obesidade: {
+      title: "Obesidade e multifatorial",
+      body: "Genetica, ambiente, hormonios e rotina influenciam o peso. Cuidado de verdade comeca sem culpa.",
+    },
+    educativo: {
+      title: "Cada pessoa e unica",
+      body: "O que funciona para um pode nao servir para outro. Por isso a avaliacao individual importa tanto.",
+    },
+  };
+  return map[script.categoria] ?? map.educativo;
+}
+
+/** Hashtags derivadas da familia e do tema do roteiro. */
+function hashtags(script: Script): string {
+  const base = ["saudemetabolica", "educacaoemsaude", "drguilherme"];
+  const porFamilia: Record<string, string[]> = {
+    medicamento: ["glp1", "emagrecimentocomsaude", "obesidade"],
+    comportamento: ["comportamentoalimentar", "habitossaudaveis"],
+    metabolismo: ["metabolismo", "resistenciainsulinica"],
+    obesidade: ["obesidade", "saudesemjulgamento"],
+    educativo: ["saude", "bemestar"],
+  };
+  const blob = `${script.tema} ${script.titulo}`.toLowerCase();
+  const porTema = [
+    ["mounjaro", "mounjaro"],
+    ["ozempic", "ozempic"],
+    ["wegovy", "wegovy"],
+    ["glp", "glp1"],
+    ["jejum", "jejumintermitente"],
+    ["compuls", "compulsaoalimentar"],
+    ["insulin", "resistenciainsulinica"],
+  ]
+    .filter(([k]) => blob.includes(k))
+    .map(([, tag]) => tag);
+
+  const tags = [...new Set([...base, ...(porFamilia[script.categoria] ?? []), ...porTema])];
+  return tags.map((t) => `#${t}`).join(" ");
+}
+
 function buildPack(script: Script): Pack {
   const tema = clean(script.tema) || clean(script.titulo) || "tema principal";
   const hook = sentence(script.hook, `Entenda um ponto importante sobre ${tema}`);
-  const dor = sentence(script.dorConflito, "Existe uma dor real por tras desse comportamento");
-  const explicacao = sentence(script.explicacaoSimples, "A explicacao precisa ser educativa e individualizada");
-  const virada = sentence(script.virada, "A virada e trocar promessa por clareza");
-  const cta = sentence(script.cta, "Procure orientacao individual");
-  const cuidados = sentence(script.cuidadosMedicos, "Sem dose, sem prescricao e sem promessa de resultado");
+  const dor = sentence(script.dorConflito, "Muita gente sente isso e acha que o problema e so com ela");
+  const explicacao = sentence(
+    script.explicacaoSimples,
+    "A explicacao precisa ser educativa, simples e individualizada",
+  );
+  const virada = sentence(script.virada, "A virada e trocar promessa por clareza e cuidado real");
+  const cta = sentence(script.cta, "Procure avaliacao individual com um profissional de saude");
+  const cuidados = sentence(
+    script.cuidadosMedicos,
+    "Conteudo educativo: sem dose, sem prescricao e sem promessa de resultado",
+  );
+  const reforco = reinforcementSlide(script);
+
+  const carousel: Pack["carousel"] = [
+    { title: stripEnd(hook), body: "Arraste para entender por que isso importa. 👉" },
+    { title: "A real situacao", body: dor },
+    { title: "O que quase ninguem explica", body: explicacao },
+    { title: "A virada de chave", body: virada },
+    { title: "Importante saber", body: cuidados },
+    reforco,
+    { title: "Seu proximo passo", body: `${cta} Salve este post e envie para quem precisa. 💙` },
+  ];
+
+  const caption = [
+    hook,
+    "",
+    dor,
+    explicacao,
+    "",
+    `👉 ${virada}`,
+    "",
+    `⚠️ ${cuidados}`,
+    "",
+    cta,
+    "",
+    "Conteudo educativo. Nao substitui avaliacao medica individual.",
+    "",
+    hashtags(script),
+  ].join("\n");
 
   return {
-    carousel: [
-      { title: hook.replace(/[?.!]$/, ""), body: "Comece pelo ponto que prende atencao sem prometer resultado." },
-      { title: "O que esta por tras", body: dor },
-      { title: "Explicacao simples", body: explicacao },
-      { title: "A virada", body: virada },
-      { title: "Cuidado importante", body: cuidados },
-      { title: "Proximo passo", body: cta },
-    ],
+    carousel,
     staticPost: {
-      headline: script.titulo,
-      subline: virada,
+      headline: stripEnd(script.titulo || hook),
+      subline: stripEnd(virada),
     },
-    caption: [
-      hook,
-      "",
-      dor,
-      explicacao,
-      virada,
-      "",
-      cuidados,
-      "",
-      cta,
-    ].join("\n"),
+    caption,
     stories: [
-      { title: "Story 1", body: hook },
-      { title: "Story 2", body: dor },
-      { title: "Story 3", body: "Caixinha: qual e sua maior duvida sobre esse tema?" },
-      { title: "Story 4", body: cta },
+      { title: "Capa", body: hook },
+      { title: "A dor real", body: dor },
+      { title: "Enquete", body: "Voce ja passou por isso? Responda: 👉 Sim / Ainda nao" },
+      { title: "Em 1 frase", body: explicacao },
+      { title: "Proximo passo", body: `${cta} Toque no link da bio.` },
     ],
     checklist: [
-      "Carrossel com 6 slides educativos",
-      "Post fixo com frase central",
-      "Legenda pronta para Instagram ou LinkedIn",
-      "Stories com pergunta e CTA",
-      "Baseado no mesmo roteiro do video HeyGen",
+      `Carrossel com ${carousel.length} slides educativos`,
+      "Post fixo com frase central de impacto",
+      "Legenda pronta com hashtags e aviso de compliance",
+      "5 stories com enquete e CTA",
+      "Tudo alinhado ao roteiro e as regras de compliance medico",
     ],
   };
 }
