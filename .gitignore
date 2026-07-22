@@ -23,3 +23,6 @@ assets/personas/*/raw/
 assets/personas/*/processed/
 assets/personas/*/reference/
 production_videos/
+
+# Exports gerados pelo botao "Salvar local" (regeneraveis)
+content/packs/

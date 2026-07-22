@@ -102,6 +102,40 @@ export async function generatePack(
   return (await res.json()) as { pack: GeneratedPack; compliance: PackCompliance };
 }
 
+export interface PackForExport {
+  carousel: Array<{ title: string; body: string }>;
+  staticPost: { headline: string; subline: string };
+  caption: string;
+  stories: Array<{ title: string; body: string }>;
+  checklist: string[];
+}
+
+/** Salva o pack completo numa pasta local (content/packs/...). */
+export async function exportPack(
+  script: Script,
+  pack: PackForExport,
+): Promise<{ ok: boolean; relative: string; folder: string; files: number }> {
+  const res = await fetch(`${BASE}/api/packs/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      titulo: script.titulo,
+      tema: script.tema,
+      categoria: script.categoria,
+      risco: script.risco,
+      formatoSugerido: script.formatoSugerido,
+      pack,
+    }),
+  });
+  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel salvar o pack."));
+  return (await res.json()) as {
+    ok: boolean;
+    relative: string;
+    folder: string;
+    files: number;
+  };
+}
+
 export async function huntTrends(): Promise<{ ok: boolean; added?: number }> {
   const res = await fetch(`${BASE}/api/trends/hunt`, { method: "POST" });
   if (!res.ok) {

@@ -17,12 +17,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { familiaLabel, prioridadeLabel, riskLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
+import { exportPack } from "@/lib/api/local";
 import type { Script } from "@/lib/mock-data";
 import {
   CalendarPlus,
   CheckCircle2,
   Copy,
   FileText,
+  FolderDown,
+  Loader2,
   Image,
   Instagram,
   Layers3,
@@ -207,6 +210,7 @@ function PacksPage() {
   const search = Route.useSearch();
   const navigate = useNavigate();
   const [selectedId, setSelectedId] = useState(search.scriptId ?? scripts[0]?.id ?? "");
+  const [salvando, setSalvando] = useState(false);
 
   const script = scripts.find((item) => item.id === selectedId);
   const mockPack = useMemo(() => (script ? buildPack(script) : null), [script]);
@@ -219,15 +223,42 @@ function PacksPage() {
     navigate({ to: "/packs", search: { scriptId: id }, replace: true });
   }
 
+  async function salvarLocal() {
+    if (!script || !pack) return;
+    setSalvando(true);
+    const aviso = toast.loading("Salvando pack na pasta local...");
+    try {
+      const res = await exportPack(script, pack);
+      toast.success(`Pack salvo em ${res.relative} (${res.files} arquivos).`, {
+        id: aviso,
+        duration: 8000,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao salvar o pack.", { id: aviso });
+    } finally {
+      setSalvando(false);
+    }
+  }
+
   return (
     <AppShell
       title="Pack de conteudo"
       actions={
-        <Button asChild size="sm" variant="secondary">
-          <Link to="/roteiros">
-            <FileText className="mr-1 h-3.5 w-3.5" /> Roteiros
-          </Link>
-        </Button>
+        <>
+          <Button size="sm" onClick={salvarLocal} disabled={!script || salvando}>
+            {salvando ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <FolderDown className="mr-1 h-3.5 w-3.5" />
+            )}
+            Salvar local
+          </Button>
+          <Button asChild size="sm" variant="secondary">
+            <Link to="/roteiros">
+              <FileText className="mr-1 h-3.5 w-3.5" /> Roteiros
+            </Link>
+          </Button>
+        </>
       }
     >
       {scripts.length === 0 ? (

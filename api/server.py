@@ -1101,6 +1101,127 @@ def generate_pack(payload: PackIn) -> dict:
     return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
 
 
+# --------------------------------------------------------------------------- #
+# Exportacao do Pack para pasta local (carrossel, post, legenda, stories)
+# --------------------------------------------------------------------------- #
+PACKS_DIR = ROOT / "content" / "packs"
+
+
+class PackSlide(BaseModel):
+    title: str = ""
+    body: str = ""
+
+
+class PackStaticPost(BaseModel):
+    headline: str = ""
+    subline: str = ""
+
+
+class PackBody(BaseModel):
+    carousel: list[PackSlide] = []
+    staticPost: PackStaticPost = PackStaticPost()
+    caption: str = ""
+    stories: list[PackSlide] = []
+    checklist: list[str] = []
+
+
+class PackExportIn(BaseModel):
+    titulo: str
+    tema: str = ""
+    categoria: str = "educativo"
+    risco: str = ""
+    formatoSugerido: str = ""
+    pack: PackBody
+
+
+def _slug(value: str) -> str:
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii").lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_only).strip("-")
+    return slug[:60] or "pack"
+
+
+@app.post("/api/packs/export")
+def export_pack(payload: PackExportIn) -> dict:
+    """Grava o pack completo em content/packs/<data>_<slug>/."""
+    data = datetime.now().strftime("%Y-%m-%d")
+    folder = PACKS_DIR / f"{data}_{_slug(payload.titulo)}"
+    carrossel_dir = folder / "carrossel"
+    stories_dir = folder / "stories"
+    try:
+        carrossel_dir.mkdir(parents=True, exist_ok=True)
+        stories_dir.mkdir(parents=True, exist_ok=True)
+
+        escritos: list[str] = []
+
+        # Um arquivo por slide do carrossel (facil de colar no Canva).
+        for i, slide in enumerate(payload.pack.carousel, start=1):
+            caminho = carrossel_dir / f"slide-{i:02d}.txt"
+            caminho.write_text(f"{slide.title}\n\n{slide.body}\n", encoding="utf-8")
+            escritos.append(str(caminho.relative_to(folder)))
+
+        # Carrossel completo num arquivo so.
+        todos = "\n\n".join(
+            f"SLIDE {i}\n{s.title}\n\n{s.body}"
+            for i, s in enumerate(payload.pack.carousel, start=1)
+        )
+        (carrossel_dir / "carrossel-completo.txt").write_text(todos + "\n", encoding="utf-8")
+        escritos.append("carrossel/carrossel-completo.txt")
+
+        # Stories, um por tela.
+        for i, story in enumerate(payload.pack.stories, start=1):
+            caminho = stories_dir / f"story-{i:02d}.txt"
+            caminho.write_text(f"{story.title}\n\n{story.body}\n", encoding="utf-8")
+            escritos.append(str(caminho.relative_to(folder)))
+
+        (folder / "post-fixo.txt").write_text(
+            f"{payload.pack.staticPost.headline}\n\n{payload.pack.staticPost.subline}\n",
+            encoding="utf-8",
+        )
+        escritos.append("post-fixo.txt")
+
+        (folder / "legenda.txt").write_text(payload.pack.caption + "\n", encoding="utf-8")
+        escritos.append("legenda.txt")
+
+        # Resumo legivel do pacote inteiro.
+        linhas = [
+            f"# Pack de Conteudo — {payload.titulo}",
+            "",
+            f"- Tema: {payload.tema}",
+            f"- Categoria: {payload.categoria}",
+            f"- Risco: {payload.risco}",
+            f"- Formato do video: {payload.formatoSugerido}",
+            f"- Exportado em: {data}",
+            "",
+            "> Conteudo educativo. Requer validacao medica antes de publicar.",
+            "",
+            f"## Carrossel ({len(payload.pack.carousel)} slides)",
+            "",
+        ]
+        for i, s in enumerate(payload.pack.carousel, start=1):
+            linhas += [f"**Slide {i} — {s.title}**", "", s.body, ""]
+        linhas += ["## Post fixo", "", f"**{payload.pack.staticPost.headline}**", "",
+                   payload.pack.staticPost.subline, "", "## Legenda", "", payload.pack.caption, "",
+                   f"## Stories ({len(payload.pack.stories)} telas)", ""]
+        for i, s in enumerate(payload.pack.stories, start=1):
+            linhas += [f"**{i}. {s.title}**", "", s.body, ""]
+        if payload.pack.checklist:
+            linhas += ["## Checklist", ""] + [f"- [ ] {item}" for item in payload.pack.checklist]
+        (folder / "PACK.md").write_text("\n".join(linhas) + "\n", encoding="utf-8")
+        escritos.append("PACK.md")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Falha ao salvar o pack: {exc}")
+
+    return {
+        "ok": True,
+        "folder": str(folder),
+        "relative": str(folder.relative_to(ROOT)),
+        "files": len(escritos),
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 
