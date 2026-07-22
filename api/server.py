@@ -1214,11 +1214,30 @@ def export_pack(payload: PackExportIn) -> dict:
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Falha ao salvar o pack: {exc}")
 
+    # Renderiza os slides como PNG prontos para postar. Se o Chromium do
+    # Playwright nao estiver disponivel, o export de texto continua valendo.
+    imagens = 0
+    aviso_imagens = ""
+    try:
+        from api.slides import render_pack_images
+
+        carrossel = [s.model_dump() for s in payload.pack.carousel]
+        if carrossel:
+            carrossel[0]["tema"] = payload.tema or payload.categoria
+        resultado = render_pack_images(
+            folder, carrossel, [s.model_dump() for s in payload.pack.stories]
+        )
+        imagens = int(resultado.get("images", 0))
+    except Exception as exc:  # playwright ausente / falha de render
+        aviso_imagens = f"Textos salvos, mas nao consegui gerar as imagens: {exc}"
+
     return {
         "ok": True,
         "folder": str(folder),
         "relative": str(folder.relative_to(ROOT)),
         "files": len(escritos),
+        "images": imagens,
+        "warning": aviso_imagens,
     }
 
 
