@@ -12,24 +12,35 @@ ou:
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlparse
 
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from integrations.portuguese_br import prepare_script_for_heygen_voice
 
 ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT = ROOT / "data" / "sheets_snapshot.json"
 VIDEO_JOBS = ROOT / "data" / "video_jobs.json"
+AVATAR_JOBS = ROOT / "data" / "avatar_jobs.json"
+VIDEO_SUBMISSION_LOCK = threading.Lock()
+VIDEO_SUBMISSIONS_IN_FLIGHT: set[str] = set()
+MANDATORY_VIDEO_OUTRO = "Me siga para mais dicas, e obrigado."
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
 
@@ -94,6 +105,23 @@ def _save_video_jobs(jobs: list[dict[str, Any]]) -> None:
     temporary.replace(VIDEO_JOBS)
 
 
+def _load_avatar_jobs() -> list[dict[str, Any]]:
+    if not AVATAR_JOBS.exists():
+        return []
+    try:
+        data = json.loads(AVATAR_JOBS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_avatar_jobs(jobs: list[dict[str, Any]]) -> None:
+    AVATAR_JOBS.parent.mkdir(parents=True, exist_ok=True)
+    temporary = AVATAR_JOBS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(AVATAR_JOBS)
+
+
 def _migrate_video_job_script_ids(scripts: list[dict[str, Any]]) -> int:
     """Converte referencias posicionais antigas (s-0, s-1...) para IDs permanentes."""
     jobs = _load_video_jobs()
@@ -139,6 +167,35 @@ def _read_json_output(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return data if isinstance(data, dict) else {"data": data}
 
 
+def _run_heygen_json(
+    command: str,
+    args: list[str],
+    *,
+    payload: dict[str, Any] | None = None,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="ai-video-creator-") as temporary:
+        call = [command, *args]
+        if payload is not None:
+            request_file = Path(temporary) / "request.json"
+            request_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            call.extend(["--data", str(request_file)])
+        try:
+            proc = subprocess.run(
+                call,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=504, detail="HeyGen demorou demais para responder.") from exc
+    if proc.returncode != 0:
+        detail = proc.stderr or proc.stdout or "Falha na comunicacao com o HeyGen."
+        raise HTTPException(status_code=502, detail=detail[-700:])
+    return _read_json_output(proc)
+
+
 def _find_value(value: Any, *keys: str) -> Any:
     if isinstance(value, dict):
         for key in keys:
@@ -178,15 +235,52 @@ def _script_text(script: dict[str, Any]) -> str:
     return "\n\n".join(str(part).strip() for part in parts if str(part or "").strip())
 
 
-def _video_prompt(script: dict[str, Any]) -> str:
-    texto = _script_text(script)
+def _video_prompt(
+    script: dict[str, Any],
+    *,
+    duration_seconds: int = 45,
+    speech_mode: str = "natural",
+    captions: bool = True,
+    optimize_pronunciation: bool = True,
+    narration_text: str | None = None,
+) -> str:
+    texto = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
+    if optimize_pronunciation:
+        texto = prepare_script_for_heygen_voice(texto)
+    if MANDATORY_VIDEO_OUTRO.lower() not in texto.lower():
+        texto = f"{texto.rstrip()}\n{MANDATORY_VIDEO_OUTRO}"
+
+    speech_directions = {
+        "natural": (
+            "Speak naturally and conversationally. You may make small transitions, "
+            "but preserve the medical meaning of the script."
+        ),
+        "fiel": (
+            "Follow the supplied script closely. Do not add claims, examples, "
+            "or medical advice that are not in the script."
+        ),
+        "direto": (
+            "Use concise, energetic delivery. Shorten transitions while preserving "
+            "every essential message and medical caution."
+        ),
+    }
     return "\n\n".join(
         [
             "Create a portrait educational video in Brazilian Portuguese for social media.",
             "The selected presenter explains one health topic with a clear, calm and non-prescriptive tone.",
             "Do not mention medication doses, promise outcomes, or make sensational claims.",
-            "This script is a concept and theme to convey - not a verbatim transcript. You have full creative freedom to expand, elaborate, add examples, and fill the duration naturally. Do not pad with silence or pauses.",
-            f"SCRIPT (Portuguese):\n{texto}",
+            f"Target duration: approximately {duration_seconds} seconds. Do not pad with silence or pauses.",
+            speech_directions.get(speech_mode, speech_directions["natural"]),
+            (
+                "Add clean, readable Brazilian Portuguese captions synchronized with the narration."
+                if captions
+                else "Do not add burned-in captions or subtitles."
+            ),
+            (
+                "End the spoken narration exactly once with: "
+                f'"{MANDATORY_VIDEO_OUTRO}" This must be the final sentence.'
+            ),
+            f"VOICE-OPTIMIZED SCRIPT (Portuguese):\n{texto}",
             "Use minimal, clean styled visuals. Blue, black, and white as main colors. Leverage motion graphics as B-rolls and A-roll overlays. Include an intro sequence and an outro with a gentle call to action.",
         ]
     )
@@ -453,30 +547,63 @@ DEFAULT_SETTINGS = {
 
 
 HEYGEN_CATALOG = {
-    "avatars": [
-        {"id": "883356edef07402ab7be3c39920868ab", "name": "Dr Guilherme - Formal sorrindo", "orientation": "portrait"},
-        {"id": "3836fbbca6994dae91f02b3e9926a62a", "name": "Dr Guilherme - Camisa branca close", "orientation": "portrait"},
-        {"id": "68773738aa9b45ce9d619d743d1d77af", "name": "Dr Guilherme - Casual serio", "orientation": "portrait"},
-        {"id": "2835cbcbdd65484c809bd0f6f80313e2", "name": "Confident gentleman in a smart outfit", "orientation": "portrait"},
-        {"id": "a88d9b04f9964218b6889a7e10507edb", "name": "drguilhermeia smiling in the gym", "orientation": "landscape"},
-        {"id": "1c00c73aad1d4decaa24407758fc5c35", "name": "drguilhermeia smiling in the gym (2)", "orientation": "landscape"},
-        {"id": "587ea824d7764ef3b6acd618db89bc78", "name": "Photo Avatar", "orientation": "portrait"},
-        {"id": "8d0f249218b648cbb8a5f2bc0c0fb1d3", "name": "Podcaster in a grey hoodie", "orientation": "landscape"},
-        {"id": "69db99c0495f4dba9d08a267db636664", "name": "Grey Quarter-Zip Studio Host", "orientation": "landscape"},
-        {"id": "5cf53de5717943669098c6b27199ec98", "name": "Man in black zip hoodie", "orientation": "landscape"},
-        {"id": "2038b644953f4937afea78e3a7ccd8f8", "name": "Podcaster in blue hoodie", "orientation": "landscape"},
-        {"id": "0e2646b2584640e4a56c01c72c85cec7", "name": "Man in olive green shirt", "orientation": "landscape"},
-        {"id": "61e130873d2345a79a7d538147064154", "name": "drguilhermeia (digital twin)", "orientation": "landscape"},
-    ],
     "voices": [
         {"id": "33a98f732fe144d9a40f5cf33a7e95ec", "name": "drguilhermeia", "gender": "male"},
-        {"id": "2f31eb4f4d644a9b9f22cbdb63430cc0", "name": "Doutor Guilherme Intel Artificia", "gender": "unknown"},
-        {"id": "47788d6e0a224eb9b2ee74fcc30fd1f8", "name": "Voice Clone", "gender": "male"},
-        {"id": "a21ea127df6649ee9e333697761e0b29", "name": "voice-name-here", "gender": "male"},
-        {"id": "a5dc4150b5a14c5393ee8c166f5028c8", "name": "voice-name-here (2)", "gender": "male"},
-        {"id": "a816446b92424300a325f8940606aea2", "name": "4 - Bioplastia Glutea", "gender": "male"},
     ],
 }
+
+
+def _private_avatar_library(command: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Lista identidades privadas e todos os visuais de cada identidade."""
+    command = command or _heygen_cli()
+    response = _run_heygen_json(
+        command,
+        ["avatar", "list", "--ownership", "private", "--limit", "50"],
+        timeout=45,
+    )
+    groups = _find_value(response, "data")
+    if not isinstance(groups, list):
+        groups = []
+
+    looks: list[dict[str, Any]] = []
+    for group in groups:
+        group_id = str(group.get("id") or "")
+        if not group_id:
+            continue
+        look_response = _run_heygen_json(
+            command,
+            ["avatar", "looks", "list", "--group-id", group_id, "--limit", "50"],
+            timeout=45,
+        )
+        group_looks = _find_value(look_response, "data")
+        if not isinstance(group_looks, list):
+            continue
+        for raw_look in group_looks:
+            if not isinstance(raw_look, dict):
+                continue
+            look = dict(raw_look)
+            look["group_id"] = look.get("group_id") or group_id
+            look["group_name"] = group.get("name") or "Identidade sem nome"
+            looks.append(look)
+    return groups, looks
+
+
+def _heygen_default_avatar_id(avatars: list[dict[str, Any]]) -> str:
+    configured = os.getenv("HEYGEN_DEFAULT_AVATAR_ID")
+    allowed_ids = {str(avatar.get("id")) for avatar in avatars}
+    if configured in allowed_ids:
+        return configured
+    if not avatars:
+        raise HTTPException(status_code=503, detail="Nenhum avatar privado pronto foi encontrado.")
+    return str(avatars[0]["id"])
+
+
+def _heygen_default_voice_id() -> str:
+    configured = os.getenv("HEYGEN_DEFAULT_VOICE_ID")
+    allowed_ids = {voice["id"] for voice in HEYGEN_CATALOG["voices"]}
+    if configured in allowed_ids:
+        return configured
+    return HEYGEN_CATALOG["voices"][0]["id"]
 
 
 # --------------------------------------------------------------------------- #
@@ -490,11 +617,211 @@ def health() -> dict:
 @app.get("/api/heygen/catalog")
 def heygen_catalog() -> dict:
     """Catalogo de avatares e vozes privados disponiveis para producao."""
+    _, looks = _private_avatar_library()
+    avatars = [
+        {
+            "id": look.get("id"),
+            "name": look.get("name") or "Avatar sem nome",
+            "orientation": (
+                "landscape" if look.get("preferred_orientation") == "landscape" else "portrait"
+            ),
+            "groupId": look.get("group_id"),
+            "groupName": look.get("group_name"),
+            "previewImageUrl": look.get("preview_image_url"),
+        }
+        for look in looks
+        if look.get("id") and look.get("status") == "completed"
+    ]
     return {
-        **HEYGEN_CATALOG,
-        "defaultAvatarId": os.getenv("HEYGEN_DEFAULT_AVATAR_ID"),
-        "defaultVoiceId": os.getenv("HEYGEN_DEFAULT_VOICE_ID"),
+        "avatars": avatars,
+        "voices": HEYGEN_CATALOG["voices"],
+        "defaultAvatarId": _heygen_default_avatar_id(avatars),
+        "defaultVoiceId": _heygen_default_voice_id(),
     }
+
+
+@app.get("/api/heygen/avatars")
+def heygen_avatars() -> dict:
+    """Lista identidades privadas e todos os visuais criados na conta conectada."""
+    groups, looks = _private_avatar_library()
+    return {"avatars": groups, "looks": looks, "jobs": _load_avatar_jobs()}
+
+
+@app.get("/api/heygen/styles")
+def heygen_styles(tag: str = "cinematic") -> dict:
+    """Retorna estilos visuais oficiais disponiveis no Video Agent."""
+    allowed_tags = {
+        "cinematic",
+        "retro-tech",
+        "iconic-artist",
+        "pop-culture",
+        "handmade",
+        "print",
+    }
+    selected_tag = tag if tag in allowed_tags else "cinematic"
+    command = _heygen_cli()
+    response = _run_heygen_json(
+        command,
+        ["video-agent", "styles", "list", "--tag", selected_tag, "--limit", "30"],
+        timeout=45,
+    )
+    styles = _find_value(response, "data")
+    return {"styles": styles if isinstance(styles, list) else [], "tag": selected_tag}
+
+
+class AvatarMediaIn(BaseModel):
+    name: str
+    mimeType: str
+    data: str
+
+
+class AvatarCreateIn(BaseModel):
+    name: str
+    creationType: Literal["photo", "digital_twin", "prompt"]
+    appearancePrompt: str = ""
+    media: list[AvatarMediaIn] = Field(default_factory=list)
+    cloneVoice: bool = False
+    voiceMedia: AvatarMediaIn | None = None
+    consentAccepted: bool = False
+
+
+def _media_payload(
+    media: AvatarMediaIn,
+    *,
+    allowed_mime_types: set[str],
+    max_bytes: int = 32 * 1024 * 1024,
+) -> dict[str, str]:
+    if media.mimeType not in allowed_mime_types:
+        raise HTTPException(status_code=400, detail=f"Formato de arquivo nao aceito: {media.mimeType}.")
+    try:
+        decoded = base64.b64decode(media.data, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Arquivo invalido: {media.name}.") from exc
+    if not decoded or len(decoded) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"O arquivo {media.name} deve ter ate 32 MB.")
+    return {"type": "base64", "media_type": media.mimeType, "data": media.data}
+
+
+@app.post("/api/heygen/avatars")
+def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
+    """Cria avatar e voz somente apos consentimento explicito na interface."""
+    if not payload.consentAccepted:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirme a autorizacao de uso de imagem e voz antes de continuar.",
+        )
+    name = payload.name.strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Informe o nome do avatar.")
+
+    command = _heygen_cli()
+    image_mimes = {"image/jpeg", "image/png"}
+    video_mimes = {"video/mp4", "video/webm"}
+    avatar_request: dict[str, Any] = {"type": payload.creationType, "name": name}
+
+    if payload.creationType == "prompt":
+        prompt = payload.appearancePrompt.strip()
+        if len(prompt) < 12:
+            raise HTTPException(status_code=400, detail="Descreva a aparencia do apresentador.")
+        avatar_request["prompt"] = prompt
+        if payload.media:
+            avatar_request["reference_images"] = [
+                _media_payload(item, allowed_mime_types=image_mimes) for item in payload.media[:3]
+            ]
+    else:
+        if not payload.media:
+            expected = "uma foto" if payload.creationType == "photo" else "um video"
+            raise HTTPException(status_code=400, detail=f"Envie {expected} para criar o avatar.")
+        allowed = image_mimes if payload.creationType == "photo" else video_mimes
+        avatar_request["file"] = _media_payload(payload.media[0], allowed_mime_types=allowed)
+
+    avatar_response = _run_heygen_json(
+        command,
+        ["avatar", "create"],
+        payload=avatar_request,
+        timeout=180,
+    )
+    group_id = _find_value(avatar_response, "group_id")
+    avatar_id = _find_value(avatar_response, "id")
+    if not group_id:
+        raise HTTPException(status_code=502, detail="HeyGen nao retornou a identidade do avatar.")
+
+    voice_id = None
+    if payload.cloneVoice:
+        if not payload.voiceMedia:
+            raise HTTPException(status_code=400, detail="Envie um audio para clonar a voz.")
+        audio = _media_payload(
+            payload.voiceMedia,
+            allowed_mime_types={"audio/mpeg", "audio/wav", "audio/x-wav"},
+        )
+        voice_response = _run_heygen_json(
+            command,
+            ["voice", "clone", "create"],
+            payload={
+                "voice_name": f"{name} - voz",
+                "language": "pt",
+                "remove_background_noise": True,
+                "audio": audio,
+            },
+            timeout=180,
+        )
+        voice_id = _find_value(voice_response, "voice_clone_id")
+
+    consent_response = _run_heygen_json(
+        command,
+        ["avatar", "consent", "create", str(group_id)],
+        timeout=45,
+    )
+    consent_url = _find_value(consent_response, "url", "consent_url", "consentUrl")
+    now = _now()
+    job = {
+        "id": f"a-{uuid.uuid4().hex[:12]}",
+        "name": name,
+        "creationType": payload.creationType,
+        "status": "pending_consent",
+        "groupId": group_id,
+        "avatarId": avatar_id,
+        "voiceId": voice_id,
+        "consentUrl": consent_url,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    jobs = _load_avatar_jobs()
+    jobs.insert(0, job)
+    _save_avatar_jobs(jobs)
+    return {"ok": True, "job": job}
+
+
+@app.post("/api/heygen/avatars/{job_id}/refresh")
+def refresh_heygen_avatar(job_id: str) -> dict:
+    jobs = _load_avatar_jobs()
+    job = next((item for item in jobs if item.get("id") == job_id), None)
+    if not job:
+        raise HTTPException(status_code=404, detail="Criacao de avatar nao encontrada.")
+    command = _heygen_cli()
+    avatar_response = _run_heygen_json(
+        command,
+        ["avatar", "get", str(job["groupId"])],
+        timeout=45,
+    )
+    status = str(_find_value(avatar_response, "status") or job.get("status") or "processing")
+    job["status"] = status
+    job["previewImageUrl"] = _find_value(avatar_response, "preview_image_url") or job.get(
+        "previewImageUrl"
+    )
+    job["previewVideoUrl"] = _find_value(avatar_response, "preview_video_url") or job.get(
+        "previewVideoUrl"
+    )
+    if job.get("voiceId"):
+        voice_response = _run_heygen_json(
+            command,
+            ["voice", "get", str(job["voiceId"])],
+            timeout=45,
+        )
+        job["voiceStatus"] = _find_value(voice_response, "status")
+    job["updatedAt"] = _now()
+    _save_avatar_jobs(jobs)
+    return {"ok": True, "job": job}
 
 
 @app.get("/api/state")
@@ -521,6 +848,95 @@ class VideoCreateIn(BaseModel):
     scriptId: str
     avatarId: str | None = None
     voiceId: str | None = None
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+    speechMode: Literal["natural", "fiel", "direto"] = "natural"
+    captions: bool = True
+    optimizePronunciation: bool = True
+    styleId: str | None = None
+    forceNewVersion: bool = False
+    narrationText: str | None = Field(default=None, max_length=6000)
+
+
+class NaturalizeScriptIn(BaseModel):
+    text: str = Field(min_length=20, max_length=6000)
+    medicalCautions: str = Field(default="", max_length=2000)
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+
+
+_NATURAL_SCRIPT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+}
+
+_NATURAL_SCRIPT_SYSTEM = """Voce e um diretor de fala para videos curtos do Dr. Guilherme.
+Transforme o texto em portugues brasileiro falado, espontaneo, humano e facil de entender.
+
+Regras obrigatorias:
+- Preserve exatamente o sentido, os fatos e os cuidados medicos do texto original.
+- Nao acrescente diagnosticos, tratamentos, exemplos clinicos, doses ou promessas.
+- Use frases curtas, contracoes naturais e transicoes discretas.
+- Evite linguagem de artigo, listas, titulos, jargao e repeticoes.
+- Nao use indicacoes de cena, parenteses, emojis ou marcacoes de pausa.
+- Mantenha um tom acolhedor, seguro e profissional.
+- Termine exatamente com: "Me siga para mais dicas, e obrigado."
+- Responda somente no JSON solicitado."""
+
+
+@app.post("/api/scripts/naturalize")
+def naturalize_script(payload: NaturalizeScriptIn) -> dict:
+    """Transforma o roteiro em fala natural somente apos acao explicita do usuario."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="Defina ANTHROPIC_API_KEY no arquivo .env para naturalizar com IA.",
+        )
+    import anthropic
+
+    source = (
+        f"DURACAO ALVO: {payload.durationSeconds} segundos\n"
+        f"CUIDADOS MEDICOS: {payload.medicalCautions or 'Manter conteudo educativo.'}\n"
+        f"TEXTO ORIGINAL:\n{payload.text}"
+    )
+    try:
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            max_tokens=1200,
+            system=_NATURAL_SCRIPT_SYSTEM,
+            output_config={"format": {"type": "json_schema", "schema": _NATURAL_SCRIPT_SCHEMA}},
+            messages=[{"role": "user", "content": source}],
+        )
+    except anthropic.APIStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Claude respondeu {exc.status_code}: {exc.message}",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao naturalizar o texto: {exc}")
+
+    raw_text = "".join(getattr(block, "text", "") for block in message.content)
+    try:
+        natural_text = str(json.loads(raw_text)["text"]).strip()
+    except (json.JSONDecodeError, KeyError, TypeError):
+        raise HTTPException(status_code=502, detail="A IA nao retornou um texto valido.")
+
+    natural_text = re.sub(
+        re.escape(MANDATORY_VIDEO_OUTRO),
+        "",
+        natural_text,
+        flags=re.IGNORECASE,
+    ).strip()
+    natural_text = f"{natural_text.rstrip(' .')}. {MANDATORY_VIDEO_OUTRO}"
+    compliance = _pack_compliance({"text": natural_text})
+    if compliance["blocked"]:
+        raise HTTPException(
+            status_code=422,
+            detail="O texto naturalizado foi bloqueado pela revisao medica. Revise manualmente.",
+        )
+    return {"ok": True, "text": natural_text}
 
 
 def _find_script(script_id: str) -> dict[str, Any]:
@@ -589,33 +1005,74 @@ def ai_costs() -> dict:
 @app.post("/api/videos")
 def create_video(payload: VideoCreateIn) -> dict:
     """Cria um job real no HeyGen somente apos o clique de enviar para producao."""
+    with VIDEO_SUBMISSION_LOCK:
+        if payload.scriptId in VIDEO_SUBMISSIONS_IN_FLIGHT:
+            raise HTTPException(
+                status_code=409,
+                detail="Este roteiro ja esta sendo enviado. Aguarde a criacao aparecer na producao.",
+            )
+        existing = next(
+            (
+                job
+                for job in _load_video_jobs()
+                if job.get("scriptId") == payload.scriptId and job.get("status") != "erro"
+            ),
+            None,
+        )
+        if existing and not payload.forceNewVersion:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Este roteiro ja possui um video. Abra a producao existente ou use "
+                    "'Criar nova versao' para gerar outro video."
+                ),
+            )
+        VIDEO_SUBMISSIONS_IN_FLIGHT.add(payload.scriptId)
+
+    try:
+        return _create_video_job(payload)
+    finally:
+        with VIDEO_SUBMISSION_LOCK:
+            VIDEO_SUBMISSIONS_IN_FLIGHT.discard(payload.scriptId)
+
+
+def _create_video_job(payload: VideoCreateIn) -> dict:
     command = _heygen_cli()
     try:
         balance_before, currency_before = _heygen_wallet(command)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
         balance_before, currency_before = None, None
     script = _find_script(payload.scriptId)
-    avatar_id = payload.avatarId or os.getenv("HEYGEN_DEFAULT_AVATAR_ID")
-    voice_id = payload.voiceId or os.getenv("HEYGEN_DEFAULT_VOICE_ID")
-    if not avatar_id or not voice_id:
-        raise HTTPException(
-            status_code=503,
-            detail="Configure HEYGEN_DEFAULT_AVATAR_ID e HEYGEN_DEFAULT_VOICE_ID no .env.",
-        )
+    _, private_looks = _private_avatar_library(command)
+    ready_looks = [look for look in private_looks if look.get("status") == "completed"]
+    avatar_id = payload.avatarId or _heygen_default_avatar_id(ready_looks)
+    voice_id = payload.voiceId or _heygen_default_voice_id()
+    allowed_avatar_ids = {look.get("id") for look in ready_looks}
+    if avatar_id not in allowed_avatar_ids:
+        raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
 
     args = [
         command,
         "video-agent",
         "create",
         "--prompt",
-        _video_prompt(script),
+        _video_prompt(
+            script,
+            duration_seconds=payload.durationSeconds,
+            speech_mode=payload.speechMode,
+            captions=payload.captions,
+            optimize_pronunciation=payload.optimizePronunciation,
+            narration_text=payload.narrationText,
+        ),
         "--avatar-id",
         avatar_id,
         "--voice-id",
         voice_id,
         "--orientation",
-        "portrait",
+        payload.orientation,
     ]
+    if payload.styleId:
+        args.extend(["--style-id", payload.styleId])
     try:
         proc = subprocess.run(args, cwd=str(ROOT), capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired as exc:
@@ -640,6 +1097,16 @@ def create_video(payload: VideoCreateIn) -> dict:
         "atualizadoEm": now,
         "remoteSessionId": session_id,
         "remoteVideoId": video_id or None,
+        "productionSettings": {
+            "avatarId": avatar_id,
+            "orientation": payload.orientation,
+            "durationSeconds": payload.durationSeconds,
+            "speechMode": payload.speechMode,
+            "captions": payload.captions,
+            "optimizePronunciation": payload.optimizePronunciation,
+            "styleId": payload.styleId,
+            "narrationText": payload.narrationText,
+        },
     }
     try:
         balance_after, currency_after = _heygen_wallet(command)
@@ -702,6 +1169,46 @@ def refresh_video(job_id: str) -> dict:
         job["erro"] = str(_find_value(response, "error", "message", "detail") or "HeyGen nao concluiu o video.")
     _save_video_jobs(jobs)
     return {"ok": True, "job": job}
+
+
+@app.get("/api/videos/{job_id}/download")
+def download_video(job_id: str) -> StreamingResponse:
+    """Transmite o MP4 pronto do HeyGen como download com nome amigavel."""
+    job = next((item for item in _load_video_jobs() if item.get("id") == job_id), None)
+    if not job:
+        raise HTTPException(status_code=404, detail="Video nao encontrado.")
+    video_url = str(job.get("videoUrl") or "")
+    parsed = urlparse(video_url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (
+        hostname == "heygen.ai" or hostname.endswith(".heygen.ai")
+    ):
+        raise HTTPException(status_code=409, detail="O arquivo do HeyGen ainda nao esta disponivel.")
+
+    try:
+        response = requests.get(video_url, stream=True, timeout=(15, 300))
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Nao foi possivel baixar o video do HeyGen.") from exc
+
+    try:
+        script = _find_script(str(job.get("scriptId") or ""))
+        base_name = str(script.get("titulo") or "video")
+    except HTTPException:
+        base_name = "video"
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", _norm(base_name)).strip("-") or "video"
+
+    def stream_file():
+        try:
+            yield from response.iter_content(chunk_size=1024 * 1024)
+        finally:
+            response.close()
+
+    return StreamingResponse(
+        stream_file(),
+        media_type=response.headers.get("content-type", "video/mp4"),
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.mp4"'},
+    )
 
 
 def _run(script_args: list[str], timeout: int) -> subprocess.CompletedProcess:

@@ -11,14 +11,18 @@ import { useStore } from "@/lib/store";
 import {
   createHeyGenVideo,
   fetchHeyGenCatalog,
+  fetchHeyGenStyles,
+  naturalizeScript,
   saveScript,
   type HeyGenCatalog,
+  type HeyGenStyle,
 } from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -26,7 +30,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ArrowLeft, Film, Save } from "lucide-react";
+import { ArrowLeft, Captions, Film, History, RotateCcw, Save, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/roteiros/$id")({
@@ -44,6 +48,7 @@ function RoteiroDetalhe() {
   const script = useStore((s) => s.scripts.find((x) => x.id === id));
   const updateScript = useStore((s) => s.updateScript);
   const addVideoJob = useStore((s) => s.addVideoJob);
+  const videoJobs = useStore((s) => s.videoJobs);
   const palavras = useStore((s) => s.settings.palavrasProibidas);
   const navigate = useNavigate();
 
@@ -51,11 +56,35 @@ function RoteiroDetalhe() {
   const [sending, setSending] = useState(false);
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<HeyGenCatalog | null>(null);
+  const [styles, setStyles] = useState<HeyGenStyle[]>([]);
   const [avatarId, setAvatarId] = useState("");
   const [voiceId, setVoiceId] = useState("");
+  const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
+  const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(45);
+  const [speechMode, setSpeechMode] = useState<"natural" | "fiel" | "direto">("natural");
+  const [captions, setCaptions] = useState(true);
+  const [optimizePronunciation, setOptimizePronunciation] = useState(true);
+  const [styleId, setStyleId] = useState("");
+  const [narrationText, setNarrationText] = useState(() =>
+    script ? buildNarrationText(script) : "",
+  );
+  const [naturalizing, setNaturalizing] = useState(false);
+  const existingJobs = useMemo(
+    () =>
+      videoJobs
+        .filter((job) => job.scriptId === id && job.status !== "erro")
+        .sort(
+          (left, right) => new Date(right.criadoEm).getTime() - new Date(left.criadoEm).getTime(),
+        ),
+    [id, videoJobs],
+  );
+  const latestJob = existingJobs[0];
 
   useEffect(() => {
-    if (script) setDraft(script);
+    if (script) {
+      setDraft(script);
+      setNarrationText(buildNarrationText(script));
+    }
   }, [script]);
 
   useEffect(() => {
@@ -68,6 +97,25 @@ function RoteiroDetalhe() {
       .catch((err) =>
         toast.error(err instanceof Error ? err.message : "Falha ao carregar HeyGen."),
       );
+    fetchHeyGenStyles("cinematic")
+      .then((data) => setStyles(data.styles))
+      .catch(() => setStyles([]));
+
+    try {
+      const saved = localStorage.getItem("ai-video-creator-studio-defaults");
+      if (saved) {
+        const defaults = JSON.parse(saved) as {
+          orientation?: "portrait" | "landscape";
+          styleId?: string | null;
+          captions?: boolean;
+        };
+        if (defaults.orientation) setOrientation(defaults.orientation);
+        if (defaults.styleId) setStyleId(defaults.styleId);
+        if (typeof defaults.captions === "boolean") setCaptions(defaults.captions);
+      }
+    } catch {
+      /* configuracao local antiga ou invalida */
+    }
   }, []);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(script), [draft, script]);
 
@@ -103,11 +151,22 @@ function RoteiroDetalhe() {
     validadoEm: draft.validadoEm,
   });
 
-  async function enviarProducao() {
+  async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
     setSending(true);
     try {
-      const job = await createHeyGenVideo(script.id, { avatarId, voiceId });
+      const job = await createHeyGenVideo(script.id, {
+        avatarId,
+        voiceId,
+        orientation,
+        durationSeconds,
+        speechMode,
+        captions,
+        optimizePronunciation,
+        styleId: styleId || undefined,
+        forceNewVersion,
+        narrationText,
+      });
       addVideoJob(job);
       toast.success("Roteiro enviado para producao no HeyGen.");
       navigate({ to: "/producao/$id", params: { id: job.id } });
@@ -133,6 +192,25 @@ function RoteiroDetalhe() {
     }
   }
 
+  async function naturalizarFala() {
+    if (!draft || !narrationText.trim()) return;
+    setNaturalizing(true);
+    try {
+      setNarrationText(
+        await naturalizeScript({
+          text: narrationText,
+          medicalCautions: draft.cuidadosMedicos,
+          durationSeconds,
+        }),
+      );
+      toast.success("Texto naturalizado. Revise a fala antes de enviar.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível naturalizar o texto.");
+    } finally {
+      setNaturalizing(false);
+    }
+  }
+
   return (
     <AppShell
       title={`Roteiro: ${script.titulo}`}
@@ -153,21 +231,49 @@ function RoteiroDetalhe() {
               <Save className="mr-1 h-4 w-4" /> Salvar
             </Button>
           </WithTooltip>
-          <ConfirmAction
-            title="Enviar para producao?"
-            description="Este clique envia o roteiro ao HeyGen e pode consumir creditos da conta."
-            confirmLabel="Enviar"
-            onConfirm={enviarProducao}
-            trigger={
-              <Button
-                size="sm"
-                title={dirty ? "Salve as alteracoes antes de enviar" : "Enviar roteiro ao HeyGen"}
-                disabled={dirty || sending || !avatarId || !voiceId}
-              >
-                <Film className="mr-1 h-4 w-4" /> Enviar para producao
+          {latestJob ? (
+            <>
+              <Button size="sm" asChild>
+                <Link to="/producao/$id" params={{ id: latestJob.id }}>
+                  <Film className="mr-1 h-4 w-4" /> Ver vídeo
+                </Link>
               </Button>
-            }
-          />
+              <ConfirmAction
+                title="Criar uma nova versão?"
+                description={`Este roteiro já possui ${existingJobs.length} ${
+                  existingJobs.length === 1 ? "vídeo" : "vídeos"
+                }. A nova versão consumirá créditos adicionais do HeyGen.`}
+                confirmLabel="Criar nova versão"
+                onConfirm={() => void enviarProducao(true)}
+                trigger={
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    title="Gerar outra versão deste roteiro"
+                    disabled={dirty || sending || !avatarId || !voiceId}
+                  >
+                    <History className="mr-1 h-4 w-4" /> Nova versão
+                  </Button>
+                }
+              />
+            </>
+          ) : (
+            <ConfirmAction
+              title="Enviar para producao?"
+              description="Este clique envia o roteiro ao HeyGen e pode consumir creditos da conta."
+              confirmLabel="Enviar"
+              onConfirm={() => void enviarProducao(false)}
+              trigger={
+                <Button
+                  size="sm"
+                  title={dirty ? "Salve as alteracoes antes de enviar" : "Enviar roteiro ao HeyGen"}
+                  disabled={dirty || sending || !avatarId || !voiceId}
+                >
+                  <Film className="mr-1 h-4 w-4" /> Enviar para producao
+                </Button>
+              }
+            />
+          )}
         </>
       }
     >
@@ -262,7 +368,18 @@ function RoteiroDetalhe() {
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Avatar HeyGen">
+            </div>
+          </div>
+
+          <div className="rounded-xl border bg-card p-4 shadow-sm">
+            <div className="mb-4">
+              <h3 className="font-display text-sm font-semibold">Preparar vídeo</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Escolha o visual e o ritmo. A voz do Dr. Guilherme já está configurada.
+              </p>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="Avatar">
                 <Select value={avatarId} onValueChange={setAvatarId} disabled={!catalog}>
                   <SelectTrigger>
                     <SelectValue placeholder="Carregando avatares..." />
@@ -270,27 +387,155 @@ function RoteiroDetalhe() {
                   <SelectContent>
                     {catalog?.avatars.map((avatar) => (
                       <SelectItem key={avatar.id} value={avatar.id}>
-                        {avatar.name} (
-                        {avatar.orientation === "portrait" ? "vertical" : "horizontal"})
+                        {avatar.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Voz HeyGen">
-                <Select value={voiceId} onValueChange={setVoiceId} disabled={!catalog}>
+              <Field label="Formato do vídeo">
+                <Select
+                  value={orientation}
+                  onValueChange={(value) => setOrientation(value as "portrait" | "landscape")}
+                >
                   <SelectTrigger>
-                    <SelectValue placeholder="Carregando vozes..." />
+                    <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {catalog?.voices.map((voice) => (
-                      <SelectItem key={voice.id} value={voice.id}>
-                        {voice.name}
-                      </SelectItem>
-                    ))}
+                    <SelectItem value="portrait">Vertical - Reels e TikTok</SelectItem>
+                    <SelectItem value="landscape">Horizontal - YouTube</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
+              <Field label="Duração aproximada">
+                <Select
+                  value={String(durationSeconds)}
+                  onValueChange={(value) =>
+                    setDurationSeconds(Number(value) as 10 | 15 | 30 | 45 | 60)
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10">10 segundos - impacto rápido</SelectItem>
+                    <SelectItem value="15">15 segundos - ultracurto</SelectItem>
+                    <SelectItem value="30">30 segundos - rápido</SelectItem>
+                    <SelectItem value="45">45 segundos - recomendado</SelectItem>
+                    <SelectItem value="60">60 segundos - mais completo</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Jeito de falar">
+                <Select
+                  value={speechMode}
+                  onValueChange={(value) => setSpeechMode(value as "natural" | "fiel" | "direto")}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="natural">Natural - conversa fluida</SelectItem>
+                    <SelectItem value="fiel">Fiel - segue o roteiro</SelectItem>
+                    <SelectItem value="direto">Direto - curto e dinâmico</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Direção visual">
+                <Select
+                  value={styleId || "clean"}
+                  onValueChange={(value) => setStyleId(value === "clean" ? "" : value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="clean">Clean - visual clínico</SelectItem>
+                    {styles
+                      .filter((style) =>
+                        orientation === "portrait"
+                          ? style.aspect_ratio === "9:16"
+                          : style.aspect_ratio === "16:9",
+                      )
+                      .map((style) => (
+                        <SelectItem key={style.style_id} value={style.style_id}>
+                          Cinematic - {style.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            </div>
+            <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-2">
+              <FriendlySwitch
+                icon={<Captions className="h-4 w-4" />}
+                label="Legendas automáticas"
+                description="Texto em português acompanhando a fala"
+                checked={captions}
+                onCheckedChange={setCaptions}
+              />
+              <FriendlySwitch
+                icon={<Sparkles className="h-4 w-4" />}
+                label="Melhorar pronúncia"
+                description="Ajusta siglas, remédios e números para a voz"
+                checked={optimizePronunciation}
+                onCheckedChange={setOptimizePronunciation}
+              />
+            </div>
+            <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2">
+              <div className="text-xs font-medium">Encerramento padrão</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                “Me siga para mais dicas, e obrigado.”
+              </div>
+            </div>
+            <div className="mt-4 border-t pt-4">
+              <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <Label htmlFor="narration-text">Texto falado</Label>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Edite livremente. Isso muda apenas a fala do vídeo, não o roteiro no Sheets.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setNarrationText(buildNarrationText(draft))}
+                  >
+                    <RotateCcw className="mr-1 h-4 w-4" />
+                    Restaurar
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    disabled={naturalizing || narrationText.trim().length < 20}
+                    onClick={() => void naturalizarFala()}
+                  >
+                    <Sparkles className="mr-1 h-4 w-4" />
+                    {naturalizing ? "Ajustando..." : "Deixar natural com IA"}
+                  </Button>
+                </div>
+              </div>
+              <Textarea
+                id="narration-text"
+                rows={8}
+                value={narrationText}
+                onChange={(event) => setNarrationText(event.target.value)}
+                className="leading-6"
+              />
+              <div className="mt-2 flex justify-between text-[11px] text-muted-foreground">
+                <span>{narrationText.trim().split(/\s+/).filter(Boolean).length} palavras</span>
+                <span>
+                  Aproximadamente{" "}
+                  {Math.max(
+                    1,
+                    Math.round(narrationText.trim().split(/\s+/).filter(Boolean).length / 2.4),
+                  )}
+                  s de fala
+                </span>
+              </div>
             </div>
           </div>
 
@@ -367,6 +612,48 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </div>
   );
+}
+
+function FriendlySwitch({
+  icon,
+  label,
+  description,
+  checked,
+  onCheckedChange,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  description: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex min-h-14 items-center gap-3 rounded-lg border bg-muted/25 px-3 py-2">
+      <div className="text-muted-foreground">{icon}</div>
+      <div className="min-w-0 flex-1">
+        <Label className="text-xs font-medium">{label}</Label>
+        <p className="text-[11px] leading-4 text-muted-foreground">{description}</p>
+      </div>
+      <Switch checked={checked} onCheckedChange={onCheckedChange} aria-label={label} />
+    </div>
+  );
+}
+
+function buildNarrationText(script: Script): string {
+  const outro = "Me siga para mais dicas, e obrigado.";
+  const body = [
+    script.hook,
+    script.dorConflito,
+    script.explicacaoSimples,
+    script.virada,
+    script.cta,
+  ]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  return body.toLocaleLowerCase("pt-BR").includes(outro.toLocaleLowerCase("pt-BR"))
+    ? body
+    : `${body}\n\n${outro}`;
 }
 
 function Preview({ label, text, palavras }: { label: string; text: string; palavras: string[] }) {

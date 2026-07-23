@@ -93,12 +93,24 @@ A planilha e a fonte operacional do projeto. As abas principais sao:
 - `Calendario`: planejamento de publicacao.
 - `Performance`: resultados manuais ou importados depois da publicacao.
 
+Conta dona da planilha: `vtrconsultingbr@gmail.com`.
+
+Se aparecer a tela "You need access" no Google Sheets, peça acesso para essa conta. A conta pessoal `vitor.milanezz@gmail.com` pode nao ter permissao direta no navegador, mesmo quando o app local consegue acessar via token OAuth.
+
 Existem dois clientes de Google Sheets em `integrations/`:
 
 - `GoogleSheetsClient`: usa o SDK oficial do Google. E o caminho mais completo para service account e primeiro fluxo OAuth.
 - `GoogleSheetsRestClient`: usa chamadas REST leves com token OAuth local. E o caminho preferido para scripts operacionais e dashboard depois que o token ja existe.
 
 Mais detalhes em `docs/google-sheets-clients.md`.
+
+## Avatares e voz
+
+A rota `/avatares` consulta as identidades privadas da conta HeyGen conectada. Ela permite criar avatar por foto, digital twin por video ou apresentador por descricao, com clonagem opcional de voz.
+
+Fotos, videos e audios nao sao gravados no Google Sheets nem no snapshot. Eles sao enviados ao HeyGen somente depois do clique confirmado em `Criar avatar`. O backend salva localmente apenas identificadores, status e URL de consentimento em `data/avatar_jobs.json`.
+
+O titular precisa confirmar a autorizacao na interface e concluir o consentimento oficial do HeyGen antes do avatar ser usado em producao.
 
 ## Arquivos locais ignorados
 

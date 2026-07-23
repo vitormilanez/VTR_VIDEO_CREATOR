@@ -17,6 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -24,7 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ExternalLink, FileText, PanelsTopLeft } from "lucide-react";
+import { CircleCheck, ExternalLink, FileText, PanelsTopLeft } from "lucide-react";
 
 export const Route = createFileRoute("/_app/roteiros")({
   head: () => ({
@@ -44,6 +45,7 @@ function RoteirosLayout() {
 
 export function RoteirosPage() {
   const scripts = useStore((s) => s.scripts);
+  const videoJobs = useStore((s) => s.videoJobs);
   const [status, setStatus] = useState("todos");
   const [prioridade, setPrioridade] = useState("todas");
   const [busca, setBusca] = useState("");
@@ -62,17 +64,41 @@ export function RoteirosPage() {
     rejeitado: 0,
   };
   scripts.forEach((s) => (counts[s.status] += 1));
+  const usedScriptIds = new Set(
+    videoJobs.filter((job) => job.status !== "erro").map((job) => job.scriptId),
+  );
+  const usedCount = scripts.filter((script) => usedScriptIds.has(script.id)).length;
 
   return (
     <AppShell title="Roteiros">
+      {usedCount > 0 ? (
+        <div className="mb-3 flex items-center gap-2 rounded-md border border-status-success/30 bg-status-success/5 px-3 py-2 text-xs">
+          <CircleCheck className="h-4 w-4 shrink-0 text-status-success" />
+          <span>
+            {usedCount === 1
+              ? "1 roteiro já foi utilizado em vídeo. Ele está identificado na lista."
+              : `${usedCount} roteiros já foram utilizados em vídeos. Eles estão identificados na lista.`}
+          </span>
+        </div>
+      ) : null}
       <StatusChips
         className="mb-3"
         value={status}
         onChange={setStatus}
         options={[
-          { value: "aguardando_validacao", label: "Rascunho", tone: "neutral", count: counts.aguardando_validacao },
+          {
+            value: "aguardando_validacao",
+            label: "Rascunho",
+            tone: "neutral",
+            count: counts.aguardando_validacao,
+          },
           { value: "em_revisao", label: "Em edicao", tone: "info", count: counts.em_revisao },
-          { value: "aprovado_clinicamente", label: "Prontos", tone: "success", count: counts.aprovado_clinicamente },
+          {
+            value: "aprovado_clinicamente",
+            label: "Prontos",
+            tone: "success",
+            count: counts.aprovado_clinicamente,
+          },
           { value: "rejeitado", label: "Arquivados", tone: "neutral", count: counts.rejeitado },
         ]}
       />
@@ -118,7 +144,11 @@ export function RoteirosPage() {
               {filtered.map((s) => (
                 <TableRow key={s.id}>
                   <TableCell>
-                    <Link to="/roteiros/$id" params={{ id: s.id }} className="font-medium hover:underline">
+                    <Link
+                      to="/roteiros/$id"
+                      params={{ id: s.id }}
+                      className="font-medium hover:underline"
+                    >
                       {s.titulo}
                     </Link>
                     <div className="mt-1 flex flex-wrap items-center gap-1">
@@ -128,16 +158,31 @@ export function RoteirosPage() {
                       {s.tema ? (
                         <span className="text-[10px] text-muted-foreground">{s.tema}</span>
                       ) : null}
+                      {usedScriptIds.has(s.id) ? (
+                        <Badge
+                          variant="outline"
+                          className="h-5 border-status-success/40 px-1.5 text-[10px] text-status-success"
+                        >
+                          <CircleCheck className="mr-1 h-3 w-3" />
+                          Vídeo produzido
+                        </Badge>
+                      ) : null}
                     </div>
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{s.formatoSugerido}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {s.formatoSugerido}
+                  </TableCell>
                   <TableCell className="max-w-xs">
                     <span className="line-clamp-2 text-xs text-muted-foreground">
                       {s.cuidadosMedicos || "—"}
                     </span>
                   </TableCell>
-                  <TableCell><StatusBadge {...riskLabel[s.risco]} /></TableCell>
-                  <TableCell><StatusBadge {...scriptStatusLabel[s.status]} /></TableCell>
+                  <TableCell>
+                    <StatusBadge {...riskLabel[s.risco]} />
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge {...scriptStatusLabel[s.status]} />
+                  </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
                       <Button asChild size="sm" variant="secondary">

@@ -1,6 +1,17 @@
 import type { ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, Radar, Lightbulb, FileText, Film, CalendarDays, BarChart3, Settings, PanelsTopLeft } from "lucide-react";
+import {
+  LayoutDashboard,
+  Radar,
+  Lightbulb,
+  FileText,
+  Film,
+  CalendarDays,
+  BarChart3,
+  Settings,
+  PanelsTopLeft,
+  ScanFace,
+} from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -22,6 +33,7 @@ const nav: Array<{ title: string; url: string; icon: typeof LayoutDashboard; exa
   { title: "Ideias", url: "/ideias", icon: Lightbulb },
   { title: "Roteiros", url: "/roteiros", icon: FileText },
   { title: "Producao de videos", url: "/producao", icon: Film },
+  { title: "Avatares", url: "/avatares", icon: ScanFace },
   { title: "Pack de conteudo", url: "/packs", icon: PanelsTopLeft },
   { title: "Calendario", url: "/calendario", icon: CalendarDays },
   { title: "Performance", url: "/performance", icon: BarChart3 },
@@ -78,7 +90,15 @@ function AppSidebar() {
   );
 }
 
-export function AppShell({ title, actions, children }: { title: string; actions?: ReactNode; children: ReactNode }) {
+export function AppShell({
+  title,
+  actions,
+  children,
+}: {
+  title: string;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <SidebarProvider>
       <div className="flex min-h-screen w-full bg-background">
@@ -88,7 +108,9 @@ export function AppShell({ title, actions, children }: { title: string; actions?
           <header className="sticky top-0 z-10 flex h-14 items-center gap-3 border-b bg-card/80 px-4 backdrop-blur-md">
             <SidebarTrigger />
             <div className="h-4 w-px bg-border" />
-            <h1 className="truncate font-display text-base font-semibold tracking-tight">{title}</h1>
+            <h1 className="truncate font-display text-base font-semibold tracking-tight">
+              {title}
+            </h1>
             <div className="ml-auto flex items-center gap-2">{actions}</div>
           </header>
           <main className="flex-1 overflow-x-hidden p-4 md:p-6">{children}</main>

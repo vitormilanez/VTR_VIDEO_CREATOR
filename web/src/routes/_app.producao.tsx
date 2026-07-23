@@ -48,6 +48,16 @@ export function ProducaoPage() {
   jobs.forEach((j) => (counts[j.status] += 1));
 
   const filtered = jobs.filter((j) => status === "todos" || j.status === status);
+  const versions = new Map<string, number>();
+  const jobsByScript = new Map<string, typeof jobs>();
+  [...jobs]
+    .sort((left, right) => new Date(left.criadoEm).getTime() - new Date(right.criadoEm).getTime())
+    .forEach((job) => {
+      const grouped = jobsByScript.get(job.scriptId) || [];
+      grouped.push(job);
+      jobsByScript.set(job.scriptId, grouped);
+      versions.set(job.id, grouped.length);
+    });
 
   return (
     <AppShell
@@ -100,13 +110,14 @@ export function ProducaoPage() {
                 return (
                   <TableRow key={j.id}>
                     <TableCell className="font-medium">
-                      <Link
-                        to="/producao/$id"
-                        params={{ id: j.id }}
-                        className="hover:underline"
-                      >
+                      <Link to="/producao/$id" params={{ id: j.id }} className="hover:underline">
                         {s ? s.titulo : "—"}
                       </Link>
+                      {(jobsByScript.get(j.scriptId)?.length || 0) > 1 ? (
+                        <div className="mt-1 text-[11px] font-normal text-muted-foreground">
+                          Versão {versions.get(j.id)}
+                        </div>
+                      ) : null}
                     </TableCell>
                     <TableCell className="text-muted-foreground">{j.provider}</TableCell>
                     <TableCell className="min-w-[140px]">
@@ -120,7 +131,9 @@ export function ProducaoPage() {
                     <TableCell className="text-muted-foreground text-xs">
                       {new Date(j.atualizadoEm).toLocaleString("pt-BR")}
                     </TableCell>
-                    <TableCell><StatusBadge {...videoJobStatusLabel[j.status]} /></TableCell>
+                    <TableCell>
+                      <StatusBadge {...videoJobStatusLabel[j.status]} />
+                    </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
                         <WithTooltip label="Consultar status no HeyGen">
@@ -131,9 +144,15 @@ export function ProducaoPage() {
                               try {
                                 const updated = await refreshHeyGenVideo(j.id);
                                 updateVideoJob(j.id, updated);
-                                toast.success(`Status: ${videoJobStatusLabel[updated.status].label}`);
+                                toast.success(
+                                  `Status: ${videoJobStatusLabel[updated.status].label}`,
+                                );
                               } catch (err) {
-                                toast.error(err instanceof Error ? err.message : "Falha ao consultar o HeyGen.");
+                                toast.error(
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Falha ao consultar o HeyGen.",
+                                );
                               }
                             }}
                           >

@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
+import { Route as AppAvataresRouteImport } from './routes/_app.avatares'
 import { Route as AppCalendarioRouteImport } from './routes/_app.calendario'
 import { Route as AppConfiguracoesRouteImport } from './routes/_app.configuracoes'
 import { Route as AppIdeiasRouteImport } from './routes/_app.ideias'
@@ -35,6 +36,11 @@ const AppRoute = AppRouteImport.update({
 const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAvataresRoute = AppAvataresRouteImport.update({
+  id: '/avatares',
+  path: '/avatares',
   getParentRoute: () => AppRoute,
 } as any)
 const AppCalendarioRoute = AppCalendarioRouteImport.update({
@@ -120,6 +126,7 @@ const AppRoteirosIdRoute = AppRoteirosIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
+  '/avatares': typeof AppAvataresRoute
   '/calendario': typeof AppCalendarioRoute
   '/configuracoes': typeof AppConfiguracoesRoute
   '/ideias': typeof AppIdeiasRouteWithChildren
@@ -138,6 +145,7 @@ export interface FileRoutesByFullPath {
   '/roteiros/': typeof AppRoteirosIndexRoute
 }
 export interface FileRoutesByTo {
+  '/avatares': typeof AppAvataresRoute
   '/calendario': typeof AppCalendarioRoute
   '/configuracoes': typeof AppConfiguracoesRoute
   '/packs': typeof AppPacksRoute
@@ -155,6 +163,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
+  '/_app/avatares': typeof AppAvataresRoute
   '/_app/calendario': typeof AppCalendarioRoute
   '/_app/configuracoes': typeof AppConfiguracoesRoute
   '/_app/ideias': typeof AppIdeiasRouteWithChildren
@@ -177,6 +186,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/avatares'
     | '/calendario'
     | '/configuracoes'
     | '/ideias'
@@ -195,6 +205,7 @@ export interface FileRouteTypes {
     | '/roteiros/'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/avatares'
     | '/calendario'
     | '/configuracoes'
     | '/packs'
@@ -211,6 +222,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_app'
+    | '/_app/avatares'
     | '/_app/calendario'
     | '/_app/configuracoes'
     | '/_app/ideias'
@@ -248,6 +260,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/avatares': {
+      id: '/_app/avatares'
+      path: '/avatares'
+      fullPath: '/avatares'
+      preLoaderRoute: typeof AppAvataresRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/calendario': {
@@ -422,6 +441,7 @@ const AppRoteirosRouteWithChildren = AppRoteirosRoute._addFileChildren(
 )
 
 interface AppRouteChildren {
+  AppAvataresRoute: typeof AppAvataresRoute
   AppCalendarioRoute: typeof AppCalendarioRoute
   AppConfiguracoesRoute: typeof AppConfiguracoesRoute
   AppIdeiasRoute: typeof AppIdeiasRouteWithChildren
@@ -434,6 +454,7 @@ interface AppRouteChildren {
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppAvataresRoute: AppAvataresRoute,
   AppCalendarioRoute: AppCalendarioRoute,
   AppConfiguracoesRoute: AppConfiguracoesRoute,
   AppIdeiasRoute: AppIdeiasRouteWithChildren,

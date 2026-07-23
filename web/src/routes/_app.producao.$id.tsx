@@ -7,7 +7,7 @@ import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import { videoJobStatusLabel, canalLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { refreshHeyGenVideo } from "@/lib/api/local";
+import { refreshHeyGenVideo, videoDownloadUrl } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
@@ -27,7 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ArrowLeft, CalendarPlus, ExternalLink, Film, RefreshCcw } from "lucide-react";
+import { ArrowLeft, CalendarPlus, Download, ExternalLink, Film, RefreshCcw } from "lucide-react";
 import type { Canal, VideoJobStatus } from "@/lib/mock-data";
 import { toast } from "sonner";
 
@@ -55,7 +55,9 @@ function VideoDetalhe() {
       <AppShell title="Video">
         <p className="text-sm text-muted-foreground">
           Video nao encontrado.{" "}
-          <Link to="/producao" className="text-status-info underline">Voltar</Link>
+          <Link to="/producao" className="text-status-info underline">
+            Voltar
+          </Link>
         </p>
       </AppShell>
     );
@@ -72,7 +74,9 @@ function VideoDetalhe() {
       actions={
         <>
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/producao"><ArrowLeft className="mr-1 h-4 w-4" /> Voltar</Link>
+            <Link to="/producao">
+              <ArrowLeft className="mr-1 h-4 w-4" /> Voltar
+            </Link>
           </Button>
           <WithTooltip label="Consultar status no HeyGen">
             <Button
@@ -91,9 +95,21 @@ function VideoDetalhe() {
               <RefreshCcw className="mr-1 h-4 w-4" /> Atualizar status
             </Button>
           </WithTooltip>
+          {job.videoUrl ? (
+            <Button size="sm" variant="secondary" asChild>
+              <a href={videoDownloadUrl(job.id)}>
+                <Download className="mr-1 h-4 w-4" />
+                Baixar vídeo
+              </a>
+            </Button>
+          ) : null}
           <Dialog open={open} onOpenChange={setOpen}>
             <WithTooltip
-              label={job.status === "pronto" ? "Agendar publicacao no calendario" : "Disponivel quando o video estiver pronto"}
+              label={
+                job.status === "pronto"
+                  ? "Agendar publicacao no calendario"
+                  : "Disponivel quando o video estiver pronto"
+              }
             >
               <DialogTrigger asChild>
                 <Button size="sm" disabled={job.status !== "pronto"}>
@@ -102,7 +118,9 @@ function VideoDetalhe() {
               </DialogTrigger>
             </WithTooltip>
             <DialogContent>
-              <DialogHeader><DialogTitle>Agendar publicacao</DialogTitle></DialogHeader>
+              <DialogHeader>
+                <DialogTitle>Agendar publicacao</DialogTitle>
+              </DialogHeader>
               <div className="grid gap-3">
                 <div>
                   <Label>Data</Label>
@@ -111,7 +129,9 @@ function VideoDetalhe() {
                 <div>
                   <Label>Canal</Label>
                   <Select value={canal} onValueChange={(v) => setCanal(v as Canal)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="instagram">Instagram</SelectItem>
                       <SelectItem value="tiktok">TikTok</SelectItem>
@@ -121,7 +141,9 @@ function VideoDetalhe() {
                 </div>
               </div>
               <DialogFooter>
-                <Button variant="ghost" onClick={() => setOpen(false)}>Cancelar</Button>
+                <Button variant="ghost" onClick={() => setOpen(false)}>
+                  Cancelar
+                </Button>
                 <ConfirmAction
                   title="Agendar esta publicacao?"
                   description={`O post sera agendado para ${data || "..."} no canal ${canalLabel[canal]}.`}
@@ -143,9 +165,7 @@ function VideoDetalhe() {
                       toast.error("Nao foi possivel agendar.");
                     }
                   }}
-                  trigger={
-                    <Button disabled={!data || !script}>Agendar</Button>
-                  }
+                  trigger={<Button disabled={!data || !script}>Agendar</Button>}
                 />
               </DialogFooter>
             </DialogContent>
@@ -168,25 +188,46 @@ function VideoDetalhe() {
             <Progress value={job.progresso} />
             <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
               <Info label="Criado em" value={new Date(job.criadoEm).toLocaleString("pt-BR")} />
-              <Info label="Atualizado em" value={new Date(job.atualizadoEm).toLocaleString("pt-BR")} />
-              {job.duracaoSegundos ? <Info label="Duracao" value={`${job.duracaoSegundos}s`} /> : null}
+              <Info
+                label="Atualizado em"
+                value={new Date(job.atualizadoEm).toLocaleString("pt-BR")}
+              />
+              {job.duracaoSegundos ? (
+                <Info label="Duracao" value={`${job.duracaoSegundos}s`} />
+              ) : null}
               {job.videoUrl ? <Info label="Arquivo" value="Video disponivel" /> : null}
             </div>
             {job.videoUrl ? (
-              <a
-                href={job.videoUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-3 inline-flex items-center gap-1 text-xs text-status-info hover:underline"
-              >
-                Abrir video <ExternalLink className="h-3.5 w-3.5" />
-              </a>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" variant="secondary" asChild>
+                  <a href={videoDownloadUrl(job.id)}>
+                    <Download className="mr-1 h-4 w-4" />
+                    Baixar MP4
+                  </a>
+                </Button>
+                <Button size="sm" variant="ghost" asChild>
+                  <a href={job.videoUrl} target="_blank" rel="noreferrer">
+                    Abrir no HeyGen <ExternalLink className="ml-1 h-3.5 w-3.5" />
+                  </a>
+                </Button>
+              </div>
             ) : null}
           </div>
 
           <div className="rounded-xl border bg-card p-4 shadow-sm">
             <h3 className="mb-2 font-display text-sm font-semibold">Preview</h3>
-            {job.thumbnailUrl ? (
+            {job.videoUrl ? (
+              <video
+                src={job.videoUrl}
+                poster={job.thumbnailUrl}
+                controls
+                playsInline
+                preload="metadata"
+                className="aspect-[9/16] max-h-[68vh] w-full max-w-[420px] rounded-lg bg-black object-contain"
+              >
+                Seu navegador não conseguiu reproduzir este vídeo.
+              </video>
+            ) : job.thumbnailUrl ? (
               <img
                 src={job.thumbnailUrl}
                 alt={`Preview de ${script?.titulo ?? "video"}`}
@@ -198,7 +239,11 @@ function VideoDetalhe() {
               </div>
             )}
             <p className="mt-2 text-[11px] text-muted-foreground">
-              {job.thumbnailUrl ? "Preview retornado pelo HeyGen." : "O preview aparece quando o HeyGen disponibiliza o video."}
+              {job.videoUrl
+                ? "Assista aqui ou baixe o arquivo MP4."
+                : job.thumbnailUrl
+                  ? "Preview retornado pelo HeyGen."
+                  : "O preview aparece quando o HeyGen disponibiliza o video."}
             </p>
           </div>
         </div>
@@ -213,7 +258,11 @@ function VideoDetalhe() {
               Roteiro origem
             </div>
             {script ? (
-              <Link to="/roteiros/$id" params={{ id: script.id }} className="text-sm font-medium hover:underline">
+              <Link
+                to="/roteiros/$id"
+                params={{ id: script.id }}
+                className="text-sm font-medium hover:underline"
+              >
                 {script.titulo}
               </Link>
             ) : (
@@ -246,10 +295,10 @@ function buildVideoTimeline(
     erro: "Erro",
   };
   return order.map((k, i) => {
-    const state: TimelineStep["state"] =
-      i < idx ? "done" : i === idx ? "current" : "pending";
+    const state: TimelineStep["state"] = i < idx ? "done" : i === idx ? "current" : "pending";
     const step: TimelineStep = { key: k, label: labels[k], state };
-    if (k === "fila" && (state === "done" || state === "current")) step.timestamp = fmt(ts.criadoEm);
+    if (k === "fila" && (state === "done" || state === "current"))
+      step.timestamp = fmt(ts.criadoEm);
     if (k === status) step.timestamp = fmt(ts.atualizadoEm);
     return step;
   });
@@ -258,7 +307,9 @@ function buildVideoTimeline(
 function Info({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
       <div className="truncate">{value}</div>
     </div>
   );

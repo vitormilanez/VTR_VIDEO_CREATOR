@@ -166,10 +166,86 @@ export async function huntTrends(): Promise<{ ok: boolean; added?: number }> {
 }
 
 export interface HeyGenCatalog {
-  avatars: Array<{ id: string; name: string; orientation: "portrait" | "landscape" }>;
+  avatars: Array<{
+    id: string;
+    name: string;
+    orientation: "portrait" | "landscape";
+    groupId?: string | null;
+    groupName?: string | null;
+    previewImageUrl?: string | null;
+  }>;
   voices: Array<{ id: string; name: string; gender: string }>;
   defaultAvatarId?: string | null;
   defaultVoiceId?: string | null;
+}
+
+export interface HeyGenAvatarGroup {
+  id: string;
+  name: string;
+  gender?: string | null;
+  looks_count: number;
+  status?: "processing" | "pending_consent" | "failed" | "completed" | null;
+  consent_status?: string | null;
+  preview_image_url?: string | null;
+  preview_video_url?: string | null;
+  default_voice_id?: string | null;
+  created_at: number;
+}
+
+export interface HeyGenAvatarLook {
+  id: string;
+  group_id: string;
+  group_name: string;
+  name: string;
+  avatar_type?: string | null;
+  gender?: string | null;
+  status?: "processing" | "pending_consent" | "failed" | "completed" | null;
+  preferred_orientation?: "portrait" | "landscape" | null;
+  preview_image_url?: string | null;
+  default_voice_id?: string | null;
+  image_width?: number | null;
+  image_height?: number | null;
+}
+
+export interface AvatarJob {
+  id: string;
+  name: string;
+  creationType: "photo" | "digital_twin" | "prompt";
+  status: string;
+  groupId: string;
+  avatarId?: string | null;
+  voiceId?: string | null;
+  voiceStatus?: string | null;
+  consentUrl?: string | null;
+  previewImageUrl?: string | null;
+  previewVideoUrl?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HeyGenStyle {
+  style_id: string;
+  name: string;
+  aspect_ratio: "9:16" | "16:9" | string;
+  tags: string[];
+  thumbnail_url?: string | null;
+  preview_video_url?: string | null;
+}
+
+export interface AvatarMediaPayload {
+  name: string;
+  mimeType: string;
+  data: string;
+}
+
+export interface CreateAvatarPayload {
+  name: string;
+  creationType: "photo" | "digital_twin" | "prompt";
+  appearancePrompt: string;
+  media: AvatarMediaPayload[];
+  cloneVoice: boolean;
+  voiceMedia?: AvatarMediaPayload;
+  consentAccepted: boolean;
 }
 
 export async function fetchHeyGenCatalog(): Promise<HeyGenCatalog> {
@@ -179,9 +255,48 @@ export async function fetchHeyGenCatalog(): Promise<HeyGenCatalog> {
   return (await res.json()) as HeyGenCatalog;
 }
 
+export async function fetchHeyGenAvatars(): Promise<{
+  avatars: HeyGenAvatarGroup[];
+  looks: HeyGenAvatarLook[];
+  jobs: AvatarJob[];
+}> {
+  return requestJson("/api/heygen/avatars", { method: "GET" });
+}
+
+export async function fetchHeyGenStyles(tag = "cinematic"): Promise<{
+  styles: HeyGenStyle[];
+  tag: string;
+}> {
+  return requestJson(`/api/heygen/styles?tag=${encodeURIComponent(tag)}`, { method: "GET" });
+}
+
+export async function createHeyGenAvatar(payload: CreateAvatarPayload): Promise<AvatarJob> {
+  const response = await postJson<{ ok: boolean; job: AvatarJob }>("/api/heygen/avatars", payload);
+  return response.job;
+}
+
+export async function refreshHeyGenAvatar(jobId: string): Promise<AvatarJob> {
+  const response = await postJson<{ ok: boolean; job: AvatarJob }>(
+    `/api/heygen/avatars/${encodeURIComponent(jobId)}/refresh`,
+    {},
+  );
+  return response.job;
+}
+
 export async function createHeyGenVideo(
   scriptId: string,
-  selection: { avatarId?: string; voiceId?: string },
+  selection: {
+    avatarId?: string;
+    voiceId?: string;
+    orientation: "portrait" | "landscape";
+    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    speechMode: "natural" | "fiel" | "direto";
+    captions: boolean;
+    optimizePronunciation: boolean;
+    styleId?: string;
+    forceNewVersion?: boolean;
+    narrationText?: string;
+  },
 ): Promise<VideoJob> {
   const res = await fetch(`${BASE}/api/videos`, {
     method: "POST",
@@ -190,6 +305,19 @@ export async function createHeyGenVideo(
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel enviar ao HeyGen."));
   return ((await res.json()) as { job: VideoJob }).job;
+}
+
+export async function naturalizeScript(input: {
+  text: string;
+  medicalCautions: string;
+  durationSeconds: 10 | 15 | 30 | 45 | 60;
+}): Promise<string> {
+  const response = await postJson<{ ok: boolean; text: string }>("/api/scripts/naturalize", input);
+  return response.text;
+}
+
+export function videoDownloadUrl(jobId: string): string {
+  return `${BASE}/api/videos/${encodeURIComponent(jobId)}/download`;
 }
 
 export async function refreshHeyGenVideo(jobId: string): Promise<VideoJob> {

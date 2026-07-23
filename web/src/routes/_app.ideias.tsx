@@ -20,6 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -34,7 +35,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { ExternalLink, Lightbulb, Sparkles, Trash2 } from "lucide-react";
+import { CircleCheck, ExternalLink, FileText, Lightbulb, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/ideias")({
@@ -63,6 +64,8 @@ function IdeiasLayout() {
 
 export function IdeiasPage() {
   const ideas = useStore((s) => s.ideas);
+  const scripts = useStore((s) => s.scripts);
+  const videoJobs = useStore((s) => s.videoJobs);
   const updateIdea = useStore((s) => s.updateIdea);
   const addScript = useStore((s) => s.addScript);
   const navigate = useNavigate();
@@ -88,6 +91,23 @@ export function IdeiasPage() {
 
   const counts: Record<IdeaStatus, number> = { novo: 0, em_analise: 0, aprovado: 0, descartado: 0 };
   ideas.forEach((i) => (counts[i.status] += 1));
+
+  function scriptForIdea(idea: Idea) {
+    const normalizedHook = idea.hook.trim().toLowerCase();
+    return scripts.find(
+      (script) =>
+        script.ideaId === idea.id ||
+        (normalizedHook && script.hook.trim().toLowerCase() === normalizedHook),
+    );
+  }
+
+  function videoForScript(scriptId: string) {
+    return videoJobs.find((job) => job.scriptId === scriptId && job.status !== "erro");
+  }
+
+  const usedIdeas = ideas.filter((idea) => Boolean(scriptForIdea(idea)));
+  const previewScript = preview ? scriptForIdea(preview) : undefined;
+  const previewVideo = previewScript ? videoForScript(previewScript.id) : undefined;
 
   async function gerarRoteiro(i: Idea) {
     const script: Script = {
@@ -141,6 +161,16 @@ export function IdeiasPage() {
 
   return (
     <AppShell title="Ideias">
+      {usedIdeas.length > 0 ? (
+        <div className="mb-3 flex items-center gap-2 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs">
+          <CircleCheck className="h-4 w-4 shrink-0 text-status-info" />
+          <span>
+            {usedIdeas.length}{" "}
+            {usedIdeas.length === 1 ? "ideia já virou roteiro" : "ideias já viraram roteiros"}. As
+            ideias utilizadas estão identificadas e abrem o roteiro existente.
+          </span>
+        </div>
+      ) : null}
       <StatusChips
         className="mb-3"
         value={status}
@@ -204,61 +234,88 @@ export function IdeiasPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {ordered.map((i) => (
-                <TableRow key={i.id} className="cursor-pointer" onClick={() => setPreview(i)}>
-                  <TableCell>
-                    <div className="font-medium">{i.titulo}</div>
-                    <div className="mt-1 flex flex-wrap items-center gap-1">
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                        {familiaLabel[i.familia]}
-                      </span>
-                      {i.tipo ? (
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                          {i.tipo}
+              {ordered.map((i) => {
+                const usedScript = scriptForIdea(i);
+                const producedVideo = usedScript ? videoForScript(usedScript.id) : undefined;
+                return (
+                  <TableRow key={i.id} className="cursor-pointer" onClick={() => setPreview(i)}>
+                    <TableCell>
+                      <div className="font-medium">{i.titulo}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                          {familiaLabel[i.familia]}
                         </span>
-                      ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-sm">{i.hook}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {i.publicoDor || "—"}
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge {...prioridadeLabel[i.prioridade]} />
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge {...ideaStatusLabel[i.status]} />
-                  </TableCell>
-                  <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex justify-end gap-1">
-                      <WithTooltip label="Gerar roteiro a partir da ideia">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={i.status === "descartado"}
-                          onClick={() => gerarRoteiro(i)}
-                        >
-                          <Sparkles className="mr-1 h-3.5 w-3.5" /> Roteiro
-                        </Button>
-                      </WithTooltip>
-                      <ConfirmAction
-                        destructive
-                        title="Descartar ideia?"
-                        description="Voce podera restaurar mudando o status manualmente."
-                        confirmLabel="Descartar"
-                        onConfirm={() => descartarIdeia(i)}
-                        trigger={
-                          <WithTooltip label="Descartar ideia">
-                            <Button size="sm" variant="ghost">
-                              <Trash2 className="h-3.5 w-3.5" />
+                        {i.tipo ? (
+                          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                            {i.tipo}
+                          </span>
+                        ) : null}
+                        {usedScript ? (
+                          <Badge
+                            variant="outline"
+                            className="h-5 border-status-info/40 px-1.5 text-[10px] text-status-info"
+                          >
+                            {producedVideo ? (
+                              <CircleCheck className="mr-1 h-3 w-3" />
+                            ) : (
+                              <FileText className="mr-1 h-3 w-3" />
+                            )}
+                            {producedVideo ? "Vídeo produzido" : "Roteiro criado"}
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-sm">{i.hook}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {i.publicoDor || "—"}
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge {...prioridadeLabel[i.prioridade]} />
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge {...ideaStatusLabel[i.status]} />
+                    </TableCell>
+                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex justify-end gap-1">
+                        {usedScript ? (
+                          <WithTooltip label="Abrir roteiro já criado">
+                            <Button size="sm" variant="secondary" asChild>
+                              <Link to="/roteiros/$id" params={{ id: usedScript.id }}>
+                                <ExternalLink className="mr-1 h-3.5 w-3.5" /> Ver roteiro
+                              </Link>
                             </Button>
                           </WithTooltip>
-                        }
-                      />
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
+                        ) : (
+                          <WithTooltip label="Gerar roteiro a partir da ideia">
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              disabled={i.status === "descartado"}
+                              onClick={() => gerarRoteiro(i)}
+                            >
+                              <Sparkles className="mr-1 h-3.5 w-3.5" /> Roteiro
+                            </Button>
+                          </WithTooltip>
+                        )}
+                        <ConfirmAction
+                          destructive
+                          title="Descartar ideia?"
+                          description="Voce podera restaurar mudando o status manualmente."
+                          confirmLabel="Descartar"
+                          onConfirm={() => descartarIdeia(i)}
+                          trigger={
+                            <WithTooltip label="Descartar ideia">
+                              <Button size="sm" variant="ghost">
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </WithTooltip>
+                          }
+                        />
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
@@ -299,16 +356,31 @@ export function IdeiasPage() {
                 </a>
               ) : null}
               <div className="mt-6 flex flex-col gap-2">
-                <Button
-                  size="sm"
-                  disabled={preview.status === "descartado"}
-                  onClick={() => {
-                    gerarRoteiro(preview);
-                    setPreview(null);
-                  }}
-                >
-                  <Sparkles className="mr-1 h-4 w-4" /> Gerar roteiro
-                </Button>
+                {previewScript ? (
+                  <>
+                    <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs">
+                      {previewVideo
+                        ? "Esta ideia já possui roteiro e vídeo produzido."
+                        : "Esta ideia já possui um roteiro criado."}
+                    </div>
+                    <Button asChild size="sm">
+                      <Link to="/roteiros/$id" params={{ id: previewScript.id }}>
+                        <ExternalLink className="mr-1 h-4 w-4" /> Abrir roteiro existente
+                      </Link>
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    size="sm"
+                    disabled={preview.status === "descartado"}
+                    onClick={() => {
+                      gerarRoteiro(preview);
+                      setPreview(null);
+                    }}
+                  >
+                    <Sparkles className="mr-1 h-4 w-4" /> Gerar roteiro
+                  </Button>
+                )}
                 <Button asChild size="sm" variant="secondary">
                   <Link to="/ideias/$id" params={{ id: preview.id }}>
                     <ExternalLink className="mr-1 h-4 w-4" /> Abrir tela completa
