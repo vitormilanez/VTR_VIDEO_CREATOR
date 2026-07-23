@@ -90,10 +90,20 @@ A planilha e a fonte operacional do projeto. As abas principais sao:
 - `Radar Tendencias`: entrada de sinais, tendencias e dores do publico.
 - `Ideias`: hooks, angulos e CTAs gerados a partir do radar.
 - `Roteiros`: roteiro estruturado para validacao medica e posterior video.
-- `Calendario`: planejamento de publicacao.
+- `Calendario`: agendamento, reagendamento e publicacao persistidos na planilha.
 - `Performance`: resultados manuais ou importados depois da publicacao.
 
 Conta dona da planilha: `vtrconsultingbr@gmail.com`.
+
+Antes de criar qualquer job pago no HeyGen, o backend valida o texto falado final.
+Falas com doses, promessas proibidas ou instrucoes prescritivas sao bloqueadas,
+independentemente do status atual do roteiro.
+
+Jobs de video e avatar ficam em `data/operations.db` (SQLite em modo WAL). Na
+primeira abertura, os arquivos legados `data/video_jobs.json` e
+`data/avatar_jobs.json` sao importados automaticamente. Cada envio de video usa
+uma chave idempotente persistente: repetir a mesma requisicao retorna o job ja
+registrado e nao cria uma segunda chamada paga no HeyGen.
 
 Se aparecer a tela "You need access" no Google Sheets, peça acesso para essa conta. A conta pessoal `vitor.milanezz@gmail.com` pode nao ter permissao direta no navegador, mesmo quando o app local consegue acessar via token OAuth.
 

@@ -106,7 +106,12 @@ export const useStore = create<State>()(
         set((s) => ({
           scripts: s.scripts.map((sc) => (sc.id === id ? { ...sc, ...patch } : sc)),
         })),
-      addVideoJob: (v) => set((s) => ({ videoJobs: [v, ...s.videoJobs] })),
+      addVideoJob: (v) =>
+        set((s) => ({
+          videoJobs: s.videoJobs.some((job) => job.id === v.id)
+            ? s.videoJobs.map((job) => (job.id === v.id ? v : job))
+            : [v, ...s.videoJobs],
+        })),
       updateVideoJob: (id, patch) =>
         set((s) => ({
           videoJobs: s.videoJobs.map((v) => (v.id === id ? { ...v, ...patch } : v)),

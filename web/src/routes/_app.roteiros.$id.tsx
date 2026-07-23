@@ -30,7 +30,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ArrowLeft, Captions, Film, History, RotateCcw, Save, Sparkles } from "lucide-react";
+import {
+  ArrowLeft,
+  Captions,
+  Film,
+  History,
+  RotateCcw,
+  Save,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/roteiros/$id")({
@@ -535,6 +544,11 @@ function RoteiroDetalhe() {
                   )}
                   s de fala
                 </span>
+              </div>
+              <div className="mt-2 flex items-start gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />A fala
+                exata será validada pelo compliance antes de qualquer envio ao HeyGen. Se houver
+                dose, promessa ou instrução prescritiva, a produção será bloqueada.
               </div>
             </div>
           </div>

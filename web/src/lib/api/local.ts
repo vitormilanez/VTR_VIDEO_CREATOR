@@ -1,7 +1,7 @@
 // Cliente da API local (FastAPI em api/server.py) que serve os dados reais
 // do Google Sheets. Base configuravel via VITE_API_URL.
 import type { HydratePayload } from "../store";
-import type { Idea, Script } from "../mock-data";
+import type { CalendarPost, Idea, Script } from "../mock-data";
 import type { VideoJob } from "../mock-data";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
@@ -87,6 +87,24 @@ export async function saveScript(script: Script): Promise<Script> {
     { method: "PUT", body: JSON.stringify(script) },
   );
   return response.script;
+}
+
+/** Cria um agendamento real na aba Calendario do Sheets. */
+export async function appendCalendarPost(post: Omit<CalendarPost, "id">): Promise<CalendarPost> {
+  const response = await postJson<{ ok: boolean; post: CalendarPost }>(
+    "/api/sheets/calendario",
+    post,
+  );
+  return response.post;
+}
+
+/** Persiste reagendamento, publicacao e demais alteracoes do calendario. */
+export async function saveCalendarPost(post: CalendarPost): Promise<CalendarPost> {
+  const response = await requestJson<{ ok: boolean; post: CalendarPost }>(
+    `/api/sheets/calendario/${encodeURIComponent(post.id)}`,
+    { method: "PUT", body: JSON.stringify(post) },
+  );
+  return response.post;
 }
 
 export interface GeneratedPack {
@@ -296,12 +314,17 @@ export async function createHeyGenVideo(
     styleId?: string;
     forceNewVersion?: boolean;
     narrationText?: string;
+    idempotencyKey?: string;
   },
 ): Promise<VideoJob> {
+  const idempotencyKey =
+    selection.idempotencyKey ??
+    globalThis.crypto?.randomUUID?.() ??
+    `video-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const res = await fetch(`${BASE}/api/videos`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scriptId, ...selection }),
+    body: JSON.stringify({ scriptId, ...selection, idempotencyKey }),
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel enviar ao HeyGen."));
   return ((await res.json()) as { job: VideoJob }).job;

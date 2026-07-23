@@ -41,7 +41,7 @@ SHEETS = {
     "radar": "'Radar Tendencias'!A:L",
     "ideias": "'Ideias'!A:K",
     "roteiros": "'Roteiros'!A:P",
-    "calendario": "'Calendario'!A:K",
+    "calendario": "'Calendario'!A:N",
     "performance": "'Performance'!A:N",
 }
 

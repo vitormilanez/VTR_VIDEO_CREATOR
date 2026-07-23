@@ -18,7 +18,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { ConfirmAction } from "@/components/confirm-action";
 import { canalLabel, postStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { setSheetStatus } from "@/lib/api/local";
+import { saveCalendarPost } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, CheckCircle2, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -55,18 +55,49 @@ const canalColor: Record<string, string> = {
 function CalendarioPage() {
   const posts = useStore((s) => s.calendarPosts);
   const updatePost = useStore((s) => s.updateCalendarPost);
-  const marcarPublicado = useStore((s) => s.marcarPublicado);
   const [cursor, setCursor] = useState(new Date());
   const [editing, setEditing] = useState<CalendarPost | null>(null);
   const [novaData, setNovaData] = useState("");
+  const [savingId, setSavingId] = useState<string | null>(null);
 
-  async function publicar(id: string) {
-    marcarPublicado(id);
+  async function publicar(id: string): Promise<boolean> {
+    const post = posts.find((item) => item.id === id);
+    if (!post) return false;
+    setSavingId(id);
     try {
-      await setSheetStatus("calendario", id, "publicado");
+      const updated = await saveCalendarPost({
+        ...post,
+        status: "publicado",
+        publicadoEm: new Date().toISOString(),
+      });
+      updatePost(id, updated);
       toast.success("Publicado e sincronizado com o Sheets.");
+      return true;
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao sincronizar.");
+      return false;
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  async function reagendar() {
+    if (!editing || !novaData) return;
+    setSavingId(editing.id);
+    try {
+      const updated = await saveCalendarPost({
+        ...editing,
+        dataAgendada: new Date(`${novaData}T12:00:00`).toISOString(),
+        status: "agendado",
+        publicadoEm: undefined,
+      });
+      updatePost(editing.id, updated);
+      toast.success("Publicacao reagendada e salva no Sheets.");
+      setEditing(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao reagendar.");
+    } finally {
+      setSavingId(null);
     }
   }
 
@@ -164,7 +195,12 @@ function CalendarioPage() {
                       confirmLabel="Marcar publicado"
                       onConfirm={() => publicar(p.id)}
                       trigger={
-                        <Button size="sm" variant="secondary" className="h-7 flex-1 text-xs">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="h-7 flex-1 text-xs"
+                          disabled={savingId === p.id}
+                        >
                           <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Marcar publicado
                         </Button>
                       }
@@ -223,25 +259,20 @@ function CalendarioPage() {
                 variant="secondary"
                 onClick={() => {
                   if (!editing) return;
-                  void publicar(editing.id);
-                  setEditing(null);
+                  void publicar(editing.id).then((saved) => {
+                    if (saved) setEditing(null);
+                  });
                 }}
+                disabled={savingId === editing?.id}
               >
-                Marcar como publicado
+                {savingId === editing?.id ? "Salvando..." : "Marcar como publicado"}
               </Button>
             )}
             <Button
-              onClick={() => {
-                if (!editing || !novaData) return;
-                updatePost(editing.id, {
-                  dataAgendada: new Date(`${novaData}T12:00:00`).toISOString(),
-                  status: "agendado",
-                });
-                toast.success("Publicacao reagendada.");
-                setEditing(null);
-              }}
+              onClick={() => void reagendar()}
+              disabled={!novaData || savingId === editing?.id}
             >
-              Salvar
+              {savingId === editing?.id ? "Salvando..." : "Salvar"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -7,7 +7,7 @@ import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import { videoJobStatusLabel, canalLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { refreshHeyGenVideo, videoDownloadUrl } from "@/lib/api/local";
+import { appendCalendarPost, refreshHeyGenVideo, videoDownloadUrl } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
@@ -43,12 +43,13 @@ function VideoDetalhe() {
   const job = useStore((s) => s.videoJobs.find((v) => v.id === id));
   const script = useStore((s) => (job ? s.scripts.find((x) => x.id === job.scriptId) : undefined));
   const updateVideoJob = useStore((s) => s.updateVideoJob);
-  const agendar = useStore((s) => s.agendarPost);
+  const addCalendarPost = useStore((s) => s.addCalendarPost);
   const navigate = useNavigate();
 
   const [open, setOpen] = useState(false);
   const [data, setData] = useState("");
   const [canal, setCanal] = useState<Canal>("instagram");
+  const [scheduling, setScheduling] = useState(false);
 
   if (!job) {
     return (
@@ -148,24 +149,35 @@ function VideoDetalhe() {
                   title="Agendar esta publicacao?"
                   description={`O post sera agendado para ${data || "..."} no canal ${canalLabel[canal]}.`}
                   confirmLabel="Agendar"
-                  onConfirm={() => {
+                  onConfirm={async () => {
                     if (!script || !data) return;
+                    setScheduling(true);
                     try {
-                      agendar({
+                      const post = await appendCalendarPost({
                         scriptId: script.id,
                         videoJobId: job.id,
                         titulo: script.titulo,
                         dataAgendada: new Date(`${data}T12:00:00`).toISOString(),
                         canal,
+                        status: "agendado",
+                        tema: script.tema,
+                        formato: script.formatoSugerido,
                       });
-                      toast.success("Publicacao agendada.");
+                      addCalendarPost(post);
+                      toast.success("Publicacao agendada e salva no Sheets.");
                       setOpen(false);
                       navigate({ to: "/calendario" });
-                    } catch {
-                      toast.error("Nao foi possivel agendar.");
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : "Nao foi possivel agendar.");
+                    } finally {
+                      setScheduling(false);
                     }
                   }}
-                  trigger={<Button disabled={!data || !script}>Agendar</Button>}
+                  trigger={
+                    <Button disabled={!data || !script || scheduling}>
+                      {scheduling ? "Salvando..." : "Agendar"}
+                    </Button>
+                  }
                 />
               </DialogFooter>
             </DialogContent>

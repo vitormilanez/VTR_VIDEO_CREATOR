@@ -20,7 +20,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,14 +31,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from api.job_store import JobStore
 from integrations.portuguese_br import prepare_script_for_heygen_voice
 
 ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT = ROOT / "data" / "sheets_snapshot.json"
 VIDEO_JOBS = ROOT / "data" / "video_jobs.json"
 AVATAR_JOBS = ROOT / "data" / "avatar_jobs.json"
-VIDEO_SUBMISSION_LOCK = threading.Lock()
-VIDEO_SUBMISSIONS_IN_FLIGHT: set[str] = set()
+OPERATIONAL_DB = ROOT / "data" / "operations.db"
 MANDATORY_VIDEO_OUTRO = "Me siga para mais dicas, e obrigado."
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
@@ -88,38 +87,28 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _job_store() -> JobStore:
+    return JobStore(
+        OPERATIONAL_DB,
+        legacy_video_path=VIDEO_JOBS,
+        legacy_avatar_path=AVATAR_JOBS,
+    )
+
+
 def _load_video_jobs() -> list[dict[str, Any]]:
-    if not VIDEO_JOBS.exists():
-        return []
-    try:
-        data = json.loads(VIDEO_JOBS.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return data if isinstance(data, list) else []
+    return _job_store().list("video")
 
 
 def _save_video_jobs(jobs: list[dict[str, Any]]) -> None:
-    VIDEO_JOBS.parent.mkdir(parents=True, exist_ok=True)
-    temporary = VIDEO_JOBS.with_suffix(".tmp")
-    temporary.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(VIDEO_JOBS)
+    _job_store().replace("video", jobs)
 
 
 def _load_avatar_jobs() -> list[dict[str, Any]]:
-    if not AVATAR_JOBS.exists():
-        return []
-    try:
-        data = json.loads(AVATAR_JOBS.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return data if isinstance(data, list) else []
+    return _job_store().list("avatar")
 
 
 def _save_avatar_jobs(jobs: list[dict[str, Any]]) -> None:
-    AVATAR_JOBS.parent.mkdir(parents=True, exist_ok=True)
-    temporary = AVATAR_JOBS.with_suffix(".tmp")
-    temporary.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(AVATAR_JOBS)
+    _job_store().replace("avatar", jobs)
 
 
 def _migrate_video_job_script_ids(scripts: list[dict[str, Any]]) -> int:
@@ -614,7 +603,12 @@ def _heygen_default_voice_id() -> str:
 # --------------------------------------------------------------------------- #
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "snapshot_exists": SNAPSHOT.exists()}
+    _job_store()
+    return {
+        "ok": True,
+        "snapshot_exists": SNAPSHOT.exists(),
+        "operational_db": OPERATIONAL_DB.exists(),
+    }
 
 
 @app.get("/api/heygen/catalog")
@@ -789,16 +783,13 @@ def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
         "createdAt": now,
         "updatedAt": now,
     }
-    jobs = _load_avatar_jobs()
-    jobs.insert(0, job)
-    _save_avatar_jobs(jobs)
+    _job_store().upsert("avatar", job)
     return {"ok": True, "job": job}
 
 
 @app.post("/api/heygen/avatars/{job_id}/refresh")
 def refresh_heygen_avatar(job_id: str) -> dict:
-    jobs = _load_avatar_jobs()
-    job = next((item for item in jobs if item.get("id") == job_id), None)
+    job = _job_store().get("avatar", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Criacao de avatar nao encontrada.")
     command = _heygen_cli()
@@ -823,7 +814,7 @@ def refresh_heygen_avatar(job_id: str) -> dict:
         )
         job["voiceStatus"] = _find_value(voice_response, "status")
     job["updatedAt"] = _now()
-    _save_avatar_jobs(jobs)
+    _job_store().upsert("avatar", job)
     return {"ok": True, "job": job}
 
 
@@ -859,6 +850,7 @@ class VideoCreateIn(BaseModel):
     styleId: str | None = None
     forceNewVersion: bool = False
     narrationText: str | None = Field(default=None, max_length=6000)
+    idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class NaturalizeScriptIn(BaseModel):
@@ -1008,38 +1000,77 @@ def ai_costs() -> dict:
 @app.post("/api/videos")
 def create_video(payload: VideoCreateIn) -> dict:
     """Cria um job real no HeyGen somente apos o clique de enviar para producao."""
-    with VIDEO_SUBMISSION_LOCK:
-        if payload.scriptId in VIDEO_SUBMISSIONS_IN_FLIGHT:
+    now = _now()
+    idempotency_key = payload.idempotencyKey or (
+        f"video:{payload.scriptId}:initial"
+        if not payload.forceNewVersion
+        else f"video:{payload.scriptId}:version:{uuid.uuid4().hex}"
+    )
+    reserved_job = {
+        "id": f"v-{uuid.uuid4().hex[:12]}",
+        "scriptId": payload.scriptId,
+        "status": "fila",
+        "provider": "heygen",
+        "progresso": 0,
+        "criadoEm": now,
+        "atualizadoEm": now,
+        "submissionState": "reserved",
+        "productionSettings": {
+            "avatarId": payload.avatarId,
+            "orientation": payload.orientation,
+            "durationSeconds": payload.durationSeconds,
+            "speechMode": payload.speechMode,
+            "captions": payload.captions,
+            "optimizePronunciation": payload.optimizePronunciation,
+            "styleId": payload.styleId,
+            "narrationText": payload.narrationText,
+        },
+    }
+    job, reservation = _job_store().reserve_video(
+        reserved_job,
+        idempotency_key=idempotency_key,
+        force_new_version=payload.forceNewVersion,
+    )
+    if reservation == "duplicate":
+        if job.get("submissionState") in {"reserved", "submitting"}:
             raise HTTPException(
                 status_code=409,
                 detail="Este roteiro ja esta sendo enviado. Aguarde a criacao aparecer na producao.",
             )
-        existing = next(
-            (
-                job
-                for job in _load_video_jobs()
-                if job.get("scriptId") == payload.scriptId and job.get("status") != "erro"
-            ),
-            None,
-        )
-        if existing and not payload.forceNewVersion:
+        return {"ok": True, "job": job, "deduplicated": True}
+    if reservation == "conflict":
+        if job.get("submissionState") in {"reserved", "submitting", "submission_uncertain"}:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Este roteiro ja possui um video. Abra a producao existente ou use "
-                    "'Criar nova versao' para gerar outro video."
+                    "Ja existe um envio deste roteiro em andamento ou aguardando reconciliacao. "
+                    "Nenhuma nova chamada foi feita ao HeyGen."
                 ),
             )
-        VIDEO_SUBMISSIONS_IN_FLIGHT.add(payload.scriptId)
-
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Este roteiro ja possui um video. Abra a producao existente ou use "
+                "'Criar nova versao' para gerar outro video."
+            ),
+        )
     try:
-        return _create_video_job(payload)
-    finally:
-        with VIDEO_SUBMISSION_LOCK:
-            VIDEO_SUBMISSIONS_IN_FLIGHT.discard(payload.scriptId)
+        return _create_video_job(payload, reserved_job)
+    except HTTPException as exc:
+        current = _job_store().get("video", reserved_job["id"]) or reserved_job
+        current["status"] = "erro"
+        current["progresso"] = 0
+        current["erro"] = str(exc.detail)
+        current["retrySafe"] = current.get("submissionState") != "submitting"
+        current["submissionState"] = (
+            "failed_safe" if current["retrySafe"] else "submission_uncertain"
+        )
+        current["atualizadoEm"] = _now()
+        _job_store().upsert("video", current)
+        raise
 
 
-def _create_video_job(payload: VideoCreateIn) -> dict:
+def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
     command = _heygen_cli()
     script = _find_script(payload.scriptId)
     _validate_final_narration(script, payload.narrationText)
@@ -1077,6 +1108,10 @@ def _create_video_job(payload: VideoCreateIn) -> dict:
     ]
     if payload.styleId:
         args.extend(["--style-id", payload.styleId])
+    job["productionSettings"]["avatarId"] = avatar_id
+    job["submissionState"] = "submitting"
+    job["atualizadoEm"] = _now()
+    _job_store().upsert("video", job)
     try:
         proc = subprocess.run(args, cwd=str(ROOT), capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired as exc:
@@ -1090,28 +1125,12 @@ def _create_video_job(payload: VideoCreateIn) -> dict:
     if not session_id:
         raise HTTPException(status_code=502, detail="HeyGen nao retornou o identificador da sessao.")
 
-    now = _now()
-    job = {
-        "id": f"v-{uuid.uuid4().hex[:12]}",
-        "scriptId": payload.scriptId,
-        "status": "fila",
-        "provider": "heygen",
-        "progresso": 0,
-        "criadoEm": now,
-        "atualizadoEm": now,
-        "remoteSessionId": session_id,
-        "remoteVideoId": video_id or None,
-        "productionSettings": {
-            "avatarId": avatar_id,
-            "orientation": payload.orientation,
-            "durationSeconds": payload.durationSeconds,
-            "speechMode": payload.speechMode,
-            "captions": payload.captions,
-            "optimizePronunciation": payload.optimizePronunciation,
-            "styleId": payload.styleId,
-            "narrationText": payload.narrationText,
-        },
-    }
+    job["status"] = "fila"
+    job["submissionState"] = "submitted"
+    job["atualizadoEm"] = _now()
+    job["remoteSessionId"] = session_id
+    job["remoteVideoId"] = video_id or None
+    _job_store().upsert("video", job)
     try:
         balance_after, currency_after = _heygen_wallet(command)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
@@ -1119,9 +1138,7 @@ def _create_video_job(payload: VideoCreateIn) -> dict:
     if balance_before is not None and balance_after is not None and balance_after <= balance_before:
         job["costUsd"] = round(balance_before - balance_after, 2)
         job["currency"] = (currency_after or currency_before or "USD").upper()
-    jobs = _load_video_jobs()
-    jobs.insert(0, job)
-    _save_video_jobs(jobs)
+    _job_store().upsert("video", job)
     return {"ok": True, "job": job}
 
 
@@ -1129,8 +1146,7 @@ def _create_video_job(payload: VideoCreateIn) -> dict:
 def refresh_video(job_id: str) -> dict:
     """Consulta o HeyGen e atualiza um job local ja criado."""
     command = _heygen_cli()
-    jobs = _load_video_jobs()
-    job = next((item for item in jobs if item.get("id") == job_id), None)
+    job = _job_store().get("video", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job de video nao encontrado.")
     session_id = job.get("remoteSessionId")
@@ -1171,14 +1187,15 @@ def refresh_video(job_id: str) -> dict:
             job["thumbnailUrl"] = _find_value(video_details, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
     if status == "erro":
         job["erro"] = str(_find_value(response, "error", "message", "detail") or "HeyGen nao concluiu o video.")
-    _save_video_jobs(jobs)
+    job["submissionState"] = "completed" if status == "pronto" else "processing"
+    _job_store().upsert("video", job)
     return {"ok": True, "job": job}
 
 
 @app.get("/api/videos/{job_id}/download")
 def download_video(job_id: str) -> StreamingResponse:
     """Transmite o MP4 pronto do HeyGen como download com nome amigavel."""
-    job = next((item for item in _load_video_jobs() if item.get("id") == job_id), None)
+    job = _job_store().get("video", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Video nao encontrado.")
     video_url = str(job.get("videoUrl") or "")
