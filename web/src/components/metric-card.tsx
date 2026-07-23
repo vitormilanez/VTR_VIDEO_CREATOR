@@ -17,14 +17,35 @@ export function MetricCard({
 }) {
   const toneStyles: Record<string, { border: string; icon: string; accent: string }> = {
     default: { border: "", icon: "text-muted-foreground bg-muted", accent: "" },
-    warn: { border: "border-status-warn/40", icon: "text-status-warn-foreground bg-status-warn/20", accent: "bg-status-warn" },
-    danger: { border: "border-status-danger/40", icon: "text-status-danger bg-status-danger/10", accent: "bg-status-danger" },
-    success: { border: "border-status-success/40", icon: "text-status-success-foreground bg-status-success/20", accent: "bg-status-success" },
-    info: { border: "border-status-info/40", icon: "text-status-info bg-status-info/10", accent: "bg-status-info" },
+    warn: {
+      border: "border-status-warn/40",
+      icon: "text-status-warn-foreground bg-status-warn/20",
+      accent: "bg-status-warn",
+    },
+    danger: {
+      border: "border-status-danger/40",
+      icon: "text-status-danger bg-status-danger/10",
+      accent: "bg-status-danger",
+    },
+    success: {
+      border: "border-status-success/40",
+      icon: "text-status-success-foreground bg-status-success/20",
+      accent: "bg-status-success",
+    },
+    info: {
+      border: "border-status-info/40",
+      icon: "text-status-info bg-status-info/10",
+      accent: "bg-status-info",
+    },
   };
   const t = toneStyles[tone];
   return (
-    <Card className={cn("relative overflow-hidden rounded-xl border bg-gradient-to-br from-card to-muted/40 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md", t.border)}>
+    <Card
+      className={cn(
+        "relative overflow-hidden rounded-xl border bg-gradient-to-br from-card to-muted/40 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md",
+        t.border,
+      )}
+    >
       {tone !== "default" && <div className={cn("absolute inset-x-0 top-0 h-0.5", t.accent)} />}
       <CardContent className="flex items-start justify-between gap-3 p-4">
         <div className="min-w-0">
@@ -34,12 +55,12 @@ export function MetricCard({
           <div className="mt-2 font-display text-3xl font-bold tabular-nums leading-none">
             {value}
           </div>
-          {hint ? (
-            <div className="mt-2 text-xs text-muted-foreground">{hint}</div>
-          ) : null}
+          {hint ? <div className="mt-2 text-xs text-muted-foreground">{hint}</div> : null}
         </div>
         {icon ? (
-          <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", t.icon)}>
+          <div
+            className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", t.icon)}
+          >
             {icon}
           </div>
         ) : null}

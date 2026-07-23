@@ -88,8 +88,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { property: "og:title", content: "AI Video Creator" },
       {
         property: "og:description",
-        content:
-          "Painel de operacao para reels medicos com validacao clinica.",
+        content: "Painel de operacao para reels medicos com validacao clinica.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },

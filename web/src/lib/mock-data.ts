@@ -2,11 +2,7 @@
 // TODO(cloud): substituir por tabelas Supabase (trends, ideas, scripts, ...).
 
 export type ThemeFamily =
-  | "medicamento"
-  | "comportamento"
-  | "metabolismo"
-  | "obesidade"
-  | "educativo";
+  "medicamento" | "comportamento" | "metabolismo" | "obesidade" | "educativo";
 
 export type RiskLevel = "baixo" | "medio" | "alto";
 export type Prioridade = "alta" | "media" | "baixa";
@@ -14,10 +10,7 @@ export type Prioridade = "alta" | "media" | "baixa";
 export type TrendStatus = "novo" | "em_analise" | "descartado";
 export type IdeaStatus = "novo" | "em_analise" | "aprovado" | "descartado";
 export type ScriptStatus =
-  | "aguardando_validacao"
-  | "aprovado_clinicamente"
-  | "rejeitado"
-  | "em_revisao";
+  "aguardando_validacao" | "aprovado_clinicamente" | "rejeitado" | "em_revisao";
 export type VideoJobStatus = "fila" | "processando" | "pronto" | "erro";
 export type PostStatus = "pendente" | "agendado" | "publicado";
 export type Canal = "instagram" | "tiktok" | "youtube_shorts";

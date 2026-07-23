@@ -49,8 +49,7 @@ export const Route = createFileRoute("/_app/calendario")({
 const canalColor: Record<string, string> = {
   instagram: "border-status-info/40 bg-status-info/10 text-status-info",
   tiktok: "border-status-danger/40 bg-status-danger/10 text-status-danger",
-  youtube_shorts:
-    "border-status-warn/50 bg-status-warn/15 text-status-warn-foreground",
+  youtube_shorts: "border-status-warn/50 bg-status-warn/15 text-status-warn-foreground",
 };
 
 function CalendarioPage() {
@@ -89,7 +88,9 @@ function CalendarioPage() {
               <Button variant="ghost" size="icon" onClick={() => setCursor((d) => subMonths(d, 1))}>
                 <ChevronLeft className="h-4 w-4" />
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => setCursor(new Date())}>Hoje</Button>
+              <Button variant="ghost" size="sm" onClick={() => setCursor(new Date())}>
+                Hoje
+              </Button>
               <Button variant="ghost" size="icon" onClick={() => setCursor((d) => addMonths(d, 1))}>
                 <ChevronRight className="h-4 w-4" />
               </Button>
@@ -97,7 +98,9 @@ function CalendarioPage() {
           </div>
           <div className="grid grid-cols-7 border-b bg-muted/40 text-center text-[11px] uppercase text-muted-foreground">
             {["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"].map((d) => (
-              <div key={d} className="py-1">{d}</div>
+              <div key={d} className="py-1">
+                {d}
+              </div>
             ))}
           </div>
           <div className="grid grid-cols-7">
@@ -167,7 +170,6 @@ function CalendarioPage() {
                       }
                     />
                   </div>
-
                 </li>
               ))}
               {pendentes.length === 0 && (
@@ -179,16 +181,23 @@ function CalendarioPage() {
           </div>
 
           <div className="rounded-xl border bg-card p-3 text-[11px] text-muted-foreground shadow-sm">
-            Marcar como publicado atualiza o status na aba Calendario do Sheets.
-            As metricas aparecem em Performance quando preenchidas na planilha.
+            Marcar como publicado atualiza o status na aba Calendario do Sheets. As metricas
+            aparecem em Performance quando preenchidas na planilha.
             <BarChart3 className="ml-1 inline h-3 w-3 align-text-bottom" />
           </div>
         </div>
       </div>
 
-      <Dialog open={!!editing} onOpenChange={(o) => { if (!o) setEditing(null); }}>
+      <Dialog
+        open={!!editing}
+        onOpenChange={(o) => {
+          if (!o) setEditing(null);
+        }}
+      >
         <DialogContent>
-          <DialogHeader><DialogTitle>Reagendar publicacao</DialogTitle></DialogHeader>
+          <DialogHeader>
+            <DialogTitle>Reagendar publicacao</DialogTitle>
+          </DialogHeader>
           {editing && (
             <div className="space-y-3">
               <div>
@@ -206,7 +215,9 @@ function CalendarioPage() {
             </div>
           )}
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setEditing(null)}>Cancelar</Button>
+            <Button variant="ghost" onClick={() => setEditing(null)}>
+              Cancelar
+            </Button>
             {editing?.status !== "publicado" && (
               <Button
                 variant="secondary"

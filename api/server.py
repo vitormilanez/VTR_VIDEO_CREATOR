@@ -500,6 +500,9 @@ def map_calendar(rows: list[dict]) -> list[dict]:
                 "dataAgendada": _iso(r.get("Data publicação")),
                 "canal": _canal(r.get("Canal")),
                 "status": _post_status(r.get("Status")),
+                "scriptId": r.get("Roteiro ID") or None,
+                "videoJobId": r.get("Video Job ID") or None,
+                "publicadoEm": _iso(r.get("Publicado em")) if r.get("Publicado em") else None,
             }
         )
     return out
@@ -1038,11 +1041,12 @@ def create_video(payload: VideoCreateIn) -> dict:
 
 def _create_video_job(payload: VideoCreateIn) -> dict:
     command = _heygen_cli()
+    script = _find_script(payload.scriptId)
+    _validate_final_narration(script, payload.narrationText)
     try:
         balance_before, currency_before = _heygen_wallet(command)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
         balance_before, currency_before = None, None
-    script = _find_script(payload.scriptId)
     _, private_looks = _private_avatar_library(command)
     ready_looks = [look for look in private_looks if look.get("status") == "completed"]
     avatar_id = payload.avatarId or _heygen_default_avatar_id(ready_looks)
@@ -1290,7 +1294,7 @@ TAB_RANGE = {
     "radar": "'Radar Tendencias'!A:L",
     "ideias": "'Ideias'!A:K",
     "roteiros": "'Roteiros'!A:P",
-    "calendario": "'Calendario'!A:K",
+    "calendario": "'Calendario'!A:N",
 }
 TAB_TITLE = {
     "radar": "Radar Tendencias",
@@ -1515,6 +1519,90 @@ class ScriptIn(BaseModel):
     status: str = "aguardando_validacao"
 
 
+class CalendarIn(BaseModel):
+    id: str | None = None
+    scriptId: str | None = None
+    videoJobId: str | None = None
+    titulo: str = Field(min_length=1, max_length=500)
+    dataAgendada: str
+    canal: Literal["instagram", "tiktok", "youtube_shorts"] = "instagram"
+    status: Literal["pendente", "agendado", "publicado"] = "agendado"
+    publicadoEm: str | None = None
+    tema: str | None = None
+    formato: str | None = None
+    responsavel: str | None = None
+    link: str | None = None
+
+
+CALENDAR_HEADERS = [
+    "Data publicação",
+    "Canal",
+    "Tema",
+    "Formato",
+    "Título/Hook",
+    "Responsável",
+    "Asset pronto?",
+    "Status",
+    "Link post",
+    "Observações",
+    "ID",
+    "Roteiro ID",
+    "Video Job ID",
+    "Publicado em",
+]
+
+_CALENDAR_CHANNEL = {
+    "instagram": "Instagram",
+    "tiktok": "TikTok",
+    "youtube_shorts": "YouTube Shorts",
+}
+
+
+def _calendar_date(value: str) -> str:
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Data de publicacao invalida.") from exc
+    return parsed.strftime("%d/%m/%Y")
+
+
+def _calendar_row(payload: CalendarIn, item_id: str) -> list[str]:
+    published_at = payload.publicadoEm
+    if payload.status == "publicado" and not published_at:
+        published_at = _now()
+    return [
+        _calendar_date(payload.dataAgendada),
+        _CALENDAR_CHANNEL[payload.canal],
+        payload.tema or "",
+        payload.formato or "Reel",
+        payload.titulo,
+        payload.responsavel or "",
+        "Sim" if payload.videoJobId else "Não",
+        STATUS_LABELS["calendario"][payload.status],
+        payload.link or "",
+        "",
+        item_id,
+        payload.scriptId or "",
+        payload.videoJobId or "",
+        published_at or "",
+    ]
+
+
+def _ensure_calendar_headers(client: Any) -> None:
+    values = client.get_values(TAB_RANGE["calendario"])
+    current = [str(value).strip() for value in values[0]] if values else []
+    if current[: len(CALENDAR_HEADERS)] != CALENDAR_HEADERS:
+        merged = CALENDAR_HEADERS.copy()
+        for index, value in enumerate(current[: len(merged)]):
+            if value and index < 11:
+                merged[index] = value
+        client.update_values("'Calendario'!A1:N1", [merged])
+
+
 def _append(tab: str, row: list) -> None:
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
@@ -1576,6 +1664,48 @@ def append_script(payload: ScriptIn) -> dict:
     raw = dict(zip(headers, row))
     _append_snapshot_row("roteiros", raw)
     return {"ok": True, "script": map_scripts([raw])[0]}
+
+
+@app.post("/api/sheets/calendario")
+def append_calendar_post(payload: CalendarIn) -> dict:
+    """Agenda uma publicacao no Sheets e atualiza imediatamente o snapshot."""
+    from integrations.google_sheets_rest_client import GoogleSheetsRestClient
+
+    item_id = payload.id or f"p-{uuid.uuid4().hex[:12]}"
+    row = _calendar_row(payload, item_id)
+    try:
+        client = GoogleSheetsRestClient()
+        _ensure_calendar_headers(client)
+        client.append_rows(TAB_RANGE["calendario"], [row])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"falha ao agendar no Sheets: {exc}")
+    raw = dict(zip(CALENDAR_HEADERS, row))
+    _append_snapshot_row("calendario", raw)
+    return {"ok": True, "post": map_calendar([raw])[0]}
+
+
+@app.put("/api/sheets/calendario/{item_id}")
+def update_calendar_post(item_id: str, payload: CalendarIn) -> dict:
+    """Reagenda ou publica um item existente, persistindo a linha completa."""
+    from integrations.google_sheets_rest_client import GoogleSheetsRestClient
+
+    item_id = payload.id or item_id
+    row = _calendar_row(payload, item_id)
+    try:
+        client = GoogleSheetsRestClient()
+        _ensure_calendar_headers(client)
+        values = client.get_values(TAB_RANGE["calendario"])
+        rownum = _sheet_row_number(values, item_id, "p")
+        client.update_values(f"'Calendario'!A{rownum}:N{rownum}", [row])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"falha ao atualizar calendario: {exc}")
+    raw = dict(zip(CALENDAR_HEADERS, row))
+    _update_snapshot_row("calendario", item_id, raw)
+    return {"ok": True, "post": map_calendar([raw])[0]}
 
 
 @app.put("/api/sheets/roteiros/{item_id}")
@@ -1651,6 +1781,24 @@ def _pack_compliance(pack: dict[str, Any]) -> dict[str, Any]:
     if re.search(r"\b(prescreva|tome|use|aumente|reduza|pare|comece)\b", text):
         issues.append("Possivel linguagem prescritiva")
     return {"ok": not issues, "blocked": bool(issues), "issues": list(dict.fromkeys(issues))}
+
+
+def _validate_final_narration(script: dict[str, Any], narration_text: str | None) -> str:
+    """Valida exatamente a fala que sera incorporada ao prompt pago do HeyGen."""
+    text = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
+    if not text:
+        raise HTTPException(status_code=422, detail="O texto falado esta vazio.")
+    final_text = text
+    if MANDATORY_VIDEO_OUTRO.lower() not in final_text.lower():
+        final_text = f"{final_text.rstrip()} {MANDATORY_VIDEO_OUTRO}"
+    compliance = _pack_compliance({"narration": final_text})
+    if compliance["blocked"]:
+        reasons = "; ".join(compliance["issues"])
+        raise HTTPException(
+            status_code=422,
+            detail=f"Texto falado bloqueado pelo compliance final: {reasons}.",
+        )
+    return final_text
 
 
 _PACK_SCHEMA = {

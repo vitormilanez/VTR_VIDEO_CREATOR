@@ -12,14 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  BarChart3,
-  Eye,
-  MessageCircle,
-  Share2,
-  Bookmark,
-  UserPlus,
-} from "lucide-react";
+import { BarChart3, Eye, MessageCircle, Share2, Bookmark, UserPlus } from "lucide-react";
 
 export const Route = createFileRoute("/_app/performance")({
   head: () => ({
@@ -57,18 +50,42 @@ function PerformancePage() {
         <div className="mb-3 flex items-start gap-2 rounded-md border border-status-info/40 bg-status-info/10 p-3 text-xs">
           <BarChart3 className="mt-0.5 h-4 w-4 text-status-info" />
           <div>
-            Metricas vindas da aba <strong>Performance</strong> do Google Sheets.
-            A coleta automatica via Meta ainda nao esta conectada.
+            Metricas vindas da aba <strong>Performance</strong> do Google Sheets. A coleta
+            automatica via Meta ainda nao esta conectada.
           </div>
         </div>
       )}
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <MetricCard label="Views" value={fmt(totals.views)} icon={<Eye className="h-4 w-4" />} tone="info" />
-        <MetricCard label="Comentarios" value={fmt(totals.comments)} icon={<MessageCircle className="h-4 w-4" />} />
-        <MetricCard label="Compartilhamentos" value={fmt(totals.shares)} icon={<Share2 className="h-4 w-4" />} tone="success" />
-        <MetricCard label="Salvamentos" value={fmt(totals.saves)} icon={<Bookmark className="h-4 w-4" />} tone="warn" />
-        <MetricCard label="Novos seguidores" value={fmt(totals.novosSeguidores)} icon={<UserPlus className="h-4 w-4" />} tone="danger" />
+        <MetricCard
+          label="Views"
+          value={fmt(totals.views)}
+          icon={<Eye className="h-4 w-4" />}
+          tone="info"
+        />
+        <MetricCard
+          label="Comentarios"
+          value={fmt(totals.comments)}
+          icon={<MessageCircle className="h-4 w-4" />}
+        />
+        <MetricCard
+          label="Compartilhamentos"
+          value={fmt(totals.shares)}
+          icon={<Share2 className="h-4 w-4" />}
+          tone="success"
+        />
+        <MetricCard
+          label="Salvamentos"
+          value={fmt(totals.saves)}
+          icon={<Bookmark className="h-4 w-4" />}
+          tone="warn"
+        />
+        <MetricCard
+          label="Novos seguidores"
+          value={fmt(totals.novosSeguidores)}
+          icon={<UserPlus className="h-4 w-4" />}
+          tone="danger"
+        />
       </div>
 
       <div className="mt-6 rounded-xl border bg-card shadow-sm">
@@ -112,7 +129,9 @@ function PerformancePage() {
                   <TableCell className="text-right tabular-nums">{fmt(m.comments)}</TableCell>
                   <TableCell className="text-right tabular-nums">{fmt(m.saves)}</TableCell>
                   <TableCell className="text-right tabular-nums">{fmt(m.shares)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{fmt(m.novosSeguidores ?? 0)}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {fmt(m.novosSeguidores ?? 0)}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">{fmt(m.cliques ?? 0)}</TableCell>
                   <TableCell className="text-right tabular-nums">{fmt(m.leads ?? 0)}</TableCell>
                 </TableRow>

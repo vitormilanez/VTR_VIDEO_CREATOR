@@ -12,13 +12,10 @@ export type StatusTone = "info" | "success" | "warn" | "danger" | "neutral";
 
 export const statusToneClass: Record<StatusTone, string> = {
   info: "bg-status-info/15 text-status-info border-status-info/30",
-  success:
-    "bg-status-success/25 text-status-success-foreground border-status-success/40",
+  success: "bg-status-success/25 text-status-success-foreground border-status-success/40",
   warn: "bg-status-warn/20 text-status-warn-foreground border-status-warn/40",
-  danger:
-    "bg-status-danger/15 text-status-danger border-status-danger/30",
-  neutral:
-    "bg-status-neutral text-status-neutral-foreground border-status-neutral",
+  danger: "bg-status-danger/15 text-status-danger border-status-danger/30",
+  neutral: "bg-status-neutral text-status-neutral-foreground border-status-neutral",
 };
 
 export const trendStatusLabel: Record<TrendStatus, { label: string; tone: StatusTone }> = {

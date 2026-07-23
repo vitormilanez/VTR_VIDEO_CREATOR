@@ -31,8 +31,7 @@ const iconMap = {
 const toneRing: Record<string, string> = {
   info: "bg-status-info/10 text-status-info ring-status-info/30",
   warn: "bg-status-warn/20 text-status-warn-foreground ring-status-warn/40",
-  success:
-    "bg-status-success/15 text-status-success-foreground ring-status-success/40",
+  success: "bg-status-success/15 text-status-success-foreground ring-status-success/40",
   danger: "bg-status-danger/10 text-status-danger ring-status-danger/30",
   neutral: "bg-muted text-muted-foreground ring-border",
 };
@@ -42,9 +41,7 @@ export function PipelineFlow({ steps }: { steps: PipelineStep[] }) {
     <div className="rounded-xl border bg-card p-4 shadow-sm">
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <h2 className="font-display text-sm font-semibold">
-            Pipeline editorial
-          </h2>
+          <h2 className="font-display text-sm font-semibold">Pipeline editorial</h2>
           <p className="text-xs text-muted-foreground">
             Da captura de tendencias ate metricas — todos os passos mockados.
           </p>
@@ -72,9 +69,7 @@ export function PipelineFlow({ steps }: { steps: PipelineStep[] }) {
                   {s.count}
                 </div>
                 {s.hint ? (
-                  <div className="text-[10px] text-current/80 opacity-75">
-                    {s.hint}
-                  </div>
+                  <div className="text-[10px] text-current/80 opacity-75">{s.hint}</div>
                 ) : null}
               </Link>
               {idx < steps.length - 1 && (

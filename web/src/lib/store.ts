@@ -104,24 +104,17 @@ export const useStore = create<State>()(
       addScript: (sc) => set((s) => ({ scripts: [sc, ...s.scripts] })),
       updateScript: (id, patch) =>
         set((s) => ({
-          scripts: s.scripts.map((sc) =>
-            sc.id === id ? { ...sc, ...patch } : sc,
-          ),
+          scripts: s.scripts.map((sc) => (sc.id === id ? { ...sc, ...patch } : sc)),
         })),
       addVideoJob: (v) => set((s) => ({ videoJobs: [v, ...s.videoJobs] })),
       updateVideoJob: (id, patch) =>
         set((s) => ({
-          videoJobs: s.videoJobs.map((v) =>
-            v.id === id ? { ...v, ...patch } : v,
-          ),
+          videoJobs: s.videoJobs.map((v) => (v.id === id ? { ...v, ...patch } : v)),
         })),
-      addCalendarPost: (p) =>
-        set((s) => ({ calendarPosts: [p, ...s.calendarPosts] })),
+      addCalendarPost: (p) => set((s) => ({ calendarPosts: [p, ...s.calendarPosts] })),
       updateCalendarPost: (id, patch) =>
         set((s) => ({
-          calendarPosts: s.calendarPosts.map((p) =>
-            p.id === id ? { ...p, ...patch } : p,
-          ),
+          calendarPosts: s.calendarPosts.map((p) => (p.id === id ? { ...p, ...patch } : p)),
         })),
       setSettings: (settings) => set(() => ({ settings })),
       resetSeed: () => set(() => ({ ...initial })),
@@ -153,9 +146,7 @@ export const useStore = create<State>()(
           patch.duracaoSegundos = randomInt(30, 90);
         }
         set((s) => ({
-          videoJobs: s.videoJobs.map((v) =>
-            v.id === id ? { ...v, ...patch } : v,
-          ),
+          videoJobs: s.videoJobs.map((v) => (v.id === id ? { ...v, ...patch } : v)),
         }));
         return next;
       },
@@ -209,9 +200,7 @@ export const useStore = create<State>()(
         };
         if (existing) {
           set((s) => ({
-            performance: s.performance.map((m) =>
-              m.id === existing.id ? metric : m,
-            ),
+            performance: s.performance.map((m) => (m.id === existing.id ? metric : m)),
           }));
         } else {
           set((s) => ({ performance: [metric, ...s.performance] }));
@@ -222,5 +211,4 @@ export const useStore = create<State>()(
   ),
 );
 
-export const genId = (prefix: string) =>
-  `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+export const genId = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 8)}`;

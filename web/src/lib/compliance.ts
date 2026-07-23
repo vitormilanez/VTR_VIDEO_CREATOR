@@ -25,24 +25,21 @@ const medicalPatterns: Array<{
     id: "dose",
     regex: /\b(\d+\s?(mg|mcg|ml|g))|\bdose\b|\bcomprimid|\bampola/i,
     titulo: "Possivel mencao de dose ou formulacao",
-    detalhe:
-      "Nao citar dose, mg ou formato de administracao. Reforcar avaliacao medica.",
+    detalhe: "Nao citar dose, mg ou formato de administracao. Reforcar avaliacao medica.",
     severidade: "alta",
   },
   {
     id: "promessa",
     regex: /\b(cura|milagre|garant\w+|resultado certo|prometo|emagrec\w+\s+rapid)/i,
     titulo: "Linguagem de promessa",
-    detalhe:
-      "Nao prometer resultado. Substituir por linguagem educativa e individualizada.",
+    detalhe: "Nao prometer resultado. Substituir por linguagem educativa e individualizada.",
     severidade: "alta",
   },
   {
     id: "prescrever",
     regex: /\bprescrev\w+|\breceit\w+/i,
     titulo: "Termo de prescricao",
-    detalhe:
-      "Nao prescrever pelo video. Reforcar consulta individual.",
+    detalhe: "Nao prescrever pelo video. Reforcar consulta individual.",
     severidade: "alta",
   },
   {
@@ -56,8 +53,7 @@ const medicalPatterns: Array<{
     id: "autodx",
     regex: /\b(voce (esta|tem)\s+(diabetes|resistencia|obesidade))/i,
     titulo: "Sugestao de autodiagnostico",
-    detalhe:
-      "Nao induzir autodiagnostico. Reforcar avaliacao clinica.",
+    detalhe: "Nao induzir autodiagnostico. Reforcar avaliacao clinica.",
     severidade: "media",
   },
 ];
@@ -74,10 +70,7 @@ export function scanCompliance(
     .filter(Boolean)
     .map((p) => ({
       palavra: p,
-      regex: new RegExp(
-        `\\b${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
-        "gi",
-      ),
+      regex: new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi"),
     }));
 
   for (const [campo, text] of Object.entries(fields)) {

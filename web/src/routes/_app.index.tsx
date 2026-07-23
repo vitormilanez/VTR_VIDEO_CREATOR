@@ -70,7 +70,9 @@ function Dashboard() {
       setAiCosts(await fetchAiCosts());
       setAiCostsError("");
     } catch (err) {
-      setAiCostsError(err instanceof Error ? err.message : "Nao foi possivel consultar os custos de IA.");
+      setAiCostsError(
+        err instanceof Error ? err.message : "Nao foi possivel consultar os custos de IA.",
+      );
     } finally {
       setLoadingAiCosts(false);
     }
@@ -92,12 +94,54 @@ function Dashboard() {
   const publicados = posts.filter((p) => p.status === "publicado").length;
 
   const steps: PipelineStep[] = [
-    { key: "radar", label: "Radar", count: novasTendencias, to: "/radar", tone: "info", hint: "capturadas" },
-    { key: "ideias", label: "Ideias", count: ideiasNovas, to: "/ideias", tone: "info", hint: "no funil" },
-    { key: "roteiros", label: "Roteiros", count: roteirosAguardando, to: "/roteiros", tone: "warn", hint: "em edicao" },
-    { key: "producao", label: "Producao", count: producaoAtiva, to: "/producao", tone: "warn", hint: "em processamento" },
-    { key: "calendario", label: "Calendario", count: postsAgendados, to: "/calendario", tone: "info", hint: "agendados/pendentes" },
-    { key: "performance", label: "Performance", count: publicados, to: "/performance", tone: "success", hint: "publicados" },
+    {
+      key: "radar",
+      label: "Radar",
+      count: novasTendencias,
+      to: "/radar",
+      tone: "info",
+      hint: "capturadas",
+    },
+    {
+      key: "ideias",
+      label: "Ideias",
+      count: ideiasNovas,
+      to: "/ideias",
+      tone: "info",
+      hint: "no funil",
+    },
+    {
+      key: "roteiros",
+      label: "Roteiros",
+      count: roteirosAguardando,
+      to: "/roteiros",
+      tone: "warn",
+      hint: "em edicao",
+    },
+    {
+      key: "producao",
+      label: "Producao",
+      count: producaoAtiva,
+      to: "/producao",
+      tone: "warn",
+      hint: "em processamento",
+    },
+    {
+      key: "calendario",
+      label: "Calendario",
+      count: postsAgendados,
+      to: "/calendario",
+      tone: "info",
+      hint: "agendados/pendentes",
+    },
+    {
+      key: "performance",
+      label: "Performance",
+      count: publicados,
+      to: "/performance",
+      tone: "success",
+      hint: "publicados",
+    },
   ];
 
   const totalViews = performance.reduce((acc, m) => acc + m.views, 0);
@@ -114,10 +158,7 @@ function Dashboard() {
     .sort((a, b) => a.dataAgendada.localeCompare(b.dataAgendada))
     .slice(0, 5);
   const topTrends = [...trends]
-    .sort(
-      (a, b) =>
-        new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime(),
-    )
+    .sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime())
     .slice(0, 5);
 
   return (
@@ -161,7 +202,12 @@ function Dashboard() {
               Saldo e uso dos provedores conectados ao aplicativo.
             </p>
           </div>
-          <Button variant="secondary" size="sm" onClick={() => void loadAiCosts()} disabled={loadingAiCosts}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void loadAiCosts()}
+            disabled={loadingAiCosts}
+          >
             <RefreshCcw className={`mr-1 h-3.5 w-3.5 ${loadingAiCosts ? "animate-spin" : ""}`} />
             Atualizar
           </Button>
@@ -173,17 +219,28 @@ function Dashboard() {
         ) : (
           <div>
             {aiCosts.providers.map((provider) => (
-              <div key={provider.id} className="flex items-center justify-between gap-4 border-b px-4 py-3 last:border-b-0">
+              <div
+                key={provider.id}
+                className="flex items-center justify-between gap-4 border-b px-4 py-3 last:border-b-0"
+              >
                 <div className="flex min-w-0 items-center gap-3">
                   <WalletCards className="h-4 w-4 shrink-0 text-status-info" />
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-medium">{provider.name}</p>
-                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${provider.status === "conectado" ? "bg-status-success/10 text-status-success" : provider.status === "nao_conectado" ? "bg-muted text-muted-foreground" : "bg-destructive/10 text-destructive"}`}>
-                        {provider.status === "conectado" ? "Conectado" : provider.status === "nao_conectado" ? "Nao conectado" : "Indisponivel"}
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${provider.status === "conectado" ? "bg-status-success/10 text-status-success" : provider.status === "nao_conectado" ? "bg-muted text-muted-foreground" : "bg-destructive/10 text-destructive"}`}
+                      >
+                        {provider.status === "conectado"
+                          ? "Conectado"
+                          : provider.status === "nao_conectado"
+                            ? "Nao conectado"
+                            : "Indisponivel"}
                       </span>
                     </div>
-                    <p className="text-xs text-muted-foreground">{provider.description}. {provider.note}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {provider.description}. {provider.note}
+                    </p>
                   </div>
                 </div>
                 <div className="shrink-0 text-right">
@@ -195,7 +252,8 @@ function Dashboard() {
                       <p className="text-[11px] text-muted-foreground">saldo disponivel</p>
                       {provider.trackedSpend !== null ? (
                         <p className="mt-1 text-[11px] text-muted-foreground">
-                          Gasto rastreado: {formatCurrency(provider.trackedSpend, provider.currency)}
+                          Gasto rastreado:{" "}
+                          {formatCurrency(provider.trackedSpend, provider.currency)}
                         </p>
                       ) : null}
                     </>
@@ -206,7 +264,8 @@ function Dashboard() {
               </div>
             ))}
             <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
-              Atualizado em {new Date(aiCosts.updatedAt).toLocaleString("pt-BR")}. O total gasto so aparece quando o provedor informar custo por chamada ou video.
+              Atualizado em {new Date(aiCosts.updatedAt).toLocaleString("pt-BR")}. O total gasto so
+              aparece quando o provedor informar custo por chamada ou video.
             </p>
           </div>
         )}
@@ -251,11 +310,7 @@ function Dashboard() {
                 {roteirosPendentes.slice(0, 5).map((s) => (
                   <TableRow key={s.id} className="cursor-pointer">
                     <TableCell className="font-medium">
-                      <Link
-                        to="/roteiros/$id"
-                        params={{ id: s.id }}
-                        className="hover:underline"
-                      >
+                      <Link to="/roteiros/$id" params={{ id: s.id }} className="hover:underline">
                         {s.titulo}
                       </Link>
                     </TableCell>
@@ -351,11 +406,7 @@ function Dashboard() {
             {topTrends.map((t) => (
               <TableRow key={t.id}>
                 <TableCell className="align-top font-medium">
-                  <Link
-                    to="/radar/$id"
-                    params={{ id: t.id }}
-                    className="hover:underline"
-                  >
+                  <Link to="/radar/$id" params={{ id: t.id }} className="hover:underline">
                     <span className="block truncate">{t.titulo}</span>
                   </Link>
                   {t.subtema ? (
@@ -372,7 +423,9 @@ function Dashboard() {
                   ) : null}
                 </TableCell>
                 <TableCell className="align-top text-muted-foreground">
-                  <span className="block truncate" title={t.fonte}>{fonteLabel(t.fonte)}</span>
+                  <span className="block truncate" title={t.fonte}>
+                    {fonteLabel(t.fonte)}
+                  </span>
                 </TableCell>
                 <TableCell className="text-center tabular-nums">
                   {t.potencial == null ? "—" : `${t.potencial}/10`}
@@ -400,7 +453,8 @@ function Dashboard() {
       </section>
 
       <p className="mt-4 flex items-center gap-1 text-[11px] text-muted-foreground">
-        Dados do Radar sao sincronizados do Google Sheets. A producao usa HeyGen; performance segue em modo mockado. Use{" "}
+        Dados do Radar sao sincronizados do Google Sheets. A producao usa HeyGen; performance segue
+        em modo mockado. Use{" "}
         <Link to="/configuracoes" className="text-status-info underline">
           Configuracoes
         </Link>{" "}

@@ -63,7 +63,9 @@ function clean(value?: string) {
 
 function sentence(value: string, fallback: string) {
   const text = clean(value);
-  return text.endsWith(".") || text.endsWith("?") || text.endsWith("!") ? text : `${text || fallback}.`;
+  return text.endsWith(".") || text.endsWith("?") || text.endsWith("!")
+    ? text
+    : `${text || fallback}.`;
 }
 
 /** Remove pontuacao final para usar como titulo/headline. */
@@ -128,7 +130,10 @@ function hashtags(script: Script): string {
 function buildPack(script: Script): Pack {
   const tema = clean(script.tema) || clean(script.titulo) || "tema principal";
   const hook = sentence(script.hook, `Entenda um ponto importante sobre ${tema}`);
-  const dor = sentence(script.dorConflito, "Muita gente sente isso e acha que o problema é só com ela");
+  const dor = sentence(
+    script.dorConflito,
+    "Muita gente sente isso e acha que o problema é só com ela",
+  );
   const explicacao = sentence(
     script.explicacaoSimples,
     "A explicação precisa ser educativa, simples e individualizada",
@@ -200,7 +205,9 @@ function copyText(label: string, text: string) {
 }
 
 function formatCarousel(slides: Pack["carousel"]) {
-  return slides.map((slide, index) => `Slide ${index + 1}: ${slide.title}\n${slide.body}`).join("\n\n");
+  return slides
+    .map((slide, index) => `Slide ${index + 1}: ${slide.title}\n${slide.body}`)
+    .join("\n\n");
 }
 
 function PacksPage() {
@@ -429,7 +436,10 @@ function PacksPage() {
                           size="sm"
                           variant="secondary"
                           onClick={() =>
-                            copyText("Post fixo", `${pack.staticPost.headline}\n\n${pack.staticPost.subline}`)
+                            copyText(
+                              "Post fixo",
+                              `${pack.staticPost.headline}\n\n${pack.staticPost.subline}`,
+                            )
                           }
                         >
                           <Copy className="mr-1 h-3.5 w-3.5" /> Copiar post
@@ -448,7 +458,11 @@ function PacksPage() {
                     </CardHeader>
                     <CardContent className="space-y-3">
                       <Textarea readOnly className="min-h-[280px]" value={pack.caption} />
-                      <Button size="sm" variant="secondary" onClick={() => copyText("Legenda", pack.caption)}>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => copyText("Legenda", pack.caption)}
+                      >
                         <Copy className="mr-1 h-3.5 w-3.5" /> Copiar legenda
                       </Button>
                     </CardContent>
@@ -458,7 +472,10 @@ function PacksPage() {
                 <TabsContent value="stories">
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                     {pack.stories.map((story) => (
-                      <div key={story.title} className="aspect-[9/16] rounded-lg border bg-card p-4 shadow-sm">
+                      <div
+                        key={story.title}
+                        className="aspect-[9/16] rounded-lg border bg-card p-4 shadow-sm"
+                      >
                         <div className="text-xs font-semibold uppercase text-muted-foreground">
                           {story.title}
                         </div>

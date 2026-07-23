@@ -34,9 +34,7 @@ function ConfiguracoesPage() {
   const resetSeed = useStore((s) => s.resetSeed);
 
   const [temas, setTemas] = useState(settings.temasPrioritarios.join("\n"));
-  const [palavras, setPalavras] = useState(
-    settings.palavrasProibidas.join("\n"),
-  );
+  const [palavras, setPalavras] = useState(settings.palavrasProibidas.join("\n"));
 
   return (
     <AppShell
@@ -47,8 +45,14 @@ function ConfiguracoesPage() {
           onClick={() => {
             setSettings({
               ...settings,
-              temasPrioritarios: temas.split("\n").map((s) => s.trim()).filter(Boolean),
-              palavrasProibidas: palavras.split("\n").map((s) => s.trim()).filter(Boolean),
+              temasPrioritarios: temas
+                .split("\n")
+                .map((s) => s.trim())
+                .filter(Boolean),
+              palavrasProibidas: palavras
+                .split("\n")
+                .map((s) => s.trim())
+                .filter(Boolean),
             });
             toast.success("Configuracoes salvas.");
           }}
@@ -63,22 +67,13 @@ function ConfiguracoesPage() {
           <div className="space-y-3">
             <div>
               <Label className="text-xs">Temas prioritarios (um por linha)</Label>
-              <Textarea
-                rows={6}
-                value={temas}
-                onChange={(e) => setTemas(e.target.value)}
-              />
+              <Textarea rows={6} value={temas} onChange={(e) => setTemas(e.target.value)} />
             </div>
             <div>
               <Label className="text-xs">Palavras proibidas (um por linha)</Label>
-              <Textarea
-                rows={6}
-                value={palavras}
-                onChange={(e) => setPalavras(e.target.value)}
-              />
+              <Textarea rows={6} value={palavras} onChange={(e) => setPalavras(e.target.value)} />
               <p className="mt-1 text-[11px] text-muted-foreground">
-                Serao usadas para bloquear roteiros com sensacionalismo ou
-                promessa de resultado.
+                Serao usadas para bloquear roteiros com sensacionalismo ou promessa de resultado.
               </p>
             </div>
           </div>
@@ -122,17 +117,16 @@ function ConfiguracoesPage() {
             />
           </div>
           <p className="mt-3 text-[11px] text-muted-foreground">
-            Chaves de API (HEYGEN_API_KEY, META_ACCESS_TOKEN, credenciais Google)
-            ficam apenas no backend. Este toggle simula a conexao ate a fase de
-            integracao real.
+            Chaves de API (HEYGEN_API_KEY, META_ACCESS_TOKEN, credenciais Google) ficam apenas no
+            backend. Este toggle simula a conexao ate a fase de integracao real.
           </p>
         </section>
 
         <section className="rounded-md border bg-card p-4 lg:col-span-2">
           <h2 className="mb-2 text-sm font-semibold">Dados de exemplo</h2>
           <p className="mb-3 text-xs text-muted-foreground">
-            Restaurar o estado inicial (uma tendencia, uma ideia, um roteiro
-            aguardando validacao, um post pendente).
+            Restaurar o estado inicial (uma tendencia, uma ideia, um roteiro aguardando validacao,
+            um post pendente).
           </p>
           <Button
             variant="secondary"
@@ -168,12 +162,7 @@ function IntegrationRow({
         <div className="text-xs text-muted-foreground">{desc}</div>
       </div>
       <div className="flex items-center gap-2">
-        <span
-          className={
-            "text-xs " +
-            (value ? "text-status-success" : "text-muted-foreground")
-          }
-        >
+        <span className={"text-xs " + (value ? "text-status-success" : "text-muted-foreground")}>
           {value ? "Conectado" : "Nao conectado"}
         </span>
         <Switch checked={value} onCheckedChange={onChange} />

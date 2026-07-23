@@ -30,8 +30,8 @@ export function StatusTimeline({
                   s.state === "done"
                     ? "bg-status-success/50"
                     : s.state === "error"
-                    ? "bg-status-danger/40"
-                    : "bg-border",
+                      ? "bg-status-danger/40"
+                      : "bg-border",
                 )}
               />
             )}
@@ -42,8 +42,7 @@ export function StatusTimeline({
                   "border-status-success/50 bg-status-success/20 text-status-success-foreground",
                 s.state === "current" &&
                   "border-status-info/60 bg-status-info/15 text-status-info ring-2 ring-status-info/20",
-                s.state === "pending" &&
-                  "border-border bg-card text-muted-foreground",
+                s.state === "pending" && "border-border bg-card text-muted-foreground",
                 s.state === "error" &&
                   "border-status-danger/50 bg-status-danger/15 text-status-danger",
               )}
@@ -65,13 +64,9 @@ export function StatusTimeline({
               >
                 {s.label}
               </div>
-              {s.hint ? (
-                <div className="text-[11px] text-muted-foreground">{s.hint}</div>
-              ) : null}
+              {s.hint ? <div className="text-[11px] text-muted-foreground">{s.hint}</div> : null}
               {s.timestamp ? (
-                <div className="text-[10px] text-muted-foreground">
-                  {s.timestamp}
-                </div>
+                <div className="text-[10px] text-muted-foreground">{s.timestamp}</div>
               ) : null}
             </div>
           </li>

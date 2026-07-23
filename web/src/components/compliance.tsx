@@ -5,8 +5,8 @@ export function ComplianceBanner() {
     <div className="flex items-center gap-2 border-b border-status-warn/40 bg-status-warn/15 px-4 py-2 text-[11px] font-medium text-status-warn-foreground">
       <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
       <span>
-        Conteudo educativo, nao prescritivo. Sem doses, sem promessas de
-        resultado. Toda geracao exige clique explicito.
+        Conteudo educativo, nao prescritivo. Sem doses, sem promessas de resultado. Toda geracao
+        exige clique explicito.
       </span>
     </div>
   );

@@ -25,11 +25,7 @@ export function StatusChips({
   const total = options.reduce((a, o) => a + (o.count ?? 0), 0);
   return (
     <div className={cn("flex flex-wrap items-center gap-1.5", className)}>
-      <ChipBtn
-        active={value === "todos"}
-        onClick={() => onChange("todos")}
-        count={total}
-      >
+      <ChipBtn active={value === "todos"} onClick={() => onChange("todos")} count={total}>
         {allLabel}
       </ChipBtn>
       {options.map((o) => (

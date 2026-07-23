@@ -23,11 +23,7 @@ export function CompliancePanel({
             : "bg-status-warn/15 text-status-warn-foreground",
         )}
       >
-        {ok ? (
-          <ShieldCheck className="h-4 w-4" />
-        ) : (
-          <ShieldAlert className="h-4 w-4" />
-        )}
+        {ok ? <ShieldCheck className="h-4 w-4" /> : <ShieldAlert className="h-4 w-4" />}
         {ok ? "Compliance ok" : `${hits.length + alertas.length} pontos a revisar`}
       </div>
 
@@ -48,9 +44,7 @@ export function CompliancePanel({
                   key={h.palavra}
                   className="flex items-center justify-between rounded-md border border-status-danger/30 bg-status-danger/10 px-2 py-1 text-xs"
                 >
-                  <span className="font-medium text-status-danger">
-                    {h.palavra}
-                  </span>
+                  <span className="font-medium text-status-danger">{h.palavra}</span>
                   <span className="text-[10px] text-muted-foreground">
                     {h.count}x · {h.campo}
                   </span>
@@ -92,9 +86,7 @@ export function CompliancePanel({
                     />
                     {a.titulo}
                   </div>
-                  <div className="mt-0.5 pl-5 text-muted-foreground">
-                    {a.detalhe}
-                  </div>
+                  <div className="mt-0.5 pl-5 text-muted-foreground">{a.detalhe}</div>
                 </li>
               ))}
             </ul>
@@ -102,8 +94,8 @@ export function CompliancePanel({
         </section>
 
         <p className="rounded-md bg-muted/60 p-2 text-[11px] leading-relaxed text-muted-foreground">
-          Regras: nao prescrever, nao citar doses, nao prometer resultado, sem
-          sensacionalismo, reforcar avaliacao individual.
+          Regras: nao prescrever, nao citar doses, nao prometer resultado, sem sensacionalismo,
+          reforcar avaliacao individual.
         </p>
       </div>
     </div>
@@ -124,10 +116,7 @@ export function HighlightedText({
     <span className={cn("whitespace-pre-wrap", className)}>
       {tokens.map((t, i) =>
         t.forbidden ? (
-          <mark
-            key={i}
-            className="rounded bg-status-danger/20 px-0.5 text-status-danger"
-          >
+          <mark key={i} className="rounded bg-status-danger/20 px-0.5 text-status-danger">
             {t.text}
           </mark>
         ) : (
