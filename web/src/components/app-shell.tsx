@@ -28,18 +28,47 @@ import {
 } from "@/components/ui/sidebar";
 import { ComplianceBanner } from "./compliance";
 
-const nav: Array<{ title: string; url: string; icon: typeof LayoutDashboard; exact?: boolean }> = [
-  { title: "Dashboard", url: "/", icon: LayoutDashboard, exact: true },
-  { title: "Radar de tendencias", url: "/radar", icon: Radar },
-  { title: "Ideias", url: "/ideias", icon: Lightbulb },
-  { title: "Roteiros", url: "/roteiros", icon: FileText },
-  { title: "Producao de videos", url: "/producao", icon: Film },
-  { title: "Cortes", url: "/cortes", icon: Scissors },
-  { title: "Avatares", url: "/avatares", icon: ScanFace },
-  { title: "Pack de conteudo", url: "/packs", icon: PanelsTopLeft },
-  { title: "Calendario", url: "/calendario", icon: CalendarDays },
-  { title: "Performance", url: "/performance", icon: BarChart3 },
-  { title: "Configuracoes", url: "/configuracoes", icon: Settings },
+interface NavItem {
+  title: string;
+  url: string;
+  icon: typeof LayoutDashboard;
+  exact?: boolean;
+}
+
+// Sidebar agrupada por etapa do funil: criar -> produzir -> distribuir.
+const navGroups: Array<{ label: string | null; items: NavItem[] }> = [
+  {
+    label: null,
+    items: [{ title: "Dashboard", url: "/", icon: LayoutDashboard, exact: true }],
+  },
+  {
+    label: "Criacao",
+    items: [
+      { title: "Radar de tendencias", url: "/radar", icon: Radar },
+      { title: "Ideias", url: "/ideias", icon: Lightbulb },
+      { title: "Roteiros", url: "/roteiros", icon: FileText },
+    ],
+  },
+  {
+    label: "Producao",
+    items: [
+      { title: "Producao de videos", url: "/producao", icon: Film },
+      { title: "Cortes", url: "/cortes", icon: Scissors },
+      { title: "Avatares", url: "/avatares", icon: ScanFace },
+      { title: "Pack de conteudo", url: "/packs", icon: PanelsTopLeft },
+    ],
+  },
+  {
+    label: "Distribuicao",
+    items: [
+      { title: "Calendario", url: "/calendario", icon: CalendarDays },
+      { title: "Performance", url: "/performance", icon: BarChart3 },
+    ],
+  },
+  {
+    label: "Sistema",
+    items: [{ title: "Configuracoes", url: "/configuracoes", icon: Settings }],
+  },
 ];
 
 function AppSidebar() {
@@ -63,30 +92,34 @@ function AppSidebar() {
         </div>
       </SidebarHeader>
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel className="text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/50">
-            Operacao
-          </SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {nav.map((item) => (
-                <SidebarMenuItem key={item.url}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={isActive(item.url, item.exact)}
-                    tooltip={item.title}
-                    className="data-[active=true]:bg-sidebar-accent data-[active=true]:text-sidebar-primary data-[active=true]:font-semibold"
-                  >
-                    <Link to={item.url}>
-                      <item.icon className="h-4 w-4" />
-                      <span>{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {navGroups.map((group) => (
+          <SidebarGroup key={group.label ?? "root"} className={group.label ? "" : "pb-0"}>
+            {group.label ? (
+              <SidebarGroupLabel className="text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/50">
+                {group.label}
+              </SidebarGroupLabel>
+            ) : null}
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {group.items.map((item) => (
+                  <SidebarMenuItem key={item.url}>
+                    <SidebarMenuButton
+                      asChild
+                      isActive={isActive(item.url, item.exact)}
+                      tooltip={item.title}
+                      className="data-[active=true]:bg-sidebar-accent data-[active=true]:text-sidebar-primary data-[active=true]:font-semibold"
+                    >
+                      <Link to={item.url}>
+                        <item.icon className="h-4 w-4" />
+                        <span>{item.title}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ))}
       </SidebarContent>
     </Sidebar>
   );

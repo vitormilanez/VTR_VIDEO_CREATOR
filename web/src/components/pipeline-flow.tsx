@@ -43,7 +43,7 @@ export function PipelineFlow({ steps }: { steps: PipelineStep[] }) {
         <div>
           <h2 className="font-display text-sm font-semibold">Pipeline editorial</h2>
           <p className="text-xs text-muted-foreground">
-            Da captura de tendencias ate metricas — todos os passos mockados.
+            Da captura de tendencias ate as metricas publicadas — clique numa etapa para abrir.
           </p>
         </div>
       </div>

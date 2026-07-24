@@ -18,7 +18,11 @@ import {
   Radar,
   Lightbulb,
   FileText,
+  Film,
   CalendarDays,
+  CalendarClock,
+  CheckCircle2,
+  ArrowRight,
   ShieldAlert,
   TrendingUp,
   RefreshCcw,
@@ -46,7 +50,7 @@ export const Route = createFileRoute("/_app/")({
       { property: "og:title", content: "Dashboard | AI Video Creator" },
       {
         property: "og:description",
-        content: "Pipeline editorial ponta a ponta em modo mockado.",
+        content: "Central de operacao do pipeline editorial.",
       },
     ],
   }),
@@ -81,6 +85,73 @@ function Dashboard() {
   useEffect(() => {
     void loadAiCosts();
   }, []);
+
+  // --- Filas acionaveis: o que precisa de um clique agora ---
+  const scriptsComVideo = new Set(jobs.filter((j) => j.status !== "erro").map((j) => j.scriptId));
+  const jobsAgendados = new Set(posts.map((p) => p.videoJobId).filter(Boolean));
+  const fimDeHoje = new Date();
+  fimDeHoje.setHours(23, 59, 59, 999);
+
+  const filaTriagem = trends.filter((t) => t.status === "novo").length;
+  const filaRoteirizar = ideas.filter(
+    (i) => i.status === "novo" || i.status === "em_analise",
+  ).length;
+  const filaProduzir = scripts.filter(
+    (s) => s.status === "aprovado_clinicamente" && !scriptsComVideo.has(s.id),
+  ).length;
+  const filaAgendar = jobs.filter((j) => j.status === "pronto" && !jobsAgendados.has(j.id)).length;
+  const filaPublicar = posts.filter(
+    (p) => p.status !== "publicado" && new Date(p.dataAgendada) <= fimDeHoje,
+  ).length;
+
+  const todasAsFilas: ActionQueue[] = [
+    {
+      key: "triar",
+      count: filaTriagem,
+      titulo: filaTriagem === 1 ? "tendencia nova" : "tendencias novas",
+      acao: "Triar no Radar e gerar ideias",
+      to: "/radar",
+      icon: Radar,
+      tone: "info",
+    },
+    {
+      key: "roteirizar",
+      count: filaRoteirizar,
+      titulo: filaRoteirizar === 1 ? "ideia em aberto" : "ideias em aberto",
+      acao: "Transformar em roteiro",
+      to: "/ideias",
+      icon: Lightbulb,
+      tone: "info",
+    },
+    {
+      key: "produzir",
+      count: filaProduzir,
+      titulo: filaProduzir === 1 ? "roteiro pronto" : "roteiros prontos",
+      acao: "Gerar video ou pack",
+      to: "/roteiros",
+      icon: FileText,
+      tone: "warn",
+    },
+    {
+      key: "agendar",
+      count: filaAgendar,
+      titulo: filaAgendar === 1 ? "video pronto" : "videos prontos",
+      acao: "Agendar publicacao",
+      to: "/producao",
+      icon: Film,
+      tone: "warn",
+    },
+    {
+      key: "publicar",
+      count: filaPublicar,
+      titulo: filaPublicar === 1 ? "publicacao para hoje" : "publicacoes para hoje",
+      acao: "Publicar e marcar no calendario",
+      to: "/calendario",
+      icon: CalendarClock,
+      tone: "danger",
+    },
+  ];
+  const acoes = todasAsFilas.filter((a) => a.count > 0);
 
   const novasTendencias = trends.filter((t) => t.status !== "descartado").length;
   const ideiasNovas = ideas.filter((i) => i.status !== "descartado").length;
@@ -163,6 +234,38 @@ function Dashboard() {
 
   return (
     <AppShell title="Dashboard">
+      <section className="mb-5">
+        <div className="mb-2 flex items-baseline justify-between">
+          <h2 className="font-display text-sm font-semibold">O que fazer agora</h2>
+          <span className="text-[11px] text-muted-foreground">
+            {acoes.length === 0
+              ? "Nenhuma pendencia"
+              : `${acoes.length} ${acoes.length === 1 ? "fila com pendencia" : "filas com pendencias"}`}
+          </span>
+        </div>
+        {acoes.length === 0 ? (
+          <div className="flex items-center gap-3 rounded-xl border border-status-success/40 bg-status-success/10 px-4 py-3.5">
+            <CheckCircle2 className="h-5 w-5 shrink-0 text-status-success" />
+            <div>
+              <p className="text-sm font-medium">Tudo em dia.</p>
+              <p className="text-xs text-muted-foreground">
+                Nenhuma etapa do funil esta esperando por voce. Que tal{" "}
+                <Link to="/radar" className="text-status-info underline">
+                  buscar novas tendencias
+                </Link>
+                ?
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {acoes.map((a) => (
+              <ActionQueueCard key={a.key} queue={a} />
+            ))}
+          </div>
+        )}
+      </section>
+
       <div className="mb-4">
         <PipelineFlow steps={steps} />
       </div>
@@ -186,11 +289,11 @@ function Dashboard() {
           icon={<FileText className="h-4 w-4" />}
         />
         <MetricCard
-          label="Views (mock)"
+          label="Views registradas"
           value={totalViews.toLocaleString("pt-BR")}
           icon={<TrendingUp className="h-4 w-4" />}
           tone="success"
-          hint={`${engajamento.toLocaleString("pt-BR")} interacoes`}
+          hint={`${engajamento.toLocaleString("pt-BR")} interacoes · aba Performance`}
         />
       </div>
 
@@ -452,9 +555,9 @@ function Dashboard() {
         </Table>
       </section>
 
-      <p className="mt-4 flex items-center gap-1 text-[11px] text-muted-foreground">
-        Dados do Radar sao sincronizados do Google Sheets. A producao usa HeyGen; performance segue
-        em modo mockado. Use{" "}
+      <p className="mt-4 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+        Radar, Ideias, Roteiros e Calendario sincronizam com o Google Sheets. A producao de videos
+        usa o HeyGen. As metricas vem da aba Performance da planilha. Use{" "}
         <Link to="/configuracoes" className="text-status-info underline">
           Configuracoes
         </Link>{" "}
@@ -462,6 +565,56 @@ function Dashboard() {
         <Lightbulb className="ml-1 h-3 w-3" />
       </p>
     </AppShell>
+  );
+}
+
+interface ActionQueue {
+  key: string;
+  count: number;
+  titulo: string;
+  acao: string;
+  to: string;
+  icon: typeof Radar;
+  tone: "info" | "warn" | "danger";
+}
+
+const queueTone: Record<ActionQueue["tone"], { card: string; icon: string }> = {
+  info: {
+    card: "border-status-info/30 hover:border-status-info/60",
+    icon: "bg-status-info/10 text-status-info",
+  },
+  warn: {
+    card: "border-status-warn/40 hover:border-status-warn/70",
+    icon: "bg-status-warn/20 text-status-warn-foreground",
+  },
+  danger: {
+    card: "border-status-danger/30 hover:border-status-danger/60",
+    icon: "bg-status-danger/10 text-status-danger",
+  },
+};
+
+function ActionQueueCard({ queue }: { queue: ActionQueue }) {
+  const tone = queueTone[queue.tone];
+  const Icon = queue.icon;
+  return (
+    <Link
+      to={queue.to}
+      className={`group flex items-center gap-3 rounded-xl border bg-card px-4 py-3.5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${tone.card}`}
+    >
+      <div
+        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${tone.icon}`}
+      >
+        <Icon className="h-4.5 w-4.5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">
+          <span className="font-display text-lg font-bold tabular-nums">{queue.count}</span>{" "}
+          {queue.titulo}
+        </p>
+        <p className="truncate text-xs text-muted-foreground">{queue.acao}</p>
+      </div>
+      <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+    </Link>
   );
 }
 
