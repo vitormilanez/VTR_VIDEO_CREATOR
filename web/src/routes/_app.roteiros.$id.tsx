@@ -294,7 +294,15 @@ function RoteiroDetalhe() {
             <StatusBadge {...prioridadeLabel[draft.prioridade]} />
           </div>
 
-          <div className="rounded-xl border bg-card p-4 shadow-sm">
+          <WorkflowJump />
+
+          <div id="roteiro-editar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
+            <div className="mb-4">
+              <h3 className="font-display text-sm font-semibold">1. Editar roteiro</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Ajuste a ideia, o cuidado médico e o status antes de preparar o vídeo.
+              </p>
+            </div>
             <div className="grid gap-3 md:grid-cols-2">
               <Field label="Titulo">
                 <Input value={draft.titulo} onChange={(e) => set("titulo", e.target.value)} />
@@ -380,9 +388,12 @@ function RoteiroDetalhe() {
             </div>
           </div>
 
-          <div className="rounded-xl border bg-card p-4 shadow-sm">
+          <div
+            id="roteiro-produzir"
+            className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
+          >
             <div className="mb-4">
-              <h3 className="font-display text-sm font-semibold">Preparar vídeo</h3>
+              <h3 className="font-display text-sm font-semibold">2. Preparar vídeo</h3>
               <p className="mt-1 text-xs text-muted-foreground">
                 Escolha o visual e o ritmo. A voz do Dr. Guilherme já está configurada.
               </p>
@@ -553,8 +564,11 @@ function RoteiroDetalhe() {
             </div>
           </div>
 
-          <div className="rounded-xl border bg-card p-4 shadow-sm">
-            <h3 className="mb-2 font-display text-sm font-semibold">Preview com highlight</h3>
+          <div
+            id="roteiro-revisar"
+            className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
+          >
+            <h3 className="mb-2 font-display text-sm font-semibold">3. Revisar com highlight</h3>
             <div className="space-y-2 text-sm leading-relaxed">
               <Preview label="Hook" text={draft.hook} palavras={palavras} />
               <Preview label="Dor / conflito" text={draft.dorConflito} palavras={palavras} />
@@ -565,7 +579,7 @@ function RoteiroDetalhe() {
           </div>
         </div>
 
-        <div className="space-y-3">
+        <div id="roteiro-compliance" className="scroll-mt-20 space-y-3">
           <div className="rounded-xl border bg-card p-4 shadow-sm">
             <h3 className="mb-3 font-display text-sm font-semibold">Timeline</h3>
             <StatusTimeline steps={timeline} />
@@ -574,6 +588,34 @@ function RoteiroDetalhe() {
         </div>
       </div>
     </AppShell>
+  );
+}
+
+function WorkflowJump() {
+  const items = [
+    { href: "#roteiro-editar", label: "Editar", helper: "campos do roteiro" },
+    { href: "#roteiro-produzir", label: "Produzir", helper: "avatar e fala" },
+    { href: "#roteiro-revisar", label: "Revisar", helper: "highlight" },
+    { href: "#roteiro-compliance", label: "Compliance", helper: "bloqueios" },
+  ];
+  return (
+    <nav className="grid gap-2 rounded-xl border bg-muted/25 p-2 sm:grid-cols-4">
+      {items.map((item, index) => (
+        <a
+          key={item.href}
+          href={item.href}
+          className="flex min-h-14 items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-card"
+        >
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-background text-xs font-semibold shadow-sm">
+            {index + 1}
+          </span>
+          <span className="min-w-0">
+            <span className="block text-sm font-medium">{item.label}</span>
+            <span className="block truncate text-[11px] text-muted-foreground">{item.helper}</span>
+          </span>
+        </a>
+      ))}
+    </nav>
   );
 }
 

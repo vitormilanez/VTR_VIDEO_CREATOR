@@ -21,6 +21,7 @@ interface State {
   calendarPosts: CalendarPost[];
   performance: PerformanceMetric[];
   settings: AppSettings;
+  syncedAt: string | null;
   // acoes basicas
   addTrend: (t: Trend) => void;
   updateTrend: (id: string, patch: Partial<Trend>) => void;
@@ -45,7 +46,7 @@ interface State {
   marcarPublicado: (postId: string) => void;
   registrarMetricasFake: (postId: string) => void;
   // hidratacao a partir da API local (dados reais do Google Sheets)
-  hydrate: (payload: Partial<HydratePayload>) => void;
+  hydrate: (payload: Partial<HydratePayload> & { updatedAt?: string | null }) => void;
 }
 
 export interface HydratePayload {
@@ -56,6 +57,7 @@ export interface HydratePayload {
   calendarPosts: CalendarPost[];
   performance: PerformanceMetric[];
   settings: AppSettings;
+  updatedAt?: string | null;
 }
 
 // Estado inicial vazio: os dados reais chegam da API local (hydrate) no load.
@@ -67,6 +69,7 @@ const initial = {
   calendarPosts: [] as CalendarPost[],
   performance: [] as PerformanceMetric[],
   settings: defaultSettings,
+  syncedAt: null as string | null,
 };
 
 const nextStatus: Record<VideoJobStatus, VideoJobStatus | null> = {
@@ -132,6 +135,7 @@ export const useStore = create<State>()(
           calendarPosts: payload.calendarPosts ?? s.calendarPosts,
           performance: payload.performance ?? s.performance,
           settings: payload.settings ?? s.settings,
+          syncedAt: payload.updatedAt ?? s.syncedAt,
         })),
 
       advanceVideoJob: (id) => {

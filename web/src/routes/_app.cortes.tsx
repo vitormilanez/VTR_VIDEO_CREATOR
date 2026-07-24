@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
+import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -361,13 +362,27 @@ function CortesPage() {
 
         <div className="min-w-0 space-y-6">
           {sortedProjects.length === 0 ? (
-            <div className="flex min-h-72 flex-col items-center justify-center rounded-md border border-dashed text-center">
-              <Scissors className="h-7 w-7 text-muted-foreground" />
-              <h2 className="mt-3 text-sm font-semibold">Nenhum projeto de cortes</h2>
-              <p className="mt-1 max-w-sm text-xs text-muted-foreground">
-                Envie uma entrevista, aula ou vídeo longo para receber trechos verticais prontos.
-              </p>
-            </div>
+            <EmptyState
+              className="min-h-72"
+              icon={<Scissors className="h-5 w-5" />}
+              title="Comece por um vídeo longo"
+              description="Envie uma aula, cole um link do YouTube ou reaproveite um vídeo pronto. A ferramenta transcreve, ranqueia os melhores momentos e entrega MP4 vertical com legenda."
+              action={
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button size="sm" onClick={() => setSourceMode("upload")}>
+                    <Upload className="mr-1.5 h-4 w-4" />
+                    Enviar vídeo
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => setSourceMode("youtube")}>
+                    <Youtube className="mr-1.5 h-4 w-4" />
+                    Usar YouTube
+                  </Button>
+                  <Button size="sm" variant="ghost" asChild>
+                    <Link to="/producao">Ver vídeos prontos</Link>
+                  </Button>
+                </div>
+              }
+            />
           ) : (
             sortedProjects.map((project) => (
               <ProjectResult

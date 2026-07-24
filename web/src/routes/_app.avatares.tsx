@@ -27,6 +27,7 @@ import {
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { ConfirmAction } from "@/components/confirm-action";
+import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -101,6 +102,7 @@ const creationOptions: Array<{
 ];
 
 function AvataresPage() {
+  const [activeTab, setActiveTab] = useState("library");
   const [avatars, setAvatars] = useState<HeyGenAvatarGroup[]>([]);
   const [looks, setLooks] = useState<HeyGenAvatarLook[]>([]);
   const [jobs, setJobs] = useState<AvatarJob[]>([]);
@@ -144,7 +146,7 @@ function AvataresPage() {
         </Button>
       }
     >
-      <Tabs defaultValue="library" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList className="grid h-auto w-full grid-cols-3 md:w-auto">
           <TabsTrigger value="library">
             <ScanFace className="mr-1.5 h-4 w-4" />
@@ -166,6 +168,7 @@ function AvataresPage() {
             looks={looks}
             jobs={jobs}
             loading={loading}
+            onCreateClick={() => setActiveTab("create")}
             onJobUpdated={(updated) =>
               setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)))
             }
@@ -182,7 +185,11 @@ function AvataresPage() {
         </TabsContent>
 
         <TabsContent value="studio">
-          <AvatarStudio avatars={looks} styles={styles} />
+          <AvatarStudio
+            avatars={looks}
+            styles={styles}
+            onCreateClick={() => setActiveTab("create")}
+          />
         </TabsContent>
       </Tabs>
     </AppShell>
@@ -194,12 +201,14 @@ function AvatarLibrary({
   looks,
   jobs,
   loading,
+  onCreateClick,
   onJobUpdated,
 }: {
   avatars: HeyGenAvatarGroup[];
   looks: HeyGenAvatarLook[];
   jobs: AvatarJob[];
   loading: boolean;
+  onCreateClick: () => void;
   onJobUpdated: (job: AvatarJob) => void;
 }) {
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
@@ -330,13 +339,17 @@ function AvatarLibrary({
             })}
           </div>
         ) : (
-          <div className="rounded-md border border-dashed px-5 py-10 text-center">
-            <ScanFace className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
-            <h3 className="text-sm font-semibold">Nenhum avatar encontrado</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Crie a primeira identidade na aba Criar avatar.
-            </p>
-          </div>
+          <EmptyState
+            icon={<ScanFace className="h-5 w-5" />}
+            title="Crie a primeira identidade"
+            description="Para vídeos mais naturais, comece com um digital twin usando um vídeo curto, rosto visível e voz limpa. Depois ele aparece aqui para produção."
+            action={
+              <Button size="sm" onClick={onCreateClick}>
+                <Plus className="mr-1.5 h-4 w-4" />
+                Criar avatar
+              </Button>
+            }
+          />
         )}
       </section>
     </div>
@@ -664,7 +677,15 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
   );
 }
 
-function AvatarStudio({ avatars, styles }: { avatars: HeyGenAvatarLook[]; styles: HeyGenStyle[] }) {
+function AvatarStudio({
+  avatars,
+  styles,
+  onCreateClick,
+}: {
+  avatars: HeyGenAvatarLook[];
+  styles: HeyGenStyle[];
+  onCreateClick: () => void;
+}) {
   const [mode, setMode] = useState<StudioMode>("single");
   const [avatarA, setAvatarA] = useState("");
   const [avatarB, setAvatarB] = useState("");
@@ -772,6 +793,22 @@ function AvatarStudio({ avatars, styles }: { avatars: HeyGenAvatarLook[]; styles
       [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
       return reordered;
     });
+  }
+
+  if (avatars.length === 0) {
+    return (
+      <EmptyState
+        icon={<Clapperboard className="h-5 w-5" />}
+        title="Estúdio liberado depois do primeiro avatar"
+        description="Crie ou sincronize um avatar para montar vídeos com um apresentador, dois participantes e estilos cinematic."
+        action={
+          <Button size="sm" onClick={onCreateClick}>
+            <Plus className="mr-1.5 h-4 w-4" />
+            Criar avatar
+          </Button>
+        }
+      />
+    );
   }
 
   return (

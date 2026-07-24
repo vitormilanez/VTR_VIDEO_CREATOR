@@ -7,6 +7,7 @@ import {
   FileText,
   Film,
   CalendarDays,
+  Clock3,
   BarChart3,
   Settings,
   PanelsTopLeft,
@@ -27,6 +28,7 @@ import {
   SidebarHeader,
 } from "@/components/ui/sidebar";
 import { ComplianceBanner } from "./compliance";
+import { useStore } from "@/lib/store";
 
 interface NavItem {
   title: string;
@@ -134,6 +136,8 @@ export function AppShell({
   actions?: ReactNode;
   children: ReactNode;
 }) {
+  const syncedAt = useStore((state) => state.syncedAt);
+
   return (
     <SidebarProvider>
       <div className="flex min-h-screen w-full bg-background">
@@ -146,11 +150,43 @@ export function AppShell({
             <h1 className="truncate font-display text-base font-semibold tracking-tight">
               {title}
             </h1>
-            <div className="ml-auto flex items-center gap-2">{actions}</div>
+            <div className="ml-auto flex items-center gap-2">
+              <SyncStatus syncedAt={syncedAt} />
+              {actions}
+            </div>
           </header>
           <main className="flex-1 overflow-x-hidden p-4 md:p-6">{children}</main>
         </div>
       </div>
     </SidebarProvider>
   );
+}
+
+function SyncStatus({ syncedAt }: { syncedAt: string | null }) {
+  if (!syncedAt) {
+    return (
+      <span className="hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] text-muted-foreground md:inline-flex">
+        <Clock3 className="h-3.5 w-3.5" />
+        Aguardando Sheets
+      </span>
+    );
+  }
+  return (
+    <span className="hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] text-muted-foreground md:inline-flex">
+      <Clock3 className="h-3.5 w-3.5" />
+      Sheets {formatSyncTime(syncedAt)}
+    </span>
+  );
+}
+
+function formatSyncTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "sincronizado";
+  const diffMs = Date.now() - date.getTime();
+  const absMinutes = Math.max(0, Math.floor(diffMs / 60000));
+  if (absMinutes < 1) return "agora";
+  if (absMinutes < 60) return `ha ${absMinutes} min`;
+  const absHours = Math.floor(absMinutes / 60);
+  if (absHours < 24) return `ha ${absHours} h`;
+  return date.toLocaleDateString("pt-BR");
 }
