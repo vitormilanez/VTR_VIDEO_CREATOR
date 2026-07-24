@@ -262,6 +262,7 @@ export interface CreateAvatarPayload {
   appearancePrompt: string;
   media: AvatarMediaPayload[];
   cloneVoice: boolean;
+  voiceSource?: "upload" | "video";
   voiceMedia?: AvatarMediaPayload;
   consentAccepted: boolean;
 }
@@ -341,6 +342,107 @@ export async function naturalizeScript(input: {
 
 export function videoDownloadUrl(jobId: string): string {
   return `${BASE}/api/videos/${encodeURIComponent(jobId)}/download`;
+}
+
+export interface CutClip {
+  id?: string;
+  title: string;
+  start: number;
+  end: number;
+  duration?: number;
+  score: number;
+  hook: string;
+  summary: string;
+  cta: string;
+  caption: string;
+  cover: string;
+  hashtags: string;
+  reason: string;
+  filename?: string;
+  compliance?: PackCompliance;
+}
+
+export interface CutProject {
+  id: string;
+  status: "fila" | "processando" | "pronto" | "erro";
+  progresso: number;
+  etapa: string;
+  sourceName: string;
+  videoJobId?: string | null;
+  uploadId?: string | null;
+  youtubeUrl?: string | null;
+  selectionMode?: "anthropic" | "local";
+  settings: {
+    clipCount: number;
+    minDuration: number;
+    maxDuration: number;
+    durationMode?: "preset" | "auto";
+    captions: boolean;
+    layout: "fit" | "fill";
+  };
+  clips: CutClip[];
+  erro?: string;
+  criadoEm: string;
+  atualizadoEm: string;
+}
+
+export async function uploadCutVideo(
+  file: File,
+): Promise<{ uploadId: string; filename: string; size: number }> {
+  const res = await fetch(`${BASE}/api/cuts/uploads`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "video/mp4",
+      "X-Filename": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel enviar o video."));
+  return (await res.json()) as { uploadId: string; filename: string; size: number };
+}
+
+export async function createCutProject(input: {
+  requestId: string;
+  videoJobId?: string;
+  uploadId?: string;
+  youtubeUrl?: string;
+  sourceName?: string;
+  clipCount: number;
+  minDuration: number;
+  maxDuration: number;
+  durationMode: "preset" | "auto";
+  captions: boolean;
+  layout: "fit" | "fill";
+}): Promise<CutProject> {
+  const response = await postJson<{ ok: boolean; project: CutProject }>("/api/cuts", input);
+  return response.project;
+}
+
+export async function fetchCutProjects(): Promise<CutProject[]> {
+  const response = await requestJson<{ projects: CutProject[] }>("/api/cuts", { method: "GET" });
+  return response.projects;
+}
+
+export async function fetchCutProject(projectId: string): Promise<CutProject> {
+  const response = await requestJson<{ project: CutProject }>(
+    `/api/cuts/${encodeURIComponent(projectId)}`,
+    { method: "GET" },
+  );
+  return response.project;
+}
+
+export async function retryCutProject(projectId: string): Promise<CutProject> {
+  const response = await postJson<{ ok: boolean; project: CutProject }>(
+    `/api/cuts/${encodeURIComponent(projectId)}/retry`,
+    {},
+  );
+  return response.project;
+}
+
+export function cutFileUrl(projectId: string, filename: string, download = false): string {
+  return `${BASE}/api/cuts/${encodeURIComponent(projectId)}/files/${encodeURIComponent(filename)}${
+    download ? "?download=true" : ""
+  }`;
 }
 
 export async function refreshHeyGenVideo(jobId: string): Promise<VideoJob> {

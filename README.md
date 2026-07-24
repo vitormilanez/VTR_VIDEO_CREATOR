@@ -99,11 +99,29 @@ Antes de criar qualquer job pago no HeyGen, o backend valida o texto falado fina
 Falas com doses, promessas proibidas ou instrucoes prescritivas sao bloqueadas,
 independentemente do status atual do roteiro.
 
-Jobs de video e avatar ficam em `data/operations.db` (SQLite em modo WAL). Na
+Jobs de video, avatar e cortes ficam em `data/operations.db` (SQLite em modo WAL). Na
 primeira abertura, os arquivos legados `data/video_jobs.json` e
-`data/avatar_jobs.json` sao importados automaticamente. Cada envio de video usa
-uma chave idempotente persistente: repetir a mesma requisicao retorna o job ja
-registrado e nao cria uma segunda chamada paga no HeyGen.
+`data/avatar_jobs.json` sao importados automaticamente. Envios de video e
+projetos de cortes usam chaves idempotentes persistentes: repetir a mesma
+requisicao retorna o job ja registrado, sem iniciar outro processamento.
+
+## Cortes inteligentes
+
+A rota `/cortes` aceita um video local de ate 2 GB, um video pronto do HeyGen
+ou um link publico do YouTube. Links do YouTube sao baixados localmente com
+`yt-dlp`, sem playlists e com limite de 2 horas.
+O processamento transcreve a fala, escolhe os melhores trechos com IA, cria
+versoes verticais com fundo desfocado ou preenchimento, adiciona legendas e
+entrega ranking, legenda editorial e download de cada MP4. Os projetos ficam no
+SQLite e os arquivos gerados em `data/cuts/`.
+
+Em `Duracao automatica`, cada corte termina em uma fronteira natural da fala.
+Sem credenciais da Anthropic, o ranking local considera abertura, ideia
+completa, fechamento, densidade de informacao e diversidade entre os trechos.
+
+A transcricao usa o Python configurado em `CUTS_PYTHON`. Na instalacao local
+atual, o projeto tambem detecta automaticamente o ambiente
+`../Video Creator/.venv_caption/bin/python`.
 
 Se aparecer a tela "You need access" no Google Sheets, peça acesso para essa conta. A conta pessoal `vitor.milanezz@gmail.com` pode nao ter permissao direta no navegador, mesmo quando o app local consegue acessar via token OAuth.
 
@@ -118,7 +136,7 @@ Mais detalhes em `docs/google-sheets-clients.md`.
 
 A rota `/avatares` consulta as identidades privadas da conta HeyGen conectada. Ela permite criar avatar por foto, digital twin por video ou apresentador por descricao, com clonagem opcional de voz.
 
-Fotos, videos e audios nao sao gravados no Google Sheets nem no snapshot. Eles sao enviados ao HeyGen somente depois do clique confirmado em `Criar avatar`. O backend salva localmente apenas identificadores, status e URL de consentimento em `data/avatar_jobs.json`.
+Fotos, videos e audios nao sao gravados no Google Sheets nem no snapshot. Eles sao enviados ao HeyGen somente depois do clique confirmado em `Criar avatar`. O backend salva localmente apenas identificadores, status e URL de consentimento em `data/operations.db`.
 
 O titular precisa confirmar a autorizacao na interface e concluir o consentimento oficial do HeyGen antes do avatar ser usado em producao.
 

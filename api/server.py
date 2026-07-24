@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,10 +28,11 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from api.cut_service import process_cut_project
 from api.job_store import JobStore
 from integrations.portuguese_br import prepare_script_for_heygen_voice
 
@@ -39,6 +41,8 @@ SNAPSHOT = ROOT / "data" / "sheets_snapshot.json"
 VIDEO_JOBS = ROOT / "data" / "video_jobs.json"
 AVATAR_JOBS = ROOT / "data" / "avatar_jobs.json"
 OPERATIONAL_DB = ROOT / "data" / "operations.db"
+CUT_UPLOADS = ROOT / "data" / "cut_uploads"
+CUT_OUTPUTS = ROOT / "data" / "cuts"
 MANDATORY_VIDEO_OUTRO = "Me siga para mais dicas, e obrigado."
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
@@ -678,6 +682,7 @@ class AvatarCreateIn(BaseModel):
     appearancePrompt: str = ""
     media: list[AvatarMediaIn] = Field(default_factory=list)
     cloneVoice: bool = False
+    voiceSource: Literal["upload", "video"] = "upload"
     voiceMedia: AvatarMediaIn | None = None
     consentAccepted: bool = False
 
@@ -688,6 +693,24 @@ def _media_payload(
     allowed_mime_types: set[str],
     max_bytes: int = 32 * 1024 * 1024,
 ) -> dict[str, str]:
+    decoded = _decode_avatar_media(
+        media,
+        allowed_mime_types=allowed_mime_types,
+        max_bytes=max_bytes,
+    )
+    return {
+        "type": "base64",
+        "media_type": media.mimeType,
+        "data": base64.b64encode(decoded).decode("ascii"),
+    }
+
+
+def _decode_avatar_media(
+    media: AvatarMediaIn,
+    *,
+    allowed_mime_types: set[str],
+    max_bytes: int,
+) -> bytes:
     if media.mimeType not in allowed_mime_types:
         raise HTTPException(status_code=400, detail=f"Formato de arquivo nao aceito: {media.mimeType}.")
     try:
@@ -695,8 +718,155 @@ def _media_payload(
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"Arquivo invalido: {media.name}.") from exc
     if not decoded or len(decoded) > max_bytes:
-        raise HTTPException(status_code=400, detail=f"O arquivo {media.name} deve ter ate 32 MB.")
-    return {"type": "base64", "media_type": media.mimeType, "data": media.data}
+        limit_mb = max_bytes // (1024 * 1024)
+        raise HTTPException(
+            status_code=400,
+            detail=f"O arquivo {media.name} deve ter ate {limit_mb} MB.",
+        )
+    return decoded
+
+
+def _direct_upload_avatar_asset(
+    command: str,
+    media: AvatarMediaIn,
+    content: bytes,
+) -> dict[str, str]:
+    upload = _run_heygen_json(
+        command,
+        ["asset", "direct-uploads", "create"],
+        payload={
+            "filename": media.name,
+            "content_type": media.mimeType,
+            "size_bytes": len(content),
+        },
+        timeout=45,
+    )
+    asset_id = _find_value(upload, "asset_id")
+    upload_url = _find_value(upload, "upload_url")
+    upload_headers = _find_value(upload, "upload_headers")
+    if not asset_id or not upload_url:
+        raise HTTPException(
+            status_code=502,
+            detail="HeyGen não retornou os dados para enviar o vídeo.",
+        )
+    headers = (
+        {str(key): str(value) for key, value in upload_headers.items()}
+        if isinstance(upload_headers, dict)
+        else {}
+    )
+    try:
+        response = requests.put(
+            str(upload_url),
+            data=content,
+            headers=headers,
+            timeout=300,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Não foi possível enviar o vídeo ao armazenamento do HeyGen.",
+        ) from exc
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"O armazenamento do HeyGen recusou o vídeo ({response.status_code}).",
+        )
+    completed = _run_heygen_json(
+        command,
+        ["asset", "complete", "create", str(asset_id)],
+        payload={},
+        timeout=60,
+    )
+    completed_asset_id = _find_value(completed, "asset_id") or asset_id
+    return {"type": "asset_id", "asset_id": str(completed_asset_id)}
+
+
+def _avatar_file_payload(
+    command: str,
+    media: AvatarMediaIn,
+    *,
+    allowed_mime_types: set[str],
+    max_bytes: int = 30 * 1024 * 1024,
+    inline_max_bytes: int = 16 * 1024 * 1024,
+) -> dict[str, str]:
+    content = _decode_avatar_media(
+        media,
+        allowed_mime_types=allowed_mime_types,
+        max_bytes=max_bytes,
+    )
+    if len(content) <= inline_max_bytes:
+        return {
+            "type": "base64",
+            "media_type": media.mimeType,
+            "data": base64.b64encode(content).decode("ascii"),
+        }
+    return _direct_upload_avatar_asset(command, media, content)
+
+
+def _voice_from_video(media: AvatarMediaIn) -> dict[str, str]:
+    if media.mimeType not in {"video/mp4", "video/webm"}:
+        raise HTTPException(status_code=400, detail="Envie um vídeo MP4 ou WebM com áudio.")
+    try:
+        video_bytes = base64.b64decode(media.data, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Arquivo inválido: {media.name}.") from exc
+    if not video_bytes:
+        raise HTTPException(status_code=400, detail="O vídeo selecionado está vazio.")
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(
+            status_code=503,
+            detail="FFmpeg não está disponível para extrair a voz do vídeo.",
+        )
+
+    suffix = ".webm" if media.mimeType == "video/webm" else ".mp4"
+    with tempfile.TemporaryDirectory(prefix="avatar-voice-") as temporary:
+        source = Path(temporary) / f"source{suffix}"
+        output = Path(temporary) / "voice.wav"
+        source.write_bytes(video_bytes)
+        try:
+            process = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "24000",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="A extração da voz demorou demais. Tente um vídeo menor.",
+            ) from exc
+        if process.returncode != 0 or not output.exists() or output.stat().st_size <= 44:
+            raise HTTPException(
+                status_code=400,
+                detail="Não foi possível encontrar uma faixa de voz no vídeo selecionado.",
+            )
+        audio_bytes = output.read_bytes()
+
+    if len(audio_bytes) > 32 * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail="A voz extraída ficou maior que 32 MB. Use um vídeo mais curto.",
+        )
+    return {
+        "type": "base64",
+        "media_type": "audio/x-wav",
+        "data": base64.b64encode(audio_bytes).decode("ascii"),
+    }
 
 
 @app.post("/api/heygen/avatars")
@@ -715,6 +885,7 @@ def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
     image_mimes = {"image/jpeg", "image/png"}
     video_mimes = {"video/mp4", "video/webm"}
     avatar_request: dict[str, Any] = {"type": payload.creationType, "name": name}
+    voice_audio: dict[str, str] | None = None
 
     if payload.creationType == "prompt":
         prompt = payload.appearancePrompt.strip()
@@ -723,14 +894,34 @@ def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
         avatar_request["prompt"] = prompt
         if payload.media:
             avatar_request["reference_images"] = [
-                _media_payload(item, allowed_mime_types=image_mimes) for item in payload.media[:3]
+                _avatar_file_payload(command, item, allowed_mime_types=image_mimes)
+                for item in payload.media[:3]
             ]
     else:
         if not payload.media:
             expected = "uma foto" if payload.creationType == "photo" else "um video"
             raise HTTPException(status_code=400, detail=f"Envie {expected} para criar o avatar.")
         allowed = image_mimes if payload.creationType == "photo" else video_mimes
-        avatar_request["file"] = _media_payload(payload.media[0], allowed_mime_types=allowed)
+        avatar_request["file"] = _avatar_file_payload(
+            command,
+            payload.media[0],
+            allowed_mime_types=allowed,
+        )
+
+    if payload.cloneVoice:
+        if payload.voiceSource == "video":
+            if payload.creationType != "digital_twin" or not payload.media:
+                raise HTTPException(
+                    status_code=400,
+                    detail="A voz do vídeo só pode ser usada na criação de um digital twin.",
+                )
+        else:
+            if not payload.voiceMedia:
+                raise HTTPException(status_code=400, detail="Envie um áudio para clonar a voz.")
+            voice_audio = _media_payload(
+                payload.voiceMedia,
+                allowed_mime_types={"audio/mpeg", "audio/wav", "audio/x-wav"},
+            )
 
     avatar_response = _run_heygen_json(
         command,
@@ -743,14 +934,16 @@ def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
     if not group_id:
         raise HTTPException(status_code=502, detail="HeyGen nao retornou a identidade do avatar.")
 
-    voice_id = None
-    if payload.cloneVoice:
-        if not payload.voiceMedia:
-            raise HTTPException(status_code=400, detail="Envie um audio para clonar a voz.")
-        audio = _media_payload(
-            payload.voiceMedia,
-            allowed_mime_types={"audio/mpeg", "audio/wav", "audio/x-wav"},
+    voice_id = _find_value(avatar_response, "default_voice_id")
+    if payload.cloneVoice and payload.voiceSource == "video" and not voice_id:
+        avatar_details = _run_heygen_json(
+            command,
+            ["avatar", "get", str(group_id)],
+            timeout=45,
         )
+        voice_id = _find_value(avatar_details, "default_voice_id")
+
+    if voice_audio:
         voice_response = _run_heygen_json(
             command,
             ["voice", "clone", "create"],
@@ -758,7 +951,7 @@ def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
                 "voice_name": f"{name} - voz",
                 "language": "pt",
                 "remove_background_noise": True,
-                "audio": audio,
+                "audio": voice_audio,
             },
             timeout=180,
         )
@@ -767,6 +960,7 @@ def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
     consent_response = _run_heygen_json(
         command,
         ["avatar", "consent", "create", str(group_id)],
+        payload={},
         timeout=45,
     )
     consent_url = _find_value(consent_response, "url", "consent_url", "consentUrl")
@@ -1229,6 +1423,287 @@ def download_video(job_id: str) -> StreamingResponse:
         stream_file(),
         media_type=response.headers.get("content-type", "video/mp4"),
         headers={"Content-Disposition": f'attachment; filename="{safe_name}.mp4"'},
+    )
+
+
+class CutCreateIn(BaseModel):
+    requestId: str = Field(min_length=8, max_length=100)
+    videoJobId: str | None = None
+    uploadId: str | None = None
+    youtubeUrl: str | None = Field(default=None, max_length=500)
+    sourceName: str | None = Field(default=None, max_length=300)
+    clipCount: int = Field(default=3, ge=1, le=8)
+    minDuration: int = Field(default=15, ge=8, le=90)
+    maxDuration: int = Field(default=45, ge=10, le=120)
+    durationMode: Literal["preset", "auto"] = "preset"
+    captions: bool = True
+    layout: Literal["fit", "fill"] = "fit"
+
+
+@app.post("/api/cuts/uploads")
+async def upload_cut_source(request: Request) -> dict:
+    """Recebe um video local bruto sem carregar o arquivo inteiro na memoria."""
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("video/"):
+        raise HTTPException(status_code=415, detail="Selecione um arquivo de video.")
+    declared_size = int(request.headers.get("content-length") or 0)
+    max_bytes = 2 * 1024 * 1024 * 1024
+    if declared_size > max_bytes:
+        raise HTTPException(status_code=413, detail="O video deve ter no maximo 2 GB.")
+    upload_id = f"upload-{uuid.uuid4().hex[:16]}"
+    CUT_UPLOADS.mkdir(parents=True, exist_ok=True)
+    destination = CUT_UPLOADS / f"{upload_id}.video"
+    temporary = destination.with_suffix(".part")
+    written = 0
+    try:
+        with temporary.open("wb") as output:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(status_code=413, detail="O video deve ter no maximo 2 GB.")
+                output.write(chunk)
+        if written == 0:
+            raise HTTPException(status_code=400, detail="O arquivo enviado esta vazio.")
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return {
+        "ok": True,
+        "uploadId": upload_id,
+        "filename": request.headers.get("x-filename") or "video",
+        "size": written,
+    }
+
+
+@app.get("/api/cuts")
+def list_cut_projects() -> dict:
+    return {"projects": _job_store().list("cut")}
+
+
+@app.get("/api/cuts/{project_id}")
+def get_cut_project(project_id: str) -> dict:
+    project = _job_store().get("cut", project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto de cortes nao encontrado.")
+    return {"project": project}
+
+
+def _launch_cut_worker(
+    *,
+    store: JobStore,
+    project: dict[str, Any],
+    source_url: str | None,
+    youtube_url: str | None,
+    source_path: Path | None,
+) -> None:
+    worker = threading.Thread(
+        target=process_cut_project,
+        kwargs={
+            "store": store,
+            "job_id": project["id"],
+            "root": ROOT,
+            "output_root": CUT_OUTPUTS,
+            "source_url": source_url,
+            "youtube_url": youtube_url,
+            "source_path": source_path,
+            "compliance": _pack_compliance,
+        },
+        daemon=True,
+        name=f"cuts-{project['id']}",
+    )
+    worker.start()
+
+
+def _cut_project_sources(
+    project: dict[str, Any],
+    store: JobStore,
+) -> tuple[str | None, str | None, Path | None]:
+    source_url: str | None = None
+    source_path: Path | None = None
+    youtube_url = str(project.get("youtubeUrl") or "").strip() or None
+    if project.get("uploadId"):
+        source_path = CUT_UPLOADS / f"{project['uploadId']}.video"
+        if not source_path.is_file():
+            raise RuntimeError("O video enviado nao esta mais disponivel.")
+    elif project.get("videoJobId"):
+        video_job = store.get("video", str(project["videoJobId"]))
+        source_url = str((video_job or {}).get("videoUrl") or "")
+        if not source_url:
+            raise RuntimeError("O video produzido nao esta mais disponivel.")
+    elif not youtube_url:
+        raise RuntimeError("A origem deste projeto nao esta disponivel.")
+    return source_url, youtube_url, source_path
+
+
+@app.on_event("startup")
+def resume_interrupted_cut_projects() -> None:
+    store = _job_store()
+    for project in store.list("cut"):
+        if project.get("status") not in {"fila", "processando"}:
+            continue
+        try:
+            source_url, youtube_url, source_path = _cut_project_sources(project, store)
+        except RuntimeError as exc:
+            project.update(
+                status="erro",
+                progresso=0,
+                etapa="Falha ao retomar processamento",
+                erro=str(exc),
+                atualizadoEm=_now(),
+            )
+            store.upsert("cut", project)
+            continue
+        project.update(etapa="Retomando processamento", atualizadoEm=_now())
+        store.upsert("cut", project)
+        _launch_cut_worker(
+            store=store,
+            project=project,
+            source_url=source_url,
+            youtube_url=youtube_url,
+            source_path=source_path,
+        )
+
+
+@app.post("/api/cuts")
+def create_cut_project(payload: CutCreateIn) -> dict:
+    """Inicia transcricao, selecao editorial e renderizacao em segundo plano."""
+    sources = [payload.videoJobId, payload.uploadId, payload.youtubeUrl]
+    if sum(bool(source) for source in sources) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Escolha um video produzido, envie um arquivo ou informe um link do YouTube.",
+        )
+    if payload.maxDuration < payload.minDuration:
+        raise HTTPException(status_code=422, detail="A duracao maxima deve superar a minima.")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise HTTPException(status_code=503, detail="FFmpeg nao esta instalado.")
+
+    source_url: str | None = None
+    youtube_url: str | None = None
+    source_path: Path | None = None
+    source_name = "Video enviado"
+    if payload.videoJobId:
+        video_job = _job_store().get("video", payload.videoJobId)
+        if not video_job or video_job.get("status") != "pronto":
+            raise HTTPException(status_code=409, detail="O video produzido ainda nao esta pronto.")
+        source_url = str(video_job.get("videoUrl") or "")
+        parsed = urlparse(source_url)
+        hostname = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not (
+            hostname == "heygen.ai" or hostname.endswith(".heygen.ai")
+        ):
+            raise HTTPException(status_code=409, detail="O arquivo do HeyGen nao esta disponivel.")
+        try:
+            source_name = _find_script(str(video_job.get("scriptId") or "")).get(
+                "titulo", "Video produzido"
+            )
+        except HTTPException:
+            source_name = "Video produzido"
+    elif payload.uploadId:
+        source_path = CUT_UPLOADS / f"{payload.uploadId}.video"
+        if not source_path.is_file():
+            raise HTTPException(status_code=404, detail="Upload de video nao encontrado.")
+        source_name = payload.sourceName or "Video enviado"
+    else:
+        youtube_url = str(payload.youtubeUrl or "").strip()
+        parsed = urlparse(youtube_url)
+        hostname = (parsed.hostname or "").lower().removeprefix("www.")
+        if parsed.scheme != "https" or hostname not in {
+            "youtube.com",
+            "m.youtube.com",
+            "music.youtube.com",
+            "youtu.be",
+        }:
+            raise HTTPException(status_code=422, detail="Informe um link valido do YouTube.")
+        if not shutil.which("yt-dlp"):
+            raise HTTPException(status_code=503, detail="O downloader do YouTube nao esta instalado.")
+        source_name = payload.sourceName or "Video do YouTube"
+
+    now = _now()
+    project = {
+        "id": f"cut-{uuid.uuid4().hex[:12]}",
+        "status": "fila",
+        "progresso": 0,
+        "etapa": "Aguardando processamento",
+        "sourceName": source_name,
+        "videoJobId": payload.videoJobId,
+        "uploadId": payload.uploadId,
+        "youtubeUrl": youtube_url,
+        "settings": payload.model_dump(
+            exclude={"requestId", "videoJobId", "uploadId", "youtubeUrl", "sourceName"},
+        ),
+        "clips": [],
+        "criadoEm": now,
+        "atualizadoEm": now,
+    }
+    store = _job_store()
+    project, reservation = store.reserve(
+        "cut",
+        project,
+        idempotency_key=f"cut:{payload.requestId}",
+    )
+    if reservation == "duplicate":
+        return {"ok": True, "duplicate": True, "project": project}
+    _launch_cut_worker(
+        store=store,
+        project=project,
+        source_url=source_url,
+        youtube_url=youtube_url,
+        source_path=source_path,
+    )
+    return {"ok": True, "project": project}
+
+
+@app.post("/api/cuts/{project_id}/retry")
+def retry_cut_project(project_id: str) -> dict:
+    store = _job_store()
+    project = store.get("cut", project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto de cortes nao encontrado.")
+    if project.get("status") != "erro":
+        raise HTTPException(status_code=409, detail="Somente projetos com erro podem ser repetidos.")
+
+    try:
+        source_url, youtube_url, source_path = _cut_project_sources(project, store)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    project.update(
+        status="fila",
+        progresso=0,
+        etapa="Aguardando novo processamento",
+        clips=[],
+        atualizadoEm=_now(),
+    )
+    project.pop("erro", None)
+    store.upsert("cut", project)
+    _launch_cut_worker(
+        store=store,
+        project=project,
+        source_url=source_url,
+        youtube_url=youtube_url,
+        source_path=source_path,
+    )
+    return {"ok": True, "project": project}
+
+
+@app.get("/api/cuts/{project_id}/files/{filename}")
+def cut_file(project_id: str, filename: str, download: bool = False) -> FileResponse:
+    project = _job_store().get("cut", project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto de cortes nao encontrado.")
+    allowed = {str(clip.get("filename")) for clip in project.get("clips", [])}
+    if filename not in allowed or Path(filename).name != filename:
+        raise HTTPException(status_code=404, detail="Corte nao encontrado.")
+    path = CUT_OUTPUTS / project_id / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Arquivo do corte nao encontrado.")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=filename if download else None,
+        content_disposition_type="attachment" if download else "inline",
     )
 
 

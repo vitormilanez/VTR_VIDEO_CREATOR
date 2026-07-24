@@ -17,6 +17,8 @@ data/avatar_jobs.json
 data/operations.db
 data/operations.db-shm
 data/operations.db-wal
+data/cut_uploads/
+data/cuts/
 *.log
 *.jsonl
 *.mp4

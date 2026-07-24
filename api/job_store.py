@@ -7,7 +7,21 @@ from pathlib import Path
 from typing import Any, Iterator, Literal
 
 
-JobKind = Literal["video", "avatar"]
+JobKind = Literal["video", "avatar", "cut"]
+
+_JOBS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS operational_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('video', 'avatar', 'cut')),
+    status TEXT NOT NULL,
+    idempotency_key TEXT UNIQUE,
+    script_id TEXT,
+    remote_session_id TEXT,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
 
 
 class JobStore:
@@ -43,21 +57,20 @@ class JobStore:
     def _initialize(self) -> None:
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operational_jobs (
-                    id TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL CHECK (kind IN ('video', 'avatar')),
-                    status TEXT NOT NULL,
-                    idempotency_key TEXT UNIQUE,
-                    script_id TEXT,
-                    remote_session_id TEXT,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+            connection.execute(_JOBS_TABLE_SQL)
+            table_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'operational_jobs'"
+            ).fetchone()
+            if table_sql and "'cut'" not in str(table_sql["sql"]):
+                connection.execute("ALTER TABLE operational_jobs RENAME TO operational_jobs_v1")
+                connection.execute(_JOBS_TABLE_SQL)
+                connection.execute(
+                    """
+                    INSERT INTO operational_jobs
+                    SELECT * FROM operational_jobs_v1
+                    """
                 )
-                """
-            )
+                connection.execute("DROP TABLE operational_jobs_v1")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_kind_created "
                 "ON operational_jobs(kind, created_at DESC)"
@@ -188,6 +201,24 @@ class JobStore:
             connection.execute("DELETE FROM operational_jobs WHERE kind = ?", (kind,))
             for job in jobs:
                 self._upsert_on(connection, kind, job)
+
+    def reserve(
+        self,
+        kind: JobKind,
+        job: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> tuple[dict[str, Any], Literal["created", "duplicate"]]:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            duplicate = connection.execute(
+                "SELECT * FROM operational_jobs WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if duplicate:
+                return self._record(duplicate) or job, "duplicate"
+            self._upsert_on(connection, kind, job, idempotency_key)
+            return job, "created"
 
     def reserve_video(
         self,

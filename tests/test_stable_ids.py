@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import base64
 import json
+import shutil
+import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from api import server
+from api import cut_service, server
+from api.job_store import JobStore
 
 
 SCRIPT_HEADERS = [
@@ -173,6 +178,123 @@ class StableIdTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 400)
         self.assertIn("autorizacao", raised.exception.detail)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+    def test_extracts_voice_from_avatar_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "avatar.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=160x90:d=0.5",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=0.5",
+                    "-shortest",
+                    "-c:v",
+                    "libx264",
+                    "-c:a",
+                    "aac",
+                    str(source),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            audio = server._voice_from_video(
+                server.AvatarMediaIn(
+                    name=source.name,
+                    mimeType="video/mp4",
+                    data=base64.b64encode(source.read_bytes()).decode("ascii"),
+                )
+            )
+
+        self.assertEqual(audio["media_type"], "audio/x-wav")
+        self.assertGreater(len(base64.b64decode(audio["data"])), 44)
+
+    def test_large_avatar_video_uses_direct_asset_upload(self) -> None:
+        media = server.AvatarMediaIn(
+            name="avatar.mp4",
+            mimeType="video/mp4",
+            data=base64.b64encode(b"video-content").decode("ascii"),
+        )
+        responses = [
+            {
+                "data": {
+                    "asset_id": "asset-pending",
+                    "upload_url": "https://uploads.example.test/avatar",
+                    "upload_headers": {"Content-Type": "video/mp4"},
+                }
+            },
+            {"data": {"asset_id": "asset-ready", "status": "processing"}},
+        ]
+        with (
+            patch.object(server, "_run_heygen_json", side_effect=responses) as run,
+            patch.object(server.requests, "put") as put,
+        ):
+            put.return_value.status_code = 200
+            result = server._avatar_file_payload(
+                "heygen",
+                media,
+                allowed_mime_types={"video/mp4"},
+                inline_max_bytes=4,
+            )
+
+        self.assertEqual(result, {"type": "asset_id", "asset_id": "asset-ready"})
+        self.assertEqual(run.call_count, 2)
+        put.assert_called_once_with(
+            "https://uploads.example.test/avatar",
+            data=b"video-content",
+            headers={"Content-Type": "video/mp4"},
+            timeout=300,
+        )
+
+    def test_digital_twin_uses_native_voice_from_video(self) -> None:
+        media = server.AvatarMediaIn(
+            name="avatar.mp4",
+            mimeType="video/mp4",
+            data=base64.b64encode(b"video-content").decode("ascii"),
+        )
+        responses = [
+            {
+                "data": {
+                    "group_id": "group-native",
+                    "id": "avatar-native",
+                    "default_voice_id": "voice-native",
+                }
+            },
+            {"data": {"consent_url": "https://app.heygen.com/consent/native"}},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            with (
+                patch.object(server, "_heygen_cli", return_value="heygen"),
+                patch.object(server, "_run_heygen_json", side_effect=responses) as run,
+                patch.object(server, "_job_store", return_value=store),
+            ):
+                result = server.create_heygen_avatar(
+                    server.AvatarCreateIn(
+                        name="Avatar nativo",
+                        creationType="digital_twin",
+                        media=[media],
+                        cloneVoice=True,
+                        voiceSource="video",
+                        consentAccepted=True,
+                    )
+                )
+
+        self.assertEqual(result["job"]["voiceId"], "voice-native")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[1], ["avatar", "create"])
+        self.assertEqual(
+            run.call_args_list[1].args[1],
+            ["avatar", "consent", "create", "group-native"],
+        )
+        self.assertEqual(run.call_args_list[1].kwargs["payload"], {})
+
     def test_existing_video_requires_explicit_new_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             jobs_file = Path(temporary) / "video_jobs.json"
@@ -317,6 +439,176 @@ class StableIdTests(unittest.TestCase):
             finally:
                 server.OPERATIONAL_DB = original_database
                 server.VIDEO_JOBS = original_jobs
+
+    def test_cut_projects_are_persisted_in_operational_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            project = {
+                "id": "c-1",
+                "status": "fila",
+                "createdAt": "2026-07-23T12:00:00+00:00",
+                "updatedAt": "2026-07-23T12:00:00+00:00",
+            }
+            store.upsert("cut", project)
+            self.assertEqual(store.get("cut", "c-1"), project)
+            self.assertEqual(store.list("cut"), [project])
+
+    def test_cut_reservation_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            first = {
+                "id": "c-primeiro",
+                "status": "fila",
+                "createdAt": "2026-07-23T12:00:00+00:00",
+                "updatedAt": "2026-07-23T12:00:00+00:00",
+            }
+            reserved, state = store.reserve("cut", first, idempotency_key="cut:request-123")
+            duplicate, duplicate_state = store.reserve(
+                "cut",
+                {**first, "id": "c-segundo"},
+                idempotency_key="cut:request-123",
+            )
+            self.assertEqual(state, "created")
+            self.assertEqual(duplicate_state, "duplicate")
+            self.assertEqual(reserved["id"], duplicate["id"])
+            self.assertEqual(len(store.list("cut")), 1)
+
+    def test_operational_store_migrates_schema_to_accept_cuts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "operations.db"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                """
+                CREATE TABLE operational_jobs (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK (kind IN ('video', 'avatar')),
+                    status TEXT NOT NULL,
+                    idempotency_key TEXT UNIQUE,
+                    script_id TEXT,
+                    remote_session_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO operational_jobs VALUES (
+                    'v-existente', 'video', 'pronto', NULL, 's-1', NULL,
+                    '{"id":"v-existente","status":"pronto"}',
+                    '2026-07-23T10:00:00+00:00', '2026-07-23T10:00:00+00:00'
+                )
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            store = JobStore(database)
+            store.upsert(
+                "cut",
+                {
+                    "id": "c-novo",
+                    "status": "fila",
+                    "createdAt": "2026-07-23T12:00:00+00:00",
+                    "updatedAt": "2026-07-23T12:00:00+00:00",
+                },
+            )
+            self.assertEqual(store.get("video", "v-existente")["status"], "pronto")
+            self.assertEqual(store.get("cut", "c-novo")["status"], "fila")
+
+    def test_cut_project_requires_one_source_and_valid_duration(self) -> None:
+        with self.assertRaises(server.HTTPException) as no_source:
+            server.create_cut_project(server.CutCreateIn(requestId="request-1"))
+        self.assertEqual(no_source.exception.status_code, 400)
+
+        payload = server.CutCreateIn(
+            requestId="request-2",
+            uploadId="upload-1",
+            sourceName="entrevista.mp4",
+            clipCount=3,
+            minDuration=20,
+            maxDuration=10,
+        )
+        with self.assertRaises(server.HTTPException) as invalid_duration:
+            server.create_cut_project(payload)
+        self.assertEqual(invalid_duration.exception.status_code, 422)
+
+    def test_cut_project_rejects_non_youtube_url(self) -> None:
+        payload = server.CutCreateIn(
+            requestId="request-youtube-invalid",
+            youtubeUrl="https://youtube.com.evil.example/watch?v=123",
+        )
+        with self.assertRaises(server.HTTPException) as invalid_url:
+            server.create_cut_project(payload)
+        self.assertEqual(invalid_url.exception.status_code, 422)
+
+    def test_youtube_download_is_limited_to_one_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "source.mp4"
+            destination.write_bytes(b"video")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with patch.object(cut_service.subprocess, "run", return_value=completed) as run:
+                cut_service._download_youtube(
+                    "https://www.youtube.com/watch?v=abc123",
+                    destination,
+                )
+            command = run.call_args.args[0]
+            self.assertIn("--no-playlist", command)
+            self.assertIn("duration <= 7200", command)
+            self.assertIn("2G", command)
+
+    def test_cut_selection_works_without_anthropic_credentials(self) -> None:
+        transcript = {
+            "duration": 50,
+            "segments": [
+                {
+                    "start": index * 5,
+                    "end": (index + 1) * 5,
+                    "text": f"Por que este ponto importante numero {index} merece atencao?",
+                }
+                for index in range(10)
+            ],
+        }
+        with patch.dict(
+            "os.environ",
+            {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""},
+        ):
+            clips, mode = cut_service._suggest_clips(
+                transcript,
+                count=5,
+                min_duration=15,
+                max_duration=45,
+            )
+        self.assertEqual(mode, "local")
+        self.assertEqual(len(clips), 5)
+        self.assertTrue(all(0 <= clip["start"] < clip["end"] <= 50 for clip in clips))
+        starts = sorted(float(clip["start"]) for clip in clips)
+        self.assertTrue(all(right - left >= 5 for left, right in zip(starts, starts[1:])))
+
+    def test_automatic_cut_duration_uses_natural_speech_boundaries(self) -> None:
+        transcript = {
+            "duration": 50,
+            "segments": [
+                {
+                    "start": index * 5,
+                    "end": (index + 1) * 5 - (0.8 if index % 2 else 0),
+                    "text": f"Esta e a ideia importante numero {index}.",
+                }
+                for index in range(10)
+            ],
+        }
+        clips = cut_service._local_clip_suggestions(
+            transcript,
+            count=3,
+            min_duration=8,
+            max_duration=60,
+            auto_duration=True,
+        )
+        natural_ends = {round(float(segment["end"]), 3) for segment in transcript["segments"]}
+        self.assertEqual(len(clips), 3)
+        self.assertTrue(all(round(float(clip["end"]), 3) in natural_ends for clip in clips))
+        self.assertTrue(all(clip["reason"].endswith(".") for clip in clips))
 
     def test_repeated_api_request_submits_to_heygen_only_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

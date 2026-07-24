@@ -14,6 +14,7 @@ import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as AppAvataresRouteImport } from './routes/_app.avatares'
 import { Route as AppCalendarioRouteImport } from './routes/_app.calendario'
 import { Route as AppConfiguracoesRouteImport } from './routes/_app.configuracoes'
+import { Route as AppCortesRouteImport } from './routes/_app.cortes'
 import { Route as AppIdeiasRouteImport } from './routes/_app.ideias'
 import { Route as AppPacksRouteImport } from './routes/_app.packs'
 import { Route as AppPerformanceRouteImport } from './routes/_app.performance'
@@ -51,6 +52,11 @@ const AppCalendarioRoute = AppCalendarioRouteImport.update({
 const AppConfiguracoesRoute = AppConfiguracoesRouteImport.update({
   id: '/configuracoes',
   path: '/configuracoes',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppCortesRoute = AppCortesRouteImport.update({
+  id: '/cortes',
+  path: '/cortes',
   getParentRoute: () => AppRoute,
 } as any)
 const AppIdeiasRoute = AppIdeiasRouteImport.update({
@@ -129,6 +135,7 @@ export interface FileRoutesByFullPath {
   '/avatares': typeof AppAvataresRoute
   '/calendario': typeof AppCalendarioRoute
   '/configuracoes': typeof AppConfiguracoesRoute
+  '/cortes': typeof AppCortesRoute
   '/ideias': typeof AppIdeiasRouteWithChildren
   '/packs': typeof AppPacksRoute
   '/performance': typeof AppPerformanceRoute
@@ -148,6 +155,7 @@ export interface FileRoutesByTo {
   '/avatares': typeof AppAvataresRoute
   '/calendario': typeof AppCalendarioRoute
   '/configuracoes': typeof AppConfiguracoesRoute
+  '/cortes': typeof AppCortesRoute
   '/packs': typeof AppPacksRoute
   '/performance': typeof AppPerformanceRoute
   '/': typeof AppIndexRoute
@@ -166,6 +174,7 @@ export interface FileRoutesById {
   '/_app/avatares': typeof AppAvataresRoute
   '/_app/calendario': typeof AppCalendarioRoute
   '/_app/configuracoes': typeof AppConfiguracoesRoute
+  '/_app/cortes': typeof AppCortesRoute
   '/_app/ideias': typeof AppIdeiasRouteWithChildren
   '/_app/packs': typeof AppPacksRoute
   '/_app/performance': typeof AppPerformanceRoute
@@ -189,6 +198,7 @@ export interface FileRouteTypes {
     | '/avatares'
     | '/calendario'
     | '/configuracoes'
+    | '/cortes'
     | '/ideias'
     | '/packs'
     | '/performance'
@@ -208,6 +218,7 @@ export interface FileRouteTypes {
     | '/avatares'
     | '/calendario'
     | '/configuracoes'
+    | '/cortes'
     | '/packs'
     | '/performance'
     | '/'
@@ -225,6 +236,7 @@ export interface FileRouteTypes {
     | '/_app/avatares'
     | '/_app/calendario'
     | '/_app/configuracoes'
+    | '/_app/cortes'
     | '/_app/ideias'
     | '/_app/packs'
     | '/_app/performance'
@@ -281,6 +293,13 @@ declare module '@tanstack/react-router' {
       path: '/configuracoes'
       fullPath: '/configuracoes'
       preLoaderRoute: typeof AppConfiguracoesRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/cortes': {
+      id: '/_app/cortes'
+      path: '/cortes'
+      fullPath: '/cortes'
+      preLoaderRoute: typeof AppCortesRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/ideias': {
@@ -444,6 +463,7 @@ interface AppRouteChildren {
   AppAvataresRoute: typeof AppAvataresRoute
   AppCalendarioRoute: typeof AppCalendarioRoute
   AppConfiguracoesRoute: typeof AppConfiguracoesRoute
+  AppCortesRoute: typeof AppCortesRoute
   AppIdeiasRoute: typeof AppIdeiasRouteWithChildren
   AppPacksRoute: typeof AppPacksRoute
   AppPerformanceRoute: typeof AppPerformanceRoute
@@ -457,6 +477,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppAvataresRoute: AppAvataresRoute,
   AppCalendarioRoute: AppCalendarioRoute,
   AppConfiguracoesRoute: AppConfiguracoesRoute,
+  AppCortesRoute: AppCortesRoute,
   AppIdeiasRoute: AppIdeiasRouteWithChildren,
   AppPacksRoute: AppPacksRoute,
   AppPerformanceRoute: AppPerformanceRoute,

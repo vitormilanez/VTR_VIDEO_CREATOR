@@ -11,6 +11,7 @@ import {
   Settings,
   PanelsTopLeft,
   ScanFace,
+  Scissors,
 } from "lucide-react";
 import {
   Sidebar,
@@ -33,6 +34,7 @@ const nav: Array<{ title: string; url: string; icon: typeof LayoutDashboard; exa
   { title: "Ideias", url: "/ideias", icon: Lightbulb },
   { title: "Roteiros", url: "/roteiros", icon: FileText },
   { title: "Producao de videos", url: "/producao", icon: Film },
+  { title: "Cortes", url: "/cortes", icon: Scissors },
   { title: "Avatares", url: "/avatares", icon: ScanFace },
   { title: "Pack de conteudo", url: "/packs", icon: PanelsTopLeft },
   { title: "Calendario", url: "/calendario", icon: CalendarDays },

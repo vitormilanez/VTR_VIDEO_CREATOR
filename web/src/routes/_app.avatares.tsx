@@ -22,6 +22,7 @@ import {
   UserRound,
   UsersRound,
   Video,
+  Volume2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
@@ -69,6 +70,7 @@ export const Route = createFileRoute("/_app/avatares")({
 });
 
 type CreationType = "photo" | "digital_twin" | "prompt";
+type VoiceSource = "upload" | "video";
 type StudioMode = "single" | "dialogue";
 type Scene = { id: string; speaker: "a" | "b"; text: string };
 
@@ -348,6 +350,7 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
   const [mediaFiles, setMediaFiles] = useState<File[]>([]);
   const [voiceFile, setVoiceFile] = useState<File | null>(null);
   const [cloneVoice, setCloneVoice] = useState(true);
+  const [voiceSource, setVoiceSource] = useState<VoiceSource>("upload");
   const [consentAccepted, setConsentAccepted] = useState(false);
   const [creating, setCreating] = useState(false);
 
@@ -355,7 +358,7 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
     creationType === "digital_twin" ? "video/mp4,video/webm" : "image/jpeg,image/png";
   const mediaHint =
     creationType === "digital_twin"
-      ? "Vídeo MP4 ou WebM, com boa luz e áudio claro, até 32 MB."
+      ? "Vídeo MP4 ou WebM, com boa luz e áudio claro, até 30 MB."
       : creationType === "prompt"
         ? "Até 3 fotos de referência em JPG ou PNG, até 32 MB cada."
         : "Uma foto frontal em JPG ou PNG, com boa luz, até 32 MB.";
@@ -374,7 +377,11 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
         appearancePrompt,
         media: await Promise.all(mediaFiles.map(fileToMedia)),
         cloneVoice,
-        voiceMedia: cloneVoice && voiceFile ? await fileToMedia(voiceFile) : undefined,
+        voiceSource: cloneVoice ? voiceSource : undefined,
+        voiceMedia:
+          cloneVoice && voiceSource === "upload" && voiceFile
+            ? await fileToMedia(voiceFile)
+            : undefined,
         consentAccepted,
       };
       const job = await createHeyGenAvatar(payload);
@@ -395,7 +402,9 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
     name.trim().length >= 2 &&
     consentAccepted &&
     (creationType === "prompt" ? appearancePrompt.trim().length >= 12 : mediaFiles.length > 0) &&
-    (!cloneVoice || Boolean(voiceFile));
+    (!cloneVoice ||
+      (voiceSource === "video" && creationType === "digital_twin") ||
+      Boolean(voiceFile));
 
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_320px]">
@@ -415,6 +424,7 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
                 onClick={() => {
                   setCreationType(option.value);
                   setMediaFiles([]);
+                  setVoiceSource(option.value === "digital_twin" ? "video" : "upload");
                 }}
                 className={cn(
                   "cursor-pointer rounded-md border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -489,16 +499,76 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
             <Switch checked={cloneVoice} onCheckedChange={setCloneVoice} aria-label="Clonar voz" />
           </div>
           {cloneVoice ? (
-            <FilePicker
-              id="voice-media"
-              label="Amostra de voz"
-              hint="MP3 ou WAV, voz limpa e sem música, até 32 MB."
-              accept="audio/mpeg,audio/wav"
-              files={voiceFile ? [voiceFile] : []}
-              onChange={(files) => setVoiceFile(files?.[0] || null)}
-              onClear={() => setVoiceFile(null)}
-              icon={Mic2}
-            />
+            <div className="space-y-3">
+              {creationType === "digital_twin" ? (
+                <div
+                  className="grid grid-cols-2 gap-2"
+                  role="radiogroup"
+                  aria-label="Origem da voz"
+                >
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={voiceSource === "video"}
+                    onClick={() => setVoiceSource("video")}
+                    className={cn(
+                      "flex min-h-12 items-center gap-2 rounded-md border px-3 text-left text-sm transition-colors",
+                      voiceSource === "video"
+                        ? "border-primary bg-primary/5 text-foreground"
+                        : "text-muted-foreground hover:bg-muted/60",
+                    )}
+                  >
+                    <Volume2 className="h-4 w-4 shrink-0" />
+                    <span>
+                      <span className="block font-medium">Voz do vídeo</span>
+                      <span className="block text-xs">Mais simples</span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={voiceSource === "upload"}
+                    onClick={() => setVoiceSource("upload")}
+                    className={cn(
+                      "flex min-h-12 items-center gap-2 rounded-md border px-3 text-left text-sm transition-colors",
+                      voiceSource === "upload"
+                        ? "border-primary bg-primary/5 text-foreground"
+                        : "text-muted-foreground hover:bg-muted/60",
+                    )}
+                  >
+                    <Mic2 className="h-4 w-4 shrink-0" />
+                    <span>
+                      <span className="block font-medium">Outro áudio</span>
+                      <span className="block text-xs">MP3 ou WAV</span>
+                    </span>
+                  </button>
+                </div>
+              ) : null}
+
+              {voiceSource === "video" && creationType === "digital_twin" ? (
+                <div className="flex items-start gap-3 rounded-md border border-dashed p-4">
+                  <Video className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                  <div>
+                    <p className="text-sm font-medium">Usar o áudio do vídeo selecionado</p>
+                    <p className="mt-1 text-xs leading-4 text-muted-foreground">
+                      O HeyGen criará a voz junto com o Digital twin. Prefira um trecho sem música,
+                      ruído ou outras pessoas falando.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <FilePicker
+                  id="voice-media"
+                  label="Amostra de voz"
+                  hint="MP3 ou WAV, voz limpa e sem música, até 32 MB."
+                  accept="audio/mpeg,audio/wav"
+                  files={voiceFile ? [voiceFile] : []}
+                  onChange={(files) => setVoiceFile(files?.[0] || null)}
+                  onClear={() => setVoiceFile(null)}
+                  icon={Mic2}
+                />
+              )}
+            </div>
           ) : (
             <div className="rounded-md border border-dashed p-4 text-xs text-muted-foreground">
               A voz será escolhida na produção do vídeo.
@@ -545,7 +615,13 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
             />
             <SummaryRow
               label="Voz"
-              value={cloneVoice ? voiceFile?.name || "Pendente" : "Escolher depois"}
+              value={
+                !cloneVoice
+                  ? "Escolher depois"
+                  : voiceSource === "video" && creationType === "digital_twin"
+                    ? "Áudio do vídeo"
+                    : voiceFile?.name || "Pendente"
+              }
             />
           </div>
           <ConfirmAction
