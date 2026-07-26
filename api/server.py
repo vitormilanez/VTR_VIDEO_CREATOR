@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT = ROOT / "data" / "sheets_snapshot.json"
 VIDEO_JOBS = ROOT / "data" / "video_jobs.json"
 AVATAR_JOBS = ROOT / "data" / "avatar_jobs.json"
+APP_SETTINGS = ROOT / "data" / "app_settings.json"
 OPERATIONAL_DB = ROOT / "data" / "operations.db"
 CUT_UPLOADS = ROOT / "data" / "cut_uploads"
 CUT_OUTPUTS = ROOT / "data" / "cuts"
@@ -537,9 +538,102 @@ DEFAULT_SETTINGS = {
         "cura", "milagre", "garantido", "sem esforco",
         "resultado certo", "emagrece rapido", "prometo",
     ],
+    "radar": {
+        "termosExtras": ["atividade fisica", "sono", "compulsao alimentar"],
+        "periodo": "semana",
+        "limitePorBusca": 20,
+        "potencialMinimo": 1,
+    },
     # Integracoes reais existem no backend, mas so ligar quando testadas.
     "integracoes": {"heygen": False, "meta": False, "googleSheets": True},
 }
+
+
+class RadarSettingsIn(BaseModel):
+    termosExtras: list[str] = Field(default_factory=list, max_length=30)
+    periodo: Literal["dia", "semana", "quinzena", "mes"] = "semana"
+    limitePorBusca: int = Field(default=20, ge=1, le=50)
+    potencialMinimo: int = Field(default=1, ge=1, le=10)
+
+
+class IntegrationsSettingsIn(BaseModel):
+    heygen: bool = False
+    meta: bool = False
+    googleSheets: bool = True
+
+
+class AppSettingsIn(BaseModel):
+    temasPrioritarios: list[str] = Field(default_factory=list, max_length=80)
+    palavrasProibidas: list[str] = Field(default_factory=list, max_length=120)
+    radar: RadarSettingsIn = Field(default_factory=RadarSettingsIn)
+    integracoes: IntegrationsSettingsIn = Field(default_factory=IntegrationsSettingsIn)
+
+
+def _clean_string_list(values: list[str], *, limit: int = 80) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = re.sub(r"\s+", " ", str(value)).strip()
+        if not item:
+            continue
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item[:120])
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _merge_settings(raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    settings = json.loads(json.dumps(DEFAULT_SETTINGS))
+    if not isinstance(raw, dict):
+        return settings
+    settings["temasPrioritarios"] = _clean_string_list(
+        raw.get("temasPrioritarios") or settings["temasPrioritarios"],
+        limit=80,
+    )
+    settings["palavrasProibidas"] = _clean_string_list(
+        raw.get("palavrasProibidas") or settings["palavrasProibidas"],
+        limit=120,
+    )
+    radar = raw.get("radar") if isinstance(raw.get("radar"), dict) else {}
+    settings["radar"] = {
+        **settings["radar"],
+        **{key: radar[key] for key in ["periodo", "limitePorBusca", "potencialMinimo"] if key in radar},
+    }
+    settings["radar"]["termosExtras"] = _clean_string_list(
+        radar.get("termosExtras") or settings["radar"]["termosExtras"],
+        limit=30,
+    )
+    integrations = raw.get("integracoes") if isinstance(raw.get("integracoes"), dict) else {}
+    settings["integracoes"] = {
+        "heygen": bool(integrations.get("heygen", settings["integracoes"]["heygen"])),
+        "meta": bool(integrations.get("meta", settings["integracoes"]["meta"])),
+        "googleSheets": bool(
+            integrations.get("googleSheets", settings["integracoes"]["googleSheets"])
+        ),
+    }
+    return settings
+
+
+def _load_settings() -> dict[str, Any]:
+    if not APP_SETTINGS.exists():
+        return _merge_settings()
+    try:
+        return _merge_settings(json.loads(APP_SETTINGS.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return _merge_settings()
+
+
+def _save_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    APP_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    merged = _merge_settings(settings)
+    temporary = APP_SETTINGS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(APP_SETTINGS)
+    return merged
 
 
 HEYGEN_CATALOG = {
@@ -1024,9 +1118,15 @@ def state() -> dict:
         "videoJobs": _load_video_jobs(),
         "calendarPosts": map_calendar(sheets.get("calendario", [])),
         "performance": map_performance(sheets.get("performance", [])),
-        "settings": DEFAULT_SETTINGS,
+        "settings": _load_settings(),
         "updatedAt": snap.get("updated_at"),
     }
+
+
+@app.put("/api/settings")
+def save_settings(payload: AppSettingsIn) -> dict:
+    settings = payload.model_dump()
+    return {"ok": True, "settings": _save_settings(settings), "updatedAt": _now()}
 
 
 # --------------------------------------------------------------------------- #
@@ -1750,10 +1850,24 @@ def hunt_trends() -> dict:
     Requer .env e .google_sheets_token.json na raiz para os passos 2 e 3.
     """
     antes = len(map_trends(_load_snapshot().get("sheets", {}).get("radar", [])))
+    settings = _load_settings()
+    radar_settings = settings.get("radar", {})
+    query_terms = _clean_string_list(
+        [
+            *(settings.get("temasPrioritarios") or []),
+            *(radar_settings.get("termosExtras") or []),
+        ],
+        limit=80,
+    )
+    trend_args = [str(ROOT / "trend_hunter" / "trend_hunter.py")]
+    for term in query_terms:
+        trend_args.extend(["--query", term])
+    trend_args.extend(["--period", str(radar_settings.get("periodo") or "semana")])
+    sync_limit = int(radar_settings.get("limitePorBusca") or 20)
 
     steps = [
-        ("trend_hunter", [str(ROOT / "trend_hunter" / "trend_hunter.py")], 180),
-        ("sync_sheets", [str(ROOT / "sync_trends_to_sheets.py"), "--limit", "20"], 120),
+        ("trend_hunter", trend_args, 180),
+        ("sync_sheets", [str(ROOT / "sync_trends_to_sheets.py"), "--limit", str(sync_limit)], 120),
         ("refresh_snapshot", [str(ROOT / "sync_sheets_snapshot.py")], 120),
     ]
     log: list[str] = []
@@ -1776,7 +1890,12 @@ def hunt_trends() -> dict:
             )
 
     depois = len(map_trends(_load_snapshot().get("sheets", {}).get("radar", [])))
-    return {"ok": True, "added": max(depois - antes, 0), "log": "\n\n".join(log)[-1500:]}
+    return {
+        "ok": True,
+        "added": max(depois - antes, 0),
+        "queries": query_terms,
+        "log": "\n\n".join(log)[-1500:],
+    }
 
 
 # --------------------------------------------------------------------------- #

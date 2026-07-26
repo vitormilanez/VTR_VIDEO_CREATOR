@@ -10,6 +10,7 @@ metabólica.
 from __future__ import annotations
 
 import csv
+import argparse
 import json
 import os
 import re
@@ -51,6 +52,12 @@ SEARCH_QUERIES = [
     "resistência insulínica emagrecimento",
 ]
 
+QUERY_CONTEXTS = [
+    "obesidade emagrecimento",
+    "saúde metabólica",
+    "medicina Brasil",
+]
+
 KEYWORDS = {
     "glp-1": 18,
     "glp": 12,
@@ -73,6 +80,42 @@ KEYWORDS = {
     "apetite": 6,
     "saciedade": 6,
 }
+
+
+def normalize_keyword(value: str) -> str:
+    return normalize_text(value).replace("saude", "saúde")
+
+
+def build_keywords(custom_terms: list[str]) -> dict[str, int]:
+    keywords = dict(KEYWORDS)
+    for term in custom_terms:
+        normalized = normalize_text(term)
+        if len(normalized) < 3:
+            continue
+        keywords.setdefault(normalized, 12)
+        keywords.setdefault(apply_portuguese_br_accents(normalized), 12)
+    return keywords
+
+
+def build_search_queries(custom_terms: list[str]) -> list[str]:
+    if not custom_terms:
+        return SEARCH_QUERIES
+    queries: list[str] = []
+    seen: set[str] = set()
+    for term in custom_terms:
+        cleaned = re.sub(r"\s+", " ", term).strip()
+        if len(cleaned) < 3:
+            continue
+        candidates = [cleaned]
+        if not any(word in normalize_text(cleaned) for word in ["obesidade", "emagrec", "metabol"]):
+            candidates.extend(f"{cleaned} {context}" for context in QUERY_CONTEXTS)
+        for query in candidates:
+            key = normalize_text(query)
+            if key in seen:
+                continue
+            seen.add(key)
+            queries.append(query)
+    return queries or SEARCH_QUERIES
 
 SOURCE_WEIGHT = {
     "Google News RSS": 12,
@@ -118,14 +161,20 @@ def extract_date(entry: dict) -> str:
         return ""
 
 
-def found_terms(text: str) -> list[str]:
+def found_terms(text: str, keywords: dict[str, int]) -> list[str]:
     normalized = normalize_text(text)
-    return [term for term in KEYWORDS if term in normalized]
+    return [term for term in keywords if term in normalized]
 
 
-def score_item(text: str, source: str, period: str, term_hits: Iterable[str]) -> int:
+def score_item(
+    text: str,
+    source: str,
+    period: str,
+    term_hits: Iterable[str],
+    keywords: dict[str, int],
+) -> int:
     score = SOURCE_WEIGHT.get(source, 0)
-    score += sum(KEYWORDS[term] for term in term_hits)
+    score += sum(keywords[term] for term in term_hits)
 
     if period == "dia":
         score += 12
@@ -170,25 +219,32 @@ def compliance_note(title: str) -> str:
     return apply_portuguese_br_accents(" ".join(notes))
 
 
-def fetch_google_news() -> list[TrendItem]:
+def fetch_google_news(
+    *,
+    queries: list[str],
+    periods: list[str],
+    keywords: dict[str, int],
+    per_query: int,
+) -> list[TrendItem]:
     items: list[TrendItem] = []
 
-    for period, period_filter in PERIODS.items():
-        for query in SEARCH_QUERIES:
+    for period in periods:
+        period_filter = PERIODS[period]
+        for query in queries:
             url = google_news_rss_url(query, period_filter)
             feed = feedparser.parse(url)
 
-            for entry in feed.entries[:8]:
+            for entry in feed.entries[:per_query]:
                 title = entry.get("title", "").strip()
                 link = entry.get("link", "").strip()
                 summary = entry.get("summary", "")
                 text = f"{title} {summary}"
-                terms = found_terms(text)
+                terms = found_terms(text, keywords)
 
                 if not title or not terms:
                     continue
 
-                score = score_item(text, "Google News RSS", period, terms)
+                score = score_item(text, "Google News RSS", period, terms, keywords)
                 items.append(
                     TrendItem(
                         periodo=period,
@@ -206,7 +262,7 @@ def fetch_google_news() -> list[TrendItem]:
     return items
 
 
-def fetch_serpapi_trends() -> list[TrendItem]:
+def fetch_serpapi_trends(*, queries: list[str], keywords: dict[str, int]) -> list[TrendItem]:
     api_key = os.getenv("SERPAPI_KEY")
     if not api_key:
         return []
@@ -214,7 +270,7 @@ def fetch_serpapi_trends() -> list[TrendItem]:
     items: list[TrendItem] = []
     endpoint = "https://serpapi.com/search.json"
 
-    for query in SEARCH_QUERIES:
+    for query in queries:
         params = {
             "engine": "google_trends",
             "q": query,
@@ -230,10 +286,16 @@ def fetch_serpapi_trends() -> list[TrendItem]:
         rising = related.get("rising", []) if isinstance(related, dict) else []
         for row in rising[:10]:
             trend = row.get("query") or row.get("title") or query
-            terms = found_terms(f"{query} {trend}")
+            terms = found_terms(f"{query} {trend}", keywords)
             if not terms:
-                terms = found_terms(query)
-            score = score_item(f"{query} {trend}", "SerpAPI Google Trends", "semana", terms)
+                terms = found_terms(query, keywords)
+            score = score_item(
+                f"{query} {trend}",
+                "SerpAPI Google Trends",
+                "semana",
+                terms,
+                keywords,
+            )
             value = row.get("value") or row.get("extracted_value")
             if isinstance(value, int):
                 score += min(value // 100, 20)
@@ -280,15 +342,55 @@ def write_json(items: list[TrendItem], path: Path) -> None:
         json.dump([asdict(item) for item in items], file, ensure_ascii=False, indent=2)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Busca tendencias para o AI Video Creator.")
+    parser.add_argument(
+        "--query",
+        action="append",
+        default=[],
+        help="Termo prioritario. Pode ser usado varias vezes.",
+    )
+    parser.add_argument(
+        "--period",
+        choices=list(PERIODS),
+        default="semana",
+        help="Janela principal da busca.",
+    )
+    parser.add_argument(
+        "--per-query",
+        type=int,
+        default=8,
+        help="Itens lidos por consulta no Google News.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    custom_terms = [term.strip() for term in args.query if term.strip()]
+    queries = build_search_queries(custom_terms)
+    keywords = build_keywords(custom_terms)
+    periods = [args.period]
+    if args.period != "dia":
+        periods.insert(0, "dia")
 
     print("Coletando tendencias no Google News RSS...")
-    items = fetch_google_news()
+    print(f"Consultas ativas: {len(queries)}")
+    for query in queries[:12]:
+        print(f"- {query}")
+    if len(queries) > 12:
+        print(f"... +{len(queries) - 12} consultas")
+    items = fetch_google_news(
+        queries=queries,
+        periods=periods,
+        keywords=keywords,
+        per_query=max(3, min(args.per_query, 15)),
+    )
 
     if os.getenv("SERPAPI_KEY"):
         print("SERPAPI_KEY encontrada. Coletando Google Trends via SerpAPI...")
-        items.extend(fetch_serpapi_trends())
+        items.extend(fetch_serpapi_trends(queries=queries, keywords=keywords))
     else:
         print("SERPAPI_KEY nao encontrada. Pulando Google Trends opcional.")
 

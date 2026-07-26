@@ -14,6 +14,7 @@ client_secret*.json
 data/sheets_snapshot.json
 data/video_jobs.json
 data/avatar_jobs.json
+data/app_settings.json
 data/operations.db
 data/operations.db-shm
 data/operations.db-wal

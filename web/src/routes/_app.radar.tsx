@@ -10,6 +10,7 @@ import { ConfirmAction } from "@/components/confirm-action";
 import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
 import { appendIdea, fetchState, huntTrends, setSheetStatus } from "@/lib/api/local";
+import { defaultSettings } from "@/lib/mock-data";
 import type { Idea } from "@/lib/mock-data";
 import type { Prioridade, ThemeFamily, Trend, TrendStatus } from "@/lib/mock-data";
 import {
@@ -46,7 +47,16 @@ import {
 } from "@/components/ui/sheet";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ExternalLink, Loader2, Plus, Radar, RefreshCcw, Sparkles, Trash2 } from "lucide-react";
+import {
+  ArrowDownUp,
+  ExternalLink,
+  Loader2,
+  Plus,
+  Radar,
+  RefreshCcw,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/radar")({
@@ -83,11 +93,17 @@ export function RadarPage() {
   const addIdea = useStore((s) => s.addIdea);
   const updateTrend = useStore((s) => s.updateTrend);
   const hydrate = useStore((s) => s.hydrate);
+  const radarSettings = useStore((s) => s.settings.radar ?? defaultSettings.radar);
   const navigate = useNavigate();
 
   const [familia, setFamilia] = useState<string>("todas");
   const [status, setStatus] = useState<string>("todos");
   const [prioridade, setPrioridade] = useState<string>("todas");
+  const [fonte, setFonte] = useState<string>("todas");
+  const [potencialMinimo, setPotencialMinimo] = useState<string>(
+    String(radarSettings.potencialMinimo),
+  );
+  const [ordenacao, setOrdenacao] = useState<string>("recentes");
   const [busca, setBusca] = useState("");
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -97,9 +113,11 @@ export function RadarPage() {
     if (familia !== "todas" && t.familia !== familia) return false;
     if (status !== "todos" && t.status !== status) return false;
     if (prioridade !== "todas" && t.prioridade !== prioridade) return false;
+    if (fonte !== "todas" && fonteLabel(t.fonte) !== fonte) return false;
+    if ((t.potencial || 0) < Number(potencialMinimo || 0)) return false;
     if (busca) {
       const q = busca.toLowerCase();
-      const alvo = [t.titulo, t.subtema, t.sinal, t.dorPublico]
+      const alvo = [t.titulo, t.subtema, t.sinal, t.dorPublico, t.fonte, t.notas]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -108,10 +126,15 @@ export function RadarPage() {
     return true;
   });
 
-  // Tendencias mais novas no topo (por data de captura).
-  const ordered = [...filtered].sort(
-    (a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime(),
-  );
+  const fontes = Array.from(
+    new Set(trends.map((trend) => fonteLabel(trend.fonte)).filter(Boolean)),
+  ).sort();
+  const ordered = [...filtered].sort((a, b) => {
+    if (ordenacao === "potencial") return (b.potencial || 0) - (a.potencial || 0);
+    if (ordenacao === "prioridade")
+      return priorityWeight(b.prioridade) - priorityWeight(a.prioridade);
+    return new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime();
+  });
 
   const statusCounts: Record<TrendStatus, number> = {
     novo: 0,
@@ -171,9 +194,13 @@ export function RadarPage() {
       const res = await huntTrends();
       const data = await fetchState();
       hydrate(data);
-      toast.success(res.added ? `${res.added} novas tendencias capturadas.` : "Radar atualizado.", {
-        id: aviso,
-      });
+      const queryInfo = res.queries?.length ? ` ${res.queries.length} termos usados.` : "";
+      toast.success(
+        res.added
+          ? `${res.added} novas tendencias capturadas.${queryInfo}`
+          : `Radar atualizado.${queryInfo}`,
+        { id: aviso },
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel buscar tendencias.", {
         id: aviso,
@@ -263,6 +290,41 @@ export function RadarPage() {
                 {prioridadeLabel[p].label}
               </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+        <Select value={fonte} onValueChange={setFonte}>
+          <SelectTrigger className="h-8 w-40">
+            <SelectValue placeholder="Fonte" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="todas">Todas as fontes</SelectItem>
+            {fontes.map((item) => (
+              <SelectItem key={item} value={item}>
+                {item}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={potencialMinimo} onValueChange={setPotencialMinimo}>
+          <SelectTrigger className="h-8 w-36">
+            <SelectValue placeholder="Potencial" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="0">Qualquer potencial</SelectItem>
+            <SelectItem value="5">5+ potencial</SelectItem>
+            <SelectItem value="7">7+ potencial</SelectItem>
+            <SelectItem value="9">9+ potencial</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={ordenacao} onValueChange={setOrdenacao}>
+          <SelectTrigger className="h-8 w-40">
+            <ArrowDownUp className="mr-1 h-3.5 w-3.5" />
+            <SelectValue placeholder="Ordenar" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="recentes">Mais recentes</SelectItem>
+            <SelectItem value="potencial">Maior potencial</SelectItem>
+            <SelectItem value="prioridade">Maior prioridade</SelectItem>
           </SelectContent>
         </Select>
       </DataToolbar>
@@ -479,6 +541,10 @@ function fonteLabel(fonte: string): string {
     }
   }
   return fonte;
+}
+
+function priorityWeight(priority: Prioridade): number {
+  return priority === "alta" ? 3 : priority === "media" ? 2 : 1;
 }
 
 function PotencialBadge({ valor }: { valor?: number }) {

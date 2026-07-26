@@ -129,6 +129,12 @@ export interface PerformanceMetric {
 export interface AppSettings {
   temasPrioritarios: string[];
   palavrasProibidas: string[];
+  radar: {
+    termosExtras: string[];
+    periodo: "dia" | "semana" | "quinzena" | "mes";
+    limitePorBusca: number;
+    potencialMinimo: number;
+  };
   integracoes: {
     heygen: boolean;
     meta: boolean;
@@ -157,5 +163,11 @@ export const defaultSettings: AppSettings = {
     "emagrece rapido",
     "prometo",
   ],
+  radar: {
+    termosExtras: ["atividade fisica", "sono", "compulsao alimentar"],
+    periodo: "semana",
+    limitePorBusca: 20,
+    potencialMinimo: 1,
+  },
   integracoes: { heygen: false, meta: false, googleSheets: true },
 };

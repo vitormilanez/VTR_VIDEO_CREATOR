@@ -1,13 +1,23 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { useStore } from "@/lib/store";
+import { saveSettings } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
+import { Loader2, Save } from "lucide-react";
+import { defaultSettings } from "@/lib/mock-data";
 
 export const Route = createFileRoute("/_app/configuracoes")({
   head: () => ({
@@ -32,36 +42,69 @@ function ConfiguracoesPage() {
   const settings = useStore((s) => s.settings);
   const setSettings = useStore((s) => s.setSettings);
   const resetSeed = useStore((s) => s.resetSeed);
+  const currentRadar = settings.radar ?? defaultSettings.radar;
+  const currentIntegrations = settings.integracoes ?? defaultSettings.integracoes;
 
   const [temas, setTemas] = useState(settings.temasPrioritarios.join("\n"));
   const [palavras, setPalavras] = useState(settings.palavrasProibidas.join("\n"));
+  const [termosExtras, setTermosExtras] = useState(currentRadar.termosExtras.join("\n"));
+  const [periodo, setPeriodo] = useState(currentRadar.periodo);
+  const [limite, setLimite] = useState(String(currentRadar.limitePorBusca));
+  const [potencialMinimo, setPotencialMinimo] = useState(String(currentRadar.potencialMinimo));
+  const [integracoes, setIntegracoes] = useState(currentIntegrations);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setTemas(settings.temasPrioritarios.join("\n"));
+    setPalavras(settings.palavrasProibidas.join("\n"));
+    const nextRadar = settings.radar ?? defaultSettings.radar;
+    setTermosExtras(nextRadar.termosExtras.join("\n"));
+    setPeriodo(nextRadar.periodo);
+    setLimite(String(nextRadar.limitePorBusca));
+    setPotencialMinimo(String(nextRadar.potencialMinimo));
+    setIntegracoes(settings.integracoes ?? defaultSettings.integracoes);
+  }, [settings]);
+
+  async function salvar() {
+    const next = {
+      ...settings,
+      temasPrioritarios: lines(temas),
+      palavrasProibidas: lines(palavras),
+      radar: {
+        termosExtras: lines(termosExtras),
+        periodo,
+        limitePorBusca: clampNumber(limite, 1, 50, 20),
+        potencialMinimo: clampNumber(potencialMinimo, 1, 10, 1),
+      },
+      integracoes,
+    };
+    setSaving(true);
+    try {
+      const saved = await saveSettings(next);
+      setSettings(saved);
+      toast.success("Configurações salvas no backend.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível salvar.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <AppShell
       title="Configuracoes"
       actions={
-        <Button
-          size="sm"
-          onClick={() => {
-            setSettings({
-              ...settings,
-              temasPrioritarios: temas
-                .split("\n")
-                .map((s) => s.trim())
-                .filter(Boolean),
-              palavrasProibidas: palavras
-                .split("\n")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            });
-            toast.success("Configuracoes salvas.");
-          }}
-        >
-          Salvar
+        <Button size="sm" onClick={() => void salvar()} disabled={saving}>
+          {saving ? (
+            <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+          ) : (
+            <Save className="mr-1 h-4 w-4" />
+          )}
+          {saving ? "Salvando..." : "Salvar"}
         </Button>
       }
     >
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 xl:grid-cols-2">
         <section className="rounded-md border bg-card p-4">
           <h2 className="mb-3 text-sm font-semibold">Editorial</h2>
           <div className="space-y-3">
@@ -80,40 +123,90 @@ function ConfiguracoesPage() {
         </section>
 
         <section className="rounded-md border bg-card p-4">
+          <h2 className="mb-3 text-sm font-semibold">Radar de tendências</h2>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-xs">Termos extras do buscador (um por linha)</Label>
+              <Textarea
+                rows={6}
+                value={termosExtras}
+                onChange={(e) => setTermosExtras(e.target.value)}
+                placeholder={"atividade física\nsono\ncompulsão alimentar"}
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                A busca usa temas prioritários + termos extras para montar consultas no Google News.
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <Label className="text-xs">Janela</Label>
+                <Select
+                  value={periodo}
+                  onValueChange={(value) => setPeriodo(value as typeof periodo)}
+                >
+                  <SelectTrigger className="mt-1.5">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="dia">Último dia</SelectItem>
+                    <SelectItem value="semana">Última semana</SelectItem>
+                    <SelectItem value="quinzena">Últimos 15 dias</SelectItem>
+                    <SelectItem value="mes">Últimos 30 dias</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label htmlFor="radar-limit" className="text-xs">
+                  Salvar até
+                </Label>
+                <Input
+                  id="radar-limit"
+                  className="mt-1.5"
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={limite}
+                  onChange={(event) => setLimite(event.target.value)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="radar-min" className="text-xs">
+                  Potencial mínimo
+                </Label>
+                <Input
+                  id="radar-min"
+                  className="mt-1.5"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={potencialMinimo}
+                  onChange={(event) => setPotencialMinimo(event.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-md border bg-card p-4">
           <h2 className="mb-3 text-sm font-semibold">Integracoes</h2>
           <div className="space-y-3">
             <IntegrationRow
               label="HeyGen (video)"
               desc="Necessario para producao de videos."
-              value={settings.integracoes.heygen}
-              onChange={(v) =>
-                setSettings({
-                  ...settings,
-                  integracoes: { ...settings.integracoes, heygen: v },
-                })
-              }
+              value={integracoes.heygen}
+              onChange={(v) => setIntegracoes((current) => ({ ...current, heygen: v }))}
             />
             <IntegrationRow
               label="Meta Graph API"
               desc="Necessario para metricas de Instagram/Reels."
-              value={settings.integracoes.meta}
-              onChange={(v) =>
-                setSettings({
-                  ...settings,
-                  integracoes: { ...settings.integracoes, meta: v },
-                })
-              }
+              value={integracoes.meta}
+              onChange={(v) => setIntegracoes((current) => ({ ...current, meta: v }))}
             />
             <IntegrationRow
               label="Google Sheets"
               desc="Import/export opcional da esteira editorial."
-              value={settings.integracoes.googleSheets}
-              onChange={(v) =>
-                setSettings({
-                  ...settings,
-                  integracoes: { ...settings.integracoes, googleSheets: v },
-                })
-              }
+              value={integracoes.googleSheets}
+              onChange={(v) => setIntegracoes((current) => ({ ...current, googleSheets: v }))}
             />
           </div>
           <p className="mt-3 text-[11px] text-muted-foreground">
@@ -122,7 +215,7 @@ function ConfiguracoesPage() {
           </p>
         </section>
 
-        <section className="rounded-md border bg-card p-4 lg:col-span-2">
+        <section className="rounded-md border bg-card p-4">
           <h2 className="mb-2 text-sm font-semibold">Dados de exemplo</h2>
           <p className="mb-3 text-xs text-muted-foreground">
             Restaurar o estado inicial (uma tendencia, uma ideia, um roteiro aguardando validacao,
@@ -142,6 +235,23 @@ function ConfiguracoesPage() {
       </div>
     </AppShell>
   );
+}
+
+function lines(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function clampNumber(value: string, min: number, max: number, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(parsed)));
 }
 
 function IntegrationRow({

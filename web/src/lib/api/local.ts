@@ -1,7 +1,7 @@
 // Cliente da API local (FastAPI em api/server.py) que serve os dados reais
 // do Google Sheets. Base configuravel via VITE_API_URL.
 import type { HydratePayload } from "../store";
-import type { CalendarPost, Idea, Script } from "../mock-data";
+import type { AppSettings, CalendarPost, Idea, Script } from "../mock-data";
 import type { VideoJob } from "../mock-data";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
@@ -168,7 +168,15 @@ export async function exportPack(
   };
 }
 
-export async function huntTrends(): Promise<{ ok: boolean; added?: number }> {
+export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
+  const response = await requestJson<{ ok: boolean; settings: AppSettings; updatedAt: string }>(
+    "/api/settings",
+    { method: "PUT", body: JSON.stringify(settings) },
+  );
+  return response.settings;
+}
+
+export async function huntTrends(): Promise<{ ok: boolean; added?: number; queries?: string[] }> {
   const res = await fetch(`${BASE}/api/trends/hunt`, { method: "POST" });
   if (!res.ok) {
     let detail = `API /api/trends/hunt -> ${res.status}`;
@@ -180,7 +188,7 @@ export async function huntTrends(): Promise<{ ok: boolean; added?: number }> {
     }
     throw new Error(detail);
   }
-  return (await res.json()) as { ok: boolean; added?: number };
+  return (await res.json()) as { ok: boolean; added?: number; queries?: string[] };
 }
 
 export interface HeyGenCatalog {
