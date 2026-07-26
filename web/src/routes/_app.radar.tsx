@@ -7,11 +7,11 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
+import { buildIdeaFromTrend } from "@/lib/idea-builder";
 import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
 import { appendIdea, fetchState, huntTrends, setSheetStatus } from "@/lib/api/local";
 import { defaultSettings } from "@/lib/mock-data";
-import type { Idea } from "@/lib/mock-data";
 import type { Prioridade, ThemeFamily, Trend, TrendStatus } from "@/lib/mock-data";
 import {
   Table,
@@ -22,6 +22,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -89,6 +90,7 @@ function RadarLayout() {
 
 export function RadarPage() {
   const trends = useStore((s) => s.trends);
+  const ideas = useStore((s) => s.ideas);
   const addTrend = useStore((s) => s.addTrend);
   const addIdea = useStore((s) => s.addIdea);
   const updateTrend = useStore((s) => s.updateTrend);
@@ -143,23 +145,23 @@ export function RadarPage() {
   };
   trends.forEach((t) => (statusCounts[t.status] += 1));
 
+  function ideaForTrend(trend: Trend) {
+    return ideas
+      .filter((idea) => idea.trendId === trend.id)
+      .sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime())[0];
+  }
+
+  function trendHasIdea(trend: Trend) {
+    return Boolean(ideaForTrend(trend)) || trend.status === "em_analise";
+  }
+
   async function gerarIdeia(t: Trend) {
-    const idea: Idea = {
-      id: genId("i"),
-      trendId: t.id,
-      titulo: `Ideia a partir de: ${t.titulo}`,
-      familia: t.familia,
-      hook: "Hook educativo sugerido — revise antes de aprovar.",
-      angulo:
-        "Angulo educativo: contextualizar o tema sem prescrever, reforcando avaliacao individual.",
-      tipo: "Reel",
-      publicoDor: t.dorPublico,
-      cta: "Procure avaliacao individualizada com profissional de saude.",
-      observacaoCompliance: "Rascunho gerado localmente. Revisar linguagem antes de virar roteiro.",
-      prioridade: t.prioridade,
-      status: "novo",
-      criadoEm: new Date().toISOString(),
-    };
+    const existingIdea = ideaForTrend(t);
+    if (existingIdea) {
+      navigate({ to: "/ideias/$id", params: { id: existingIdea.id } });
+      return;
+    }
+    const idea = buildIdeaFromTrend(t, genId("i"));
     try {
       const saved = await appendIdea(idea);
       addIdea(saved);
@@ -170,7 +172,7 @@ export function RadarPage() {
         toast.warning("Ideia salva, mas o status da tendencia nao foi atualizado.");
       }
       toast.success("Ideia criada e salva no Sheets.");
-      navigate({ to: "/ideias" });
+      navigate({ to: "/ideias/$id", params: { id: saved.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel criar a ideia.");
     }
@@ -355,83 +357,110 @@ export function RadarPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {ordered.map((t) => (
-                <TableRow key={t.id} className="cursor-pointer" onClick={() => setPreview(t)}>
-                  <TableCell className="align-top">
-                    <div className="truncate font-medium">{t.titulo}</div>
-                    {t.subtema ? (
-                      <div className="truncate text-xs text-muted-foreground">{t.subtema}</div>
-                    ) : null}
-                    <div className="mt-1">
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                        {familiaLabel[t.familia]}
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="align-top">
-                    {t.sinal ? <div className="line-clamp-2 text-sm">{t.sinal}</div> : null}
-                    {t.dorPublico ? (
-                      <div className="line-clamp-2 text-xs text-muted-foreground">
-                        {t.dorPublico}
+              {ordered.map((t) => {
+                const generated = trendHasIdea(t);
+                const linkedIdea = ideaForTrend(t);
+                return (
+                  <TableRow
+                    key={t.id}
+                    className={generated ? "cursor-pointer bg-status-success/5" : "cursor-pointer"}
+                    onClick={() => setPreview(t)}
+                  >
+                    <TableCell className="align-top">
+                      <div className="flex items-center gap-2">
+                        <div className="truncate font-medium">{t.titulo}</div>
+                        {generated ? (
+                          <Badge
+                            variant="outline"
+                            className="h-5 shrink-0 border-status-success/40 px-1.5 text-[10px] text-status-success"
+                          >
+                            Ideia gerada
+                          </Badge>
+                        ) : null}
                       </div>
-                    ) : null}
-                    {!t.sinal && !t.dorPublico ? (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="align-top text-muted-foreground">
-                    {t.link ? (
-                      <a
-                        href={t.link}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex items-center gap-1 truncate hover:text-foreground hover:underline"
-                        title={t.fonte}
-                      >
-                        <span className="truncate">{sourceGroup(t.fonte)}</span>
-                        <ExternalLink className="h-3 w-3 shrink-0" />
-                      </a>
-                    ) : (
-                      <span className="block truncate" title={t.fonte}>
-                        {sourceGroup(t.fonte)}
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-center">
-                    <PotencialBadge valor={t.potencial} />
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge {...prioridadeLabel[t.prioridade]} />
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge {...trendStatusLabel[t.status]} />
-                  </TableCell>
-                  <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex justify-end gap-1">
-                      <WithTooltip label="Gerar ideia a partir desta tendencia">
-                        <Button size="sm" variant="secondary" onClick={() => gerarIdeia(t)}>
-                          <Sparkles className="mr-1 h-3.5 w-3.5" /> Ideia
-                        </Button>
-                      </WithTooltip>
-                      <ConfirmAction
-                        destructive
-                        title="Descartar tendencia?"
-                        description="Voce pode restaurar depois editando o status."
-                        confirmLabel="Descartar"
-                        onConfirm={() => descartarTrend(t)}
-                        trigger={
-                          <WithTooltip label="Descartar tendencia">
-                            <Button size="sm" variant="ghost">
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </WithTooltip>
-                        }
-                      />
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
+                      {t.subtema ? (
+                        <div className="truncate text-xs text-muted-foreground">{t.subtema}</div>
+                      ) : null}
+                      <div className="mt-1">
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                          {familiaLabel[t.familia]}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="align-top">
+                      {t.sinal ? <div className="line-clamp-2 text-sm">{t.sinal}</div> : null}
+                      {t.dorPublico ? (
+                        <div className="line-clamp-2 text-xs text-muted-foreground">
+                          {t.dorPublico}
+                        </div>
+                      ) : null}
+                      {!t.sinal && !t.dorPublico ? (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      ) : null}
+                    </TableCell>
+                    <TableCell className="align-top text-muted-foreground">
+                      {t.link ? (
+                        <a
+                          href={t.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex items-center gap-1 truncate hover:text-foreground hover:underline"
+                          title={t.fonte}
+                        >
+                          <span className="truncate">{sourceGroup(t.fonte)}</span>
+                          <ExternalLink className="h-3 w-3 shrink-0" />
+                        </a>
+                      ) : (
+                        <span className="block truncate" title={t.fonte}>
+                          {sourceGroup(t.fonte)}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-center">
+                      <PotencialBadge valor={t.potencial} />
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge {...prioridadeLabel[t.prioridade]} />
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge {...trendStatusLabel[t.status]} />
+                    </TableCell>
+                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex justify-end gap-1">
+                        <WithTooltip label="Gerar ideia a partir desta tendencia">
+                          <Button
+                            size="sm"
+                            variant={generated ? "ghost" : "secondary"}
+                            onClick={() =>
+                              linkedIdea
+                                ? navigate({ to: "/ideias/$id", params: { id: linkedIdea.id } })
+                                : gerarIdeia(t)
+                            }
+                          >
+                            <Sparkles className="mr-1 h-3.5 w-3.5" />
+                            {generated ? "Ver ideia" : "Ideia"}
+                          </Button>
+                        </WithTooltip>
+                        <ConfirmAction
+                          destructive
+                          title="Descartar tendencia?"
+                          description="Voce pode restaurar depois editando o status."
+                          confirmLabel="Descartar"
+                          onConfirm={() => descartarTrend(t)}
+                          trigger={
+                            <WithTooltip label="Descartar tendencia">
+                              <Button size="sm" variant="ghost">
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </WithTooltip>
+                          }
+                        />
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
@@ -451,6 +480,11 @@ export function RadarPage() {
                 <StatusBadge {...trendStatusLabel[preview.status]} />
                 <StatusBadge {...prioridadeLabel[preview.prioridade]} />
                 <PotencialBadge valor={preview.potencial} />
+                {trendHasIdea(preview) ? (
+                  <Badge variant="outline" className="border-status-success/40 text-status-success">
+                    Ideia gerada
+                  </Badge>
+                ) : null}
               </div>
               <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
                 <Meta label="Fonte" value={preview.fonte} />
@@ -499,11 +533,17 @@ export function RadarPage() {
                 <Button
                   size="sm"
                   onClick={() => {
-                    gerarIdeia(preview);
+                    const linkedIdea = ideaForTrend(preview);
+                    if (linkedIdea) {
+                      navigate({ to: "/ideias/$id", params: { id: linkedIdea.id } });
+                    } else {
+                      gerarIdeia(preview);
+                    }
                     setPreview(null);
                   }}
                 >
-                  <Sparkles className="mr-1 h-4 w-4" /> Gerar ideia
+                  <Sparkles className="mr-1 h-4 w-4" />{" "}
+                  {trendHasIdea(preview) ? "Ver ideia gerada" : "Gerar ideia"}
                 </Button>
                 <Button asChild size="sm" variant="secondary">
                   <Link to="/radar/$id" params={{ id: preview.id }}>

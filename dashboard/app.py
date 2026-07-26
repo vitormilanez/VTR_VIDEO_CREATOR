@@ -39,7 +39,7 @@ load_env(ROOT / ".env")
 
 SHEETS = {
     "radar": "'Radar Tendencias'!A:L",
-    "ideias": "'Ideias'!A:K",
+    "ideias": "'Ideias'!A:M",
     "roteiros": "'Roteiros'!A:P",
     "calendario": "'Calendario'!A:N",
     "performance": "'Performance'!A:N",

@@ -1,11 +1,12 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
+import { buildIdeaFromTrend } from "@/lib/idea-builder";
 import { genId, useStore } from "@/lib/store";
 import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { appendIdea, setSheetStatus } from "@/lib/api/local";
-import type { Idea } from "@/lib/mock-data";
 import { ArrowLeft, ExternalLink, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
@@ -22,7 +23,11 @@ export const Route = createFileRoute("/_app/radar/$id")({
 function TendenciaDetalhe() {
   const { id } = Route.useParams();
   const trend = useStore((s) => s.trends.find((t) => t.id === id));
-  const ideas = useStore((s) => s.ideas.filter((i) => i.trendId === id));
+  const ideas = useStore((s) =>
+    s.ideas
+      .filter((i) => i.trendId === id)
+      .sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime()),
+  );
   const updateTrend = useStore((s) => s.updateTrend);
   const addIdea = useStore((s) => s.addIdea);
   const navigate = useNavigate();
@@ -42,22 +47,11 @@ function TendenciaDetalhe() {
 
   async function gerarIdeia() {
     if (!trend) return;
-    const idea: Idea = {
-      id: genId("i"),
-      trendId: trend.id,
-      titulo: `Ideia a partir de: ${trend.titulo}`,
-      familia: trend.familia,
-      hook: "Hook educativo sugerido — revise antes de aprovar.",
-      angulo:
-        "Angulo educativo: contextualizar o tema sem prescrever, reforcando avaliacao individual.",
-      tipo: "Reel",
-      publicoDor: trend.dorPublico,
-      cta: "Procure avaliacao individualizada com profissional de saude.",
-      observacaoCompliance: "Rascunho gerado localmente. Revisar linguagem.",
-      prioridade: trend.prioridade,
-      status: "novo",
-      criadoEm: new Date().toISOString(),
-    };
+    if (ideas[0]) {
+      navigate({ to: "/ideias/$id", params: { id: ideas[0].id } });
+      return;
+    }
+    const idea = buildIdeaFromTrend(trend, genId("i"));
     try {
       const saved = await appendIdea(idea);
       addIdea(saved);
@@ -68,7 +62,7 @@ function TendenciaDetalhe() {
         toast.warning("Ideia salva, mas o status da tendencia nao foi atualizado.");
       }
       toast.success("Ideia criada e salva no Sheets.");
-      navigate({ to: "/ideias" });
+      navigate({ to: "/ideias/$id", params: { id: saved.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel criar a ideia.");
     }
@@ -102,7 +96,7 @@ function TendenciaDetalhe() {
             </Link>
           </Button>
           <Button size="sm" onClick={gerarIdeia}>
-            <Sparkles className="mr-1 h-4 w-4" /> Gerar ideia
+            <Sparkles className="mr-1 h-4 w-4" /> {ideas[0] ? "Ver ideia" : "Gerar ideia"}
           </Button>
         </>
       }
@@ -113,6 +107,11 @@ function TendenciaDetalhe() {
             <StatusBadge {...trendStatusLabel[trend.status]} />
             <StatusBadge {...prioridadeLabel[trend.prioridade]} />
             <PotencialBadge valor={trend.potencial} />
+            {ideas[0] || trend.status === "em_analise" ? (
+              <Badge variant="outline" className="border-status-success/40 text-status-success">
+                Ideia gerada
+              </Badge>
+            ) : null}
           </div>
           <div className="rounded-xl border bg-card p-4 shadow-sm">
             <dl className="grid gap-3 text-sm sm:grid-cols-2">

@@ -435,6 +435,7 @@ def map_ideas(rows: list[dict]) -> list[dict]:
         out.append(
             {
                 "id": _row_id(r, "i", i),
+                "trendId": r.get("Trend ID") or None,
                 "titulo": r.get("Tema") or r.get("Hook") or "Ideia",
                 "familia": _familia(r.get("Tema"), r.get("Tipo")),
                 "hook": r.get("Hook") or "",
@@ -1915,7 +1916,7 @@ def hunt_trends() -> dict:
 # --------------------------------------------------------------------------- #
 TAB_RANGE = {
     "radar": "'Radar Tendencias'!A:L",
-    "ideias": "'Ideias'!A:K",
+    "ideias": "'Ideias'!A:M",
     "roteiros": "'Roteiros'!A:P",
     "calendario": "'Calendario'!A:N",
 }
@@ -2111,6 +2112,7 @@ _ROTEIRO_STATUS = {
 
 class IdeaIn(BaseModel):
     id: str | None = None
+    trendId: str | None = None
     titulo: str
     hook: str = ""
     angulo: str = ""
@@ -2121,6 +2123,7 @@ class IdeaIn(BaseModel):
     observacaoCompliance: str = ""
     prioridade: str = "media"
     status: str = "novo"
+    criadoEm: str | None = None
 
 
 class ScriptIn(BaseModel):
@@ -2227,12 +2230,43 @@ def _ensure_calendar_headers(client: Any) -> None:
         client.update_values("'Calendario'!A1:N1", [merged])
 
 
+IDEA_HEADERS = [
+    "Tema",
+    "Hook",
+    "Ângulo",
+    "Tipo",
+    "Público/Dor",
+    "CTA",
+    "Prioridade",
+    "Status",
+    "Link origem",
+    "Observações",
+    "ID",
+    "Trend ID",
+    "Criado em",
+]
+
+
+def _ensure_idea_headers(client: Any) -> None:
+    values = client.get_values(TAB_RANGE["ideias"])
+    current = [str(value).strip() for value in values[0]] if values else []
+    if current[: len(IDEA_HEADERS)] == IDEA_HEADERS:
+        return
+    merged = IDEA_HEADERS.copy()
+    for index, value in enumerate(current[: len(merged)]):
+        if value and index < 11:
+            merged[index] = value
+    client.update_values("'Ideias'!A1:M1", [merged])
+
+
 def _append(tab: str, row: list) -> None:
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     try:
         client = GoogleSheetsRestClient()
         _ensure_tab_ids(client, tab)
+        if tab == "ideias":
+            _ensure_idea_headers(client)
         client.append_rows(TAB_RANGE[tab], [row])
     except Exception as exc:  # credenciais / rede
         raise HTTPException(status_code=503, detail=f"falha ao gravar no Sheets: {exc}")
@@ -2254,9 +2288,11 @@ def append_idea(payload: IdeaIn) -> dict:
         payload.linkOrigem or "",             # Link origem
         payload.observacaoCompliance,         # Observações
         item_id,                              # ID permanente
+        payload.trendId or "",                # Trend ID
+        payload.criadoEm or _now(),           # Criado em
     ]
     _append("ideias", row)
-    raw = dict(zip(["Tema", "Hook", "Ângulo", "Tipo", "Público/Dor", "CTA", "Prioridade", "Status", "Link origem", "Observações", "ID"], row))
+    raw = dict(zip(IDEA_HEADERS, row))
     _append_snapshot_row("ideias", raw)
     return {"ok": True, "idea": map_ideas([raw])[0]}
 
