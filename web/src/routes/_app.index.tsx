@@ -1,42 +1,24 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { MetricCard } from "@/components/metric-card";
-import { StatusBadge } from "@/components/status-badge";
-import { PipelineFlow, type PipelineStep } from "@/components/pipeline-flow";
 import { EmptyState } from "@/components/empty-state";
+import { StatusBadge } from "@/components/status-badge";
 import { useStore } from "@/lib/store";
 import { fetchAiCosts, type AiCosts } from "@/lib/api/local";
+import { postStatusLabel } from "@/lib/status";
+import type { VideoJob, VideoJobStatus } from "@/lib/mock-data";
+import { Button } from "@/components/ui/button";
 import {
-  familiaLabel,
-  postStatusLabel,
-  prioridadeLabel,
-  scriptStatusLabel,
-  trendStatusLabel,
-} from "@/lib/status";
-import {
-  Radar,
-  Lightbulb,
-  FileText,
-  Film,
-  CalendarDays,
+  ArrowRight,
   CalendarClock,
   CheckCircle2,
-  ArrowRight,
-  ShieldAlert,
-  TrendingUp,
+  Film,
+  Lightbulb,
+  Loader2,
+  Radar,
   RefreshCcw,
   WalletCards,
 } from "lucide-react";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Button } from "@/components/ui/button";
 
 export const Route = createFileRoute("/_app/")({
   head: () => ({
@@ -44,26 +26,23 @@ export const Route = createFileRoute("/_app/")({
       { title: "Dashboard | AI Video Creator" },
       {
         name: "description",
-        content:
-          "Painel de operacao: tendencias, ideias, roteiros, producao, calendario e performance do Dr. Guilherme.",
+        content: "Central de operacao: prioridades, videos, custos e agenda.",
       },
       { property: "og:title", content: "Dashboard | AI Video Creator" },
-      {
-        property: "og:description",
-        content: "Central de operacao do pipeline editorial.",
-      },
+      { property: "og:description", content: "Central de operacao do pipeline editorial." },
     ],
   }),
   component: Dashboard,
 });
 
+type CostedVideoJob = VideoJob & { costUsd?: number; currency?: string };
+
 function Dashboard() {
   const trends = useStore((s) => s.trends);
   const ideas = useStore((s) => s.ideas);
   const scripts = useStore((s) => s.scripts);
-  const jobs = useStore((s) => s.videoJobs);
+  const jobs = useStore((s) => s.videoJobs as CostedVideoJob[]);
   const posts = useStore((s) => s.calendarPosts);
-  const performance = useStore((s) => s.performance);
   const [aiCosts, setAiCosts] = useState<AiCosts | null>(null);
   const [aiCostsError, setAiCostsError] = useState("");
   const [loadingAiCosts, setLoadingAiCosts] = useState(false);
@@ -86,545 +65,371 @@ function Dashboard() {
     void loadAiCosts();
   }, []);
 
-  // --- Filas acionaveis: o que precisa de um clique agora ---
   const scriptsComVideo = new Set(jobs.filter((j) => j.status !== "erro").map((j) => j.scriptId));
   const jobsAgendados = new Set(posts.map((p) => p.videoJobId).filter(Boolean));
-  const fimDeHoje = new Date();
-  fimDeHoje.setHours(23, 59, 59, 999);
 
-  const filaTriagem = trends.filter((t) => t.status === "novo").length;
-  const filaRoteirizar = ideas.filter(
-    (i) => i.status === "novo" || i.status === "em_analise",
-  ).length;
-  const filaProduzir = scripts.filter(
-    (s) => s.status === "aprovado_clinicamente" && !scriptsComVideo.has(s.id),
-  ).length;
-  const filaAgendar = jobs.filter((j) => j.status === "pronto" && !jobsAgendados.has(j.id)).length;
-  const filaPublicar = posts.filter(
-    (p) => p.status !== "publicado" && new Date(p.dataAgendada) <= fimDeHoje,
-  ).length;
-
-  const todasAsFilas: ActionQueue[] = [
-    {
-      key: "triar",
-      count: filaTriagem,
-      titulo: filaTriagem === 1 ? "tendencia nova" : "tendencias novas",
-      acao: "Triar no Radar e gerar ideias",
-      to: "/radar",
-      icon: Radar,
-      tone: "info",
-    },
-    {
-      key: "roteirizar",
-      count: filaRoteirizar,
-      titulo: filaRoteirizar === 1 ? "ideia em aberto" : "ideias em aberto",
-      acao: "Transformar em roteiro",
-      to: "/ideias",
-      icon: Lightbulb,
-      tone: "info",
-    },
-    {
-      key: "produzir",
-      count: filaProduzir,
-      titulo: filaProduzir === 1 ? "roteiro pronto" : "roteiros prontos",
-      acao: "Gerar video ou pack",
-      to: "/roteiros",
-      icon: FileText,
-      tone: "warn",
-    },
-    {
-      key: "agendar",
-      count: filaAgendar,
-      titulo: filaAgendar === 1 ? "video pronto" : "videos prontos",
-      acao: "Agendar publicacao",
-      to: "/producao",
-      icon: Film,
-      tone: "warn",
-    },
-    {
-      key: "publicar",
-      count: filaPublicar,
-      titulo: filaPublicar === 1 ? "publicacao para hoje" : "publicacoes para hoje",
-      acao: "Publicar e marcar no calendario",
-      to: "/calendario",
-      icon: CalendarClock,
-      tone: "danger",
-    },
-  ];
-  const acoes = todasAsFilas.filter((a) => a.count > 0);
-
-  const novasTendencias = trends.filter((t) => t.status !== "descartado").length;
-  const ideiasNovas = ideas.filter((i) => i.status !== "descartado").length;
-  const roteirosAguardando = scripts.filter(
-    (s) => s.status === "aguardando_validacao" || s.status === "em_revisao",
-  ).length;
-  const producaoAtiva = jobs.filter(
-    (j) => j.status === "fila" || j.status === "processando",
-  ).length;
-  const postsAgendados = posts.filter((p) => p.status !== "publicado").length;
-  const publicados = posts.filter((p) => p.status === "publicado").length;
-
-  const steps: PipelineStep[] = [
+  const filas = [
     {
       key: "radar",
-      label: "Radar",
-      count: novasTendencias,
+      count: trends.filter((t) => t.status === "novo").length,
+      title: "tendências novas",
+      action: "Triar e gerar ideias",
       to: "/radar",
-      tone: "info",
-      hint: "capturadas",
+      icon: Radar,
+      tone: "info" as const,
     },
     {
       key: "ideias",
-      label: "Ideias",
-      count: ideiasNovas,
+      count: ideas.filter((i) => i.status === "novo" || i.status === "em_analise").length,
+      title: "ideias em aberto",
+      action: "Transformar em roteiro",
       to: "/ideias",
-      tone: "info",
-      hint: "no funil",
+      icon: Lightbulb,
+      tone: "info" as const,
     },
     {
       key: "roteiros",
-      label: "Roteiros",
-      count: roteirosAguardando,
+      count: scripts.filter(
+        (s) => s.status === "aprovado_clinicamente" && !scriptsComVideo.has(s.id),
+      ).length,
+      title: "roteiros prontos",
+      action: "Enviar para vídeo",
       to: "/roteiros",
-      tone: "warn",
-      hint: "em edicao",
+      icon: Film,
+      tone: "warn" as const,
     },
     {
-      key: "producao",
-      label: "Producao",
-      count: producaoAtiva,
+      key: "agenda",
+      count: jobs.filter((j) => j.status === "pronto" && !jobsAgendados.has(j.id)).length,
+      title: "vídeos sem agenda",
+      action: "Agendar publicação",
       to: "/producao",
-      tone: "warn",
-      hint: "em processamento",
+      icon: CalendarClock,
+      tone: "warn" as const,
     },
-    {
-      key: "calendario",
-      label: "Calendario",
-      count: postsAgendados,
-      to: "/calendario",
-      tone: "info",
-      hint: "agendados/pendentes",
-    },
-    {
-      key: "performance",
-      label: "Performance",
-      count: publicados,
-      to: "/performance",
-      tone: "success",
-      hint: "publicados",
-    },
-  ];
+  ].filter((item) => item.count > 0);
 
-  const totalViews = performance.reduce((acc, m) => acc + m.views, 0);
-  const engajamento = performance.reduce(
-    (acc, m) => acc + m.likes + m.comments + m.shares + m.saves,
-    0,
+  const provider = aiCosts?.providers.find((item) => item.id === "heygen");
+  const videos = useMemo(
+    () => [...jobs].sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime()),
+    [jobs],
   );
+  const videosProntos = jobs.filter((j) => j.status === "pronto").length;
+  const videosAtivos = jobs.filter((j) => j.status === "fila" || j.status === "processando").length;
+  const videosErro = jobs.filter((j) => j.status === "erro").length;
+  const gastoLocal = jobs.reduce((acc, job) => acc + Number(job.costUsd || 0), 0);
+  const currency = provider?.currency || jobs.find((job) => job.currency)?.currency || "USD";
+  const gastoRastreado = provider?.trackedSpend ?? gastoLocal;
+  const custoMedio = videos.length > 0 ? gastoRastreado / videos.length : 0;
 
-  const roteirosPendentes = scripts.filter(
-    (s) => s.status === "aguardando_validacao" || s.status === "em_revisao",
-  );
   const proximosPosts = [...posts]
     .filter((p) => p.status !== "publicado")
     .sort((a, b) => a.dataAgendada.localeCompare(b.dataAgendada))
-    .slice(0, 5);
-  const topTrends = [...trends]
-    .sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime())
-    .slice(0, 5);
+    .slice(0, 4);
 
   return (
     <AppShell title="Dashboard">
-      <section className="mb-5">
-        <div className="mb-2 flex items-baseline justify-between">
-          <h2 className="font-display text-sm font-semibold">O que fazer agora</h2>
-          <span className="text-[11px] text-muted-foreground">
-            {acoes.length === 0
-              ? "Nenhuma pendencia"
-              : `${acoes.length} ${acoes.length === 1 ? "fila com pendencia" : "filas com pendencias"}`}
-          </span>
-        </div>
-        {acoes.length === 0 ? (
-          <div className="flex items-center gap-3 rounded-xl border border-status-success/40 bg-status-success/10 px-4 py-3.5">
-            <CheckCircle2 className="h-5 w-5 shrink-0 text-status-success" />
+      <section className="grid gap-4 xl:grid-cols-[1.2fr_1fr]">
+        <div className="rounded-lg border bg-card p-4 shadow-sm">
+          <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-sm font-medium">Tudo em dia.</p>
-              <p className="text-xs text-muted-foreground">
-                Nenhuma etapa do funil esta esperando por voce. Que tal{" "}
-                <Link to="/radar" className="text-status-info underline">
-                  buscar novas tendencias
-                </Link>
-                ?
+              <h2 className="font-display text-base font-semibold">Operação agora</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                O que precisa de ação para o conteúdo continuar andando.
               </p>
             </div>
-          </div>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {acoes.map((a) => (
-              <ActionQueueCard key={a.key} queue={a} />
-            ))}
-          </div>
-        )}
-      </section>
-
-      <div className="mb-4">
-        <PipelineFlow steps={steps} />
-      </div>
-
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard
-          label="Tendencias ativas"
-          value={novasTendencias}
-          icon={<Radar className="h-4 w-4" />}
-          tone="info"
-        />
-        <MetricCard
-          label="Roteiros em edicao"
-          value={roteirosAguardando}
-          icon={<ShieldAlert className="h-4 w-4" />}
-          tone="warn"
-        />
-        <MetricCard
-          label="Videos em producao"
-          value={producaoAtiva}
-          icon={<FileText className="h-4 w-4" />}
-        />
-        <MetricCard
-          label="Views registradas"
-          value={totalViews.toLocaleString("pt-BR")}
-          icon={<TrendingUp className="h-4 w-4" />}
-          tone="success"
-          hint={`${engajamento.toLocaleString("pt-BR")} interacoes · aba Performance`}
-        />
-      </div>
-
-      <section className="mt-6 rounded-xl border bg-card shadow-sm">
-        <div className="flex items-center justify-between gap-3 border-b px-4 py-2.5">
-          <div>
-            <h2 className="font-display text-sm font-semibold">Custos de IA</h2>
-            <p className="text-[11px] text-muted-foreground">
-              Saldo e uso dos provedores conectados ao aplicativo.
-            </p>
-          </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void loadAiCosts()}
-            disabled={loadingAiCosts}
-          >
-            <RefreshCcw className={`mr-1 h-3.5 w-3.5 ${loadingAiCosts ? "animate-spin" : ""}`} />
-            Atualizar
-          </Button>
-        </div>
-        {aiCostsError ? (
-          <p className="px-4 py-4 text-sm text-destructive">{aiCostsError}</p>
-        ) : !aiCosts ? (
-          <p className="px-4 py-4 text-sm text-muted-foreground">Consultando provedores...</p>
-        ) : (
-          <div>
-            {aiCosts.providers.map((provider) => (
-              <div
-                key={provider.id}
-                className="flex items-center justify-between gap-4 border-b px-4 py-3 last:border-b-0"
-              >
-                <div className="flex min-w-0 items-center gap-3">
-                  <WalletCards className="h-4 w-4 shrink-0 text-status-info" />
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-medium">{provider.name}</p>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${provider.status === "conectado" ? "bg-status-success/10 text-status-success" : provider.status === "nao_conectado" ? "bg-muted text-muted-foreground" : "bg-destructive/10 text-destructive"}`}
-                      >
-                        {provider.status === "conectado"
-                          ? "Conectado"
-                          : provider.status === "nao_conectado"
-                            ? "Nao conectado"
-                            : "Indisponivel"}
-                      </span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {provider.description}. {provider.note}
-                    </p>
-                  </div>
-                </div>
-                <div className="shrink-0 text-right">
-                  {provider.remainingBalance !== null && provider.currency ? (
-                    <>
-                      <p className="font-display text-base font-semibold tabular-nums">
-                        {formatCurrency(provider.remainingBalance, provider.currency)}
-                      </p>
-                      <p className="text-[11px] text-muted-foreground">saldo disponivel</p>
-                      {provider.trackedSpend !== null ? (
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          Gasto rastreado:{" "}
-                          {formatCurrency(provider.trackedSpend, provider.currency)}
-                        </p>
-                      ) : null}
-                    </>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">Sem uso registrado</p>
-                  )}
-                </div>
-              </div>
-            ))}
-            <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
-              Atualizado em {new Date(aiCosts.updatedAt).toLocaleString("pt-BR")}. O total gasto so
-              aparece quando o provedor informar custo por chamada ou video.
-            </p>
-          </div>
-        )}
-      </section>
-
-      <section className="mt-6 grid gap-4 lg:grid-cols-2">
-        <div className="rounded-xl border bg-card shadow-sm">
-          <div className="flex items-center justify-between border-b px-4 py-2.5">
-            <div>
-              <h2 className="font-display text-sm font-semibold">Roteiros em edicao</h2>
-              <p className="text-[11px] text-muted-foreground">
-                Rascunhos e roteiros em revisao editorial.
-              </p>
-            </div>
-            <Button asChild variant="ghost" size="sm">
-              <Link to="/roteiros">Ver todos</Link>
+            <Button asChild size="sm" variant="secondary">
+              <Link to="/radar">
+                Buscar tendências <ArrowRight className="ml-1 h-3.5 w-3.5" />
+              </Link>
             </Button>
           </div>
-          {roteirosPendentes.length === 0 ? (
-            <EmptyState
-              className="m-3"
-              icon={<FileText className="h-4 w-4" />}
-              title="Nada em edicao"
-              description="Gere novos roteiros a partir da tela de Ideias."
-              action={
-                <Button asChild size="sm" variant="secondary">
-                  <Link to="/ideias">Ir para Ideias</Link>
-                </Button>
-              }
-            />
+
+          {filas.length === 0 ? (
+            <div className="mt-4 flex items-center gap-3 rounded-md border border-status-success/35 bg-status-success/10 px-3 py-3">
+              <CheckCircle2 className="h-5 w-5 text-status-success" />
+              <div>
+                <p className="text-sm font-medium">Tudo em dia.</p>
+                <p className="text-xs text-muted-foreground">
+                  Nenhuma fila importante esperando por você agora.
+                </p>
+              </div>
+            </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Titulo</TableHead>
-                  <TableHead>Categoria</TableHead>
-                  <TableHead>Prioridade</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {roteirosPendentes.slice(0, 5).map((s) => (
-                  <TableRow key={s.id} className="cursor-pointer">
-                    <TableCell className="font-medium">
-                      <Link to="/roteiros/$id" params={{ id: s.id }} className="hover:underline">
-                        {s.titulo}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {familiaLabel[s.categoria]}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge {...prioridadeLabel[s.prioridade]} />
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge {...scriptStatusLabel[s.status]} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              {filas.map((fila) => (
+                <ActionCard key={fila.key} item={fila} />
+              ))}
+            </div>
           )}
         </div>
 
-        <div className="rounded-xl border bg-card shadow-sm">
-          <div className="flex items-center justify-between border-b px-4 py-2.5">
+        <VideoCostPanel
+          aiCosts={aiCosts}
+          error={aiCostsError}
+          loading={loadingAiCosts}
+          onRefresh={loadAiCosts}
+          totalVideos={videos.length}
+          readyVideos={videosProntos}
+          activeVideos={videosAtivos}
+          errorVideos={videosErro}
+          trackedSpend={gastoRastreado}
+          averageCost={custoMedio}
+          currency={currency}
+          balance={provider?.remainingBalance ?? null}
+        />
+      </section>
+
+      <section className="mt-4 grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+        <div className="rounded-lg border bg-card shadow-sm">
+          <div className="flex items-center justify-between border-b px-4 py-3">
             <div>
-              <h2 className="font-display text-sm font-semibold">Proximas publicacoes</h2>
+              <h2 className="font-display text-sm font-semibold">Vídeos recentes</h2>
               <p className="text-[11px] text-muted-foreground">
-                Agenda editorial dos proximos reels.
+                Últimas criações no HeyGen, com status e custo rastreado.
               </p>
             </div>
-            <Button asChild variant="ghost" size="sm">
-              <Link to="/calendario">Abrir calendario</Link>
+            <Button asChild size="sm" variant="ghost">
+              <Link to="/producao">Ver produção</Link>
+            </Button>
+          </div>
+          {videos.length === 0 ? (
+            <EmptyState
+              className="m-3"
+              icon={<Film className="h-4 w-4" />}
+              title="Nenhum vídeo criado"
+              description="Quando um roteiro for enviado ao HeyGen, ele aparece aqui."
+            />
+          ) : (
+            <div className="divide-y">
+              {videos.slice(0, 6).map((job) => (
+                <VideoRow key={job.id} job={job} currency={currency} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border bg-card shadow-sm">
+          <div className="flex items-center justify-between border-b px-4 py-3">
+            <div>
+              <h2 className="font-display text-sm font-semibold">Próximas publicações</h2>
+              <p className="text-[11px] text-muted-foreground">Agenda editorial mais próxima.</p>
+            </div>
+            <Button asChild size="sm" variant="ghost">
+              <Link to="/calendario">Abrir</Link>
             </Button>
           </div>
           {proximosPosts.length === 0 ? (
             <EmptyState
               className="m-3"
-              icon={<CalendarDays className="h-4 w-4" />}
+              icon={<CalendarClock className="h-4 w-4" />}
               title="Sem agendamentos"
+              description="Agende vídeos prontos para manter a cadência."
             />
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Titulo</TableHead>
-                  <TableHead>Canal</TableHead>
-                  <TableHead>Data</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {proximosPosts.map((p) => (
-                  <TableRow key={p.id}>
-                    <TableCell className="font-medium">{p.titulo}</TableCell>
-                    <TableCell className="text-muted-foreground capitalize">
-                      {p.canal.replace("_", " ")}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {new Date(p.dataAgendada).toLocaleDateString("pt-BR")}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge {...postStatusLabel[p.status]} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <div className="divide-y">
+              {proximosPosts.map((post) => (
+                <div key={post.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{post.titulo}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {post.canal.replace("_", " ")} ·{" "}
+                      {new Date(post.dataAgendada).toLocaleDateString("pt-BR")}
+                    </p>
+                  </div>
+                  <StatusBadge {...postStatusLabel[post.status]} />
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </section>
-
-      <section className="mt-6 rounded-xl border bg-card shadow-sm">
-        <div className="flex items-center justify-between border-b px-4 py-2.5">
-          <div>
-            <h2 className="font-display text-sm font-semibold">Radar de tendencias</h2>
-            <p className="text-[11px] text-muted-foreground">
-              {ideas.filter((i) => i.status !== "descartado").length} ideias em aberto
-            </p>
-          </div>
-          <Button asChild variant="ghost" size="sm">
-            <Link to="/radar">Ver radar</Link>
-          </Button>
-        </div>
-        <Table className="table-fixed">
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-[26%]">Tendencia</TableHead>
-              <TableHead className="w-[26%]">Sinal / Dor</TableHead>
-              <TableHead className="w-[14%]">Fonte</TableHead>
-              <TableHead className="w-[12%] text-center">Potencial</TableHead>
-              <TableHead className="w-[12%]">Prioridade</TableHead>
-              <TableHead className="w-[10%]">Status</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {topTrends.map((t) => (
-              <TableRow key={t.id}>
-                <TableCell className="align-top font-medium">
-                  <Link to="/radar/$id" params={{ id: t.id }} className="hover:underline">
-                    <span className="block truncate">{t.titulo}</span>
-                  </Link>
-                  {t.subtema ? (
-                    <div className="truncate text-xs text-muted-foreground">{t.subtema}</div>
-                  ) : null}
-                </TableCell>
-                <TableCell className="align-top">
-                  {t.sinal ? <div className="line-clamp-2 text-sm">{t.sinal}</div> : null}
-                  {t.dorPublico ? (
-                    <div className="line-clamp-2 text-xs text-muted-foreground">{t.dorPublico}</div>
-                  ) : null}
-                  {!t.sinal && !t.dorPublico ? (
-                    <span className="text-xs text-muted-foreground">—</span>
-                  ) : null}
-                </TableCell>
-                <TableCell className="align-top text-muted-foreground">
-                  <span className="block truncate" title={t.fonte}>
-                    {fonteLabel(t.fonte)}
-                  </span>
-                </TableCell>
-                <TableCell className="text-center tabular-nums">
-                  {t.potencial == null ? "—" : `${t.potencial}/10`}
-                </TableCell>
-                <TableCell>
-                  <StatusBadge {...prioridadeLabel[t.prioridade]} />
-                </TableCell>
-                <TableCell>
-                  <StatusBadge {...trendStatusLabel[t.status]} />
-                </TableCell>
-              </TableRow>
-            ))}
-            {trends.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={6} className="py-6 text-center text-sm text-muted-foreground">
-                  Nenhuma tendencia capturada.{" "}
-                  <Link to="/radar" className="text-status-info underline">
-                    Ir para o Radar
-                  </Link>
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </section>
-
-      <p className="mt-4 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
-        Radar, Ideias, Roteiros e Calendario sincronizam com o Google Sheets. A producao de videos
-        usa o HeyGen. As metricas vem da aba Performance da planilha. Use{" "}
-        <Link to="/configuracoes" className="text-status-info underline">
-          Configuracoes
-        </Link>{" "}
-        para revisar temas prioritarios e palavras proibidas.
-        <Lightbulb className="ml-1 h-3 w-3" />
-      </p>
     </AppShell>
   );
 }
 
-interface ActionQueue {
-  key: string;
-  count: number;
-  titulo: string;
-  acao: string;
-  to: string;
-  icon: typeof Radar;
-  tone: "info" | "warn" | "danger";
+function VideoCostPanel({
+  aiCosts,
+  error,
+  loading,
+  onRefresh,
+  totalVideos,
+  readyVideos,
+  activeVideos,
+  errorVideos,
+  trackedSpend,
+  averageCost,
+  currency,
+  balance,
+}: {
+  aiCosts: AiCosts | null;
+  error: string;
+  loading: boolean;
+  onRefresh: () => void | Promise<void>;
+  totalVideos: number;
+  readyVideos: number;
+  activeVideos: number;
+  errorVideos: number;
+  trackedSpend: number;
+  averageCost: number;
+  currency: string;
+  balance: number | null;
+}) {
+  return (
+    <div className="rounded-lg border bg-card p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="font-display text-base font-semibold">Vídeos e custos</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Resumo do HeyGen e gasto rastreado pelo saldo.
+          </p>
+        </div>
+        <Button size="sm" variant="secondary" onClick={() => void onRefresh()} disabled={loading}>
+          {loading ? (
+            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCcw className="mr-1 h-3.5 w-3.5" />
+          )}
+          Atualizar
+        </Button>
+      </div>
+
+      {error ? <p className="mt-3 text-xs text-destructive">{error}</p> : null}
+
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <SummaryTile label="Criados" value={totalVideos} />
+        <SummaryTile label="Prontos" value={readyVideos} />
+        <SummaryTile label="Em produção" value={activeVideos} />
+        <SummaryTile label="Com erro" value={errorVideos} muted={errorVideos === 0} />
+      </div>
+
+      <div className="mt-4 rounded-md border bg-muted/30 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <WalletCards className="h-4 w-4 text-status-info" />
+            <span className="text-xs font-medium">Gasto rastreado</span>
+          </div>
+          <span className="font-display text-lg font-semibold tabular-nums">
+            {formatCurrency(trackedSpend, currency)}
+          </span>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
+          <span>Custo médio: {formatCurrency(averageCost, currency)}</span>
+          <span className="text-right">
+            Saldo: {balance == null ? "indisponível" : formatCurrency(balance, currency)}
+          </span>
+        </div>
+      </div>
+
+      {aiCosts?.updatedAt ? (
+        <p className="mt-3 text-[11px] text-muted-foreground">
+          Atualizado em {new Date(aiCosts.updatedAt).toLocaleString("pt-BR")}.
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
-const queueTone: Record<ActionQueue["tone"], { card: string; icon: string }> = {
-  info: {
-    card: "border-status-info/30 hover:border-status-info/60",
-    icon: "bg-status-info/10 text-status-info",
-  },
-  warn: {
-    card: "border-status-warn/40 hover:border-status-warn/70",
-    icon: "bg-status-warn/20 text-status-warn-foreground",
-  },
-  danger: {
-    card: "border-status-danger/30 hover:border-status-danger/60",
-    icon: "bg-status-danger/10 text-status-danger",
-  },
-};
+function SummaryTile({
+  label,
+  value,
+  muted = false,
+}: {
+  label: string;
+  value: number;
+  muted?: boolean;
+}) {
+  return (
+    <div className="rounded-md border bg-background px-3 py-2">
+      <div
+        className={`font-display text-xl font-semibold tabular-nums ${muted ? "opacity-45" : ""}`}
+      >
+        {value}
+      </div>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+    </div>
+  );
+}
 
-function ActionQueueCard({ queue }: { queue: ActionQueue }) {
-  const tone = queueTone[queue.tone];
-  const Icon = queue.icon;
+function VideoRow({ job, currency }: { job: CostedVideoJob; currency: string }) {
   return (
     <Link
-      to={queue.to}
-      className={`group flex items-center gap-3 rounded-xl border bg-card px-4 py-3.5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${tone.card}`}
+      to="/producao/$id"
+      params={{ id: job.id }}
+      className="flex items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-muted/35"
     >
-      <div
-        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${tone.icon}`}
-      >
-        <Icon className="h-4.5 w-4.5" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium">
-          <span className="font-display text-lg font-bold tabular-nums">{queue.count}</span>{" "}
-          {queue.titulo}
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <VideoStatusDot status={job.status} />
+          <p className="truncate text-sm font-medium">{videoStatusLabel[job.status]}</p>
+        </div>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {new Date(job.atualizadoEm || job.criadoEm).toLocaleString("pt-BR")}
+          {job.duracaoSegundos ? ` · ${job.duracaoSegundos}s` : ""}
         </p>
-        <p className="truncate text-xs text-muted-foreground">{queue.acao}</p>
       </div>
-      <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+      <div className="shrink-0 text-right">
+        <p className="text-sm font-medium tabular-nums">
+          {job.costUsd ? formatCurrency(job.costUsd, job.currency || currency) : "Sem custo"}
+        </p>
+        <p className="text-[11px] text-muted-foreground">{job.provider}</p>
+      </div>
     </Link>
   );
 }
 
-function fonteLabel(fonte: string): string {
-  if (!/^https?:\/\//i.test(fonte)) return fonte;
-  try {
-    return new URL(fonte).hostname.replace(/^www\./, "");
-  } catch {
-    return fonte;
-  }
+function VideoStatusDot({ status }: { status: VideoJobStatus }) {
+  const color =
+    status === "pronto"
+      ? "bg-status-success"
+      : status === "erro"
+        ? "bg-status-danger"
+        : "bg-status-warn";
+  return <span className={`h-2 w-2 rounded-full ${color}`} />;
+}
+
+const videoStatusLabel: Record<VideoJobStatus, string> = {
+  fila: "Na fila",
+  processando: "Processando",
+  pronto: "Vídeo pronto",
+  erro: "Erro na produção",
+};
+
+function ActionCard({
+  item,
+}: {
+  item: {
+    count: number;
+    title: string;
+    action: string;
+    to: string;
+    icon: typeof Radar;
+    tone: "info" | "warn";
+  };
+}) {
+  const Icon = item.icon;
+  const tone =
+    item.tone === "warn"
+      ? "border-status-warn/35 hover:border-status-warn/70"
+      : "border-status-info/30 hover:border-status-info/60";
+  return (
+    <Link
+      to={item.to}
+      className={`group flex items-center gap-3 rounded-md border bg-background px-3 py-3 transition-colors hover:bg-muted/30 ${tone}`}
+    >
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted">
+        <Icon className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">
+          <span className="font-display text-lg font-semibold tabular-nums">{item.count}</span>{" "}
+          {item.title}
+        </p>
+        <p className="truncate text-xs text-muted-foreground">{item.action}</p>
+      </div>
+      <ArrowRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+    </Link>
+  );
 }
 
 function formatCurrency(value: number, currency: string): string {
