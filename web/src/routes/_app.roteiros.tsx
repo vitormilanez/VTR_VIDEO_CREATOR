@@ -53,9 +53,14 @@ export function RoteirosPage() {
   const filtered = scripts.filter((s) => {
     if (status !== "todos" && s.status !== status) return false;
     if (prioridade !== "todas" && s.prioridade !== prioridade) return false;
-    if (busca && !s.titulo.toLowerCase().includes(busca.toLowerCase())) return false;
+    const searchable = [s.titulo, s.tema, s.hook, s.cuidadosMedicos].join(" ").toLowerCase();
+    if (busca && !searchable.includes(busca.toLowerCase())) return false;
     return true;
   });
+
+  const ordered = [...filtered].sort(
+    (a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime(),
+  );
 
   const counts: Record<ScriptStatus, number> = {
     aguardando_validacao: 0,
@@ -116,7 +121,7 @@ export function RoteirosPage() {
         </Select>
       </DataToolbar>
 
-      {filtered.length === 0 ? (
+      {ordered.length === 0 ? (
         <EmptyState
           icon={<FileText className="h-4 w-4" />}
           title="Nenhum roteiro encontrado"
@@ -141,7 +146,7 @@ export function RoteirosPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((s) => (
+              {ordered.map((s) => (
                 <TableRow key={s.id}>
                   <TableCell>
                     <Link

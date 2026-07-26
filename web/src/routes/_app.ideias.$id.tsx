@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel } from "@/components/compliance-panel";
+import { buildScriptFromIdea } from "@/lib/script-builder";
 import { genId, useStore } from "@/lib/store";
 import { appendScript, setSheetStatus } from "@/lib/api/local";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
@@ -11,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { ArrowLeft, Save, Sparkles } from "lucide-react";
-import type { Idea, Script } from "@/lib/mock-data";
+import type { Idea } from "@/lib/mock-data";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/ideias/$id")({
@@ -54,25 +55,7 @@ function IdeiaDetalhe() {
 
   async function gerarRoteiro() {
     if (!idea || !draft) return;
-    const nid = genId("s");
-    const script: Script = {
-      id: nid,
-      ideaId: idea.id,
-      categoria: draft.familia,
-      tema: draft.titulo,
-      titulo: `Roteiro: ${draft.titulo}`,
-      hook: draft.hook,
-      dorConflito: "Rascunho: descrever a dor/conflito.",
-      explicacaoSimples: "Rascunho: explicacao simples e educativa.",
-      virada: "Rascunho: virada educativa.",
-      cta: draft.cta,
-      cuidadosMedicos: "Nao prescrever. Nao citar dose. Reforcar avaliacao.",
-      risco: draft.familia === "medicamento" ? "alto" : "medio",
-      prioridade: draft.prioridade,
-      formatoSugerido: "Reels",
-      status: "aguardando_validacao",
-      criadoEm: new Date().toISOString(),
-    };
+    const script = buildScriptFromIdea(draft, genId("s"));
     try {
       const saved = await appendScript(script);
       addScript(saved);

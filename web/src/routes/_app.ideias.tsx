@@ -7,10 +7,11 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
+import { buildScriptFromIdea } from "@/lib/script-builder";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
 import { appendScript, setSheetStatus } from "@/lib/api/local";
-import type { Idea, IdeaStatus, Script, ThemeFamily } from "@/lib/mock-data";
+import type { Idea, IdeaStatus, ThemeFamily } from "@/lib/mock-data";
 import {
   Table,
   TableBody,
@@ -110,28 +111,7 @@ export function IdeiasPage() {
   const previewVideo = previewScript ? videoForScript(previewScript.id) : undefined;
 
   async function gerarRoteiro(i: Idea) {
-    const script: Script = {
-      id: genId("s"),
-      ideaId: i.id,
-      categoria: i.familia,
-      tema: i.titulo,
-      titulo: i.titulo,
-      hook: i.hook,
-      dorConflito:
-        i.publicoDor || "Rascunho: descrever a dor/conflito do publico sem sensacionalismo.",
-      explicacaoSimples: i.angulo
-        ? `Angulo: ${i.angulo}. Explicar o tema sem prescrever nem citar doses.`
-        : "Rascunho: explicar o tema sem prescrever nem citar doses.",
-      virada: "Rascunho: virada educativa reforcando avaliacao individual.",
-      cta: i.cta,
-      cuidadosMedicos:
-        i.observacaoCompliance || "Nao prescrever. Nao citar doses. Nao prometer resultado.",
-      risco: i.familia === "medicamento" ? "alto" : "medio",
-      prioridade: i.prioridade,
-      formatoSugerido: i.tipo || "Reels",
-      status: "aguardando_validacao",
-      criadoEm: new Date().toISOString(),
-    };
+    const script = buildScriptFromIdea(i, genId("s"));
     try {
       const saved = await appendScript(script);
       addScript(saved);

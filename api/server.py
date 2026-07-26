@@ -446,7 +446,7 @@ def map_ideas(rows: list[dict]) -> list[dict]:
                 "observacaoCompliance": r.get("Observações") or "",
                 "prioridade": _prioridade(r.get("Prioridade")),
                 "status": _idea_status(r.get("Status")),
-                "criadoEm": _iso(None),
+                "criadoEm": _iso(r.get("Criado em") or r.get("Data")),
             }
         )
     return out
@@ -473,7 +473,7 @@ def map_scripts(rows: list[dict]) -> list[dict]:
                 "aprovador": r.get("Aprovador") or None,
                 "link": _link(r.get("Link doc/video")),
                 "status": _script_status(r.get("Status")),
-                "criadoEm": _iso(None),
+                "criadoEm": _iso(r.get("Criado em") or r.get("Data")),
                 "validadoEm": _iso(r.get("Data aprovação")) if r.get("Data aprovação") else None,
             }
         )
@@ -2138,6 +2138,7 @@ class ScriptIn(BaseModel):
     formatoSugerido: str = "Reels"
     aprovador: str | None = None
     validadoEm: str | None = None
+    criadoEm: str | None = None
     link: str | None = None
     status: str = "aguardando_validacao"
 
@@ -2285,6 +2286,7 @@ def append_script(payload: ScriptIn) -> dict:
     _append("roteiros", row)
     headers = ["Categoria", "Tema", "Título", "Hook", "Dor/Conflito", "Explicação simples", "Virada/Provocação", "CTA", "Cuidados médicos", "Risco", "Formato sugerido", "Status", "Aprovador", "Data aprovação", "Link doc/video", "ID"]
     raw = dict(zip(headers, row))
+    raw["Criado em"] = payload.criadoEm or _now()
     _append_snapshot_row("roteiros", raw)
     return {"ok": True, "script": map_scripts([raw])[0]}
 
