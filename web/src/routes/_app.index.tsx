@@ -370,7 +370,11 @@ function VideoRow({ job, currency }: { job: CostedVideoJob; currency: string }) 
       </div>
       <div className="shrink-0 text-right">
         <p className="text-sm font-medium tabular-nums">
-          {job.costUsd ? formatCurrency(job.costUsd, job.currency || currency) : "Sem custo"}
+          {job.costUsd && job.costUsd > 0
+            ? formatCurrency(job.costUsd, job.currency || currency)
+            : job.status === "fila" || job.status === "processando"
+              ? "Aguardando custo"
+              : "Custo não rastreado"}
         </p>
         <p className="text-[11px] text-muted-foreground">{job.provider}</p>
       </div>
