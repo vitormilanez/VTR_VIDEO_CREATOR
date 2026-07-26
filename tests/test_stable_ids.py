@@ -85,10 +85,27 @@ class StableIdTests(unittest.TestCase):
 
     def test_final_narration_compliance_accepts_safe_educational_text(self) -> None:
         text = server._validate_final_narration(
-            {"hook": "Cada pessoa precisa de avaliacao individual."},
+            {
+                "hook": (
+                    "Cada pessoa precisa de avaliacao individual. O conteudo serve para explicar "
+                    "o tema com calma, sem substituir consulta e sem transformar informacao em "
+                    "orientacao personalizada."
+                )
+            },
             None,
+            10,
         )
         self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
+
+    def test_final_narration_blocks_placeholder_script(self) -> None:
+        with self.assertRaises(server.HTTPException) as raised:
+            server._validate_final_narration(
+                {"hook": "Conteudo educativo"},
+                "Hook educativo sugerido — revise antes de aprovar. Rascunho: virada educativa reforcando avaliacao individual.",
+                10,
+            )
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("antes do HeyGen", raised.exception.detail)
 
     def test_video_prompt_applies_production_preferences(self) -> None:
         prompt = server._video_prompt(

@@ -6,6 +6,7 @@ import { CompliancePanel, HighlightedText } from "@/components/compliance-panel"
 import { StatusTimeline, type TimelineStep } from "@/components/status-timeline";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
+import { narrationQualityIssues } from "@/lib/script-quality";
 import { prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import {
@@ -39,6 +40,7 @@ import {
   Save,
   ShieldCheck,
   Sparkles,
+  TriangleAlert,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -88,6 +90,11 @@ function RoteiroDetalhe() {
     [id, videoJobs],
   );
   const latestJob = existingJobs[0];
+  const qualityIssues = useMemo(
+    () => narrationQualityIssues(narrationText, durationSeconds),
+    [durationSeconds, narrationText],
+  );
+  const canSendToProduction = qualityIssues.length === 0;
 
   useEffect(() => {
     if (script) {
@@ -162,6 +169,10 @@ function RoteiroDetalhe() {
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
+    if (!canSendToProduction) {
+      toast.error(`Revise o texto falado antes de enviar: ${qualityIssues[0]}`);
+      return;
+    }
     setSending(true);
     try {
       const job = await createHeyGenVideo(script.id, {
@@ -258,8 +269,12 @@ function RoteiroDetalhe() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    title="Gerar outra versão deste roteiro"
-                    disabled={dirty || sending || !avatarId || !voiceId}
+                    title={
+                      !canSendToProduction
+                        ? "Revise o texto falado antes de enviar"
+                        : "Gerar outra versão deste roteiro"
+                    }
+                    disabled={dirty || sending || !avatarId || !voiceId || !canSendToProduction}
                   >
                     <History className="mr-1 h-4 w-4" /> Nova versão
                   </Button>
@@ -275,8 +290,14 @@ function RoteiroDetalhe() {
               trigger={
                 <Button
                   size="sm"
-                  title={dirty ? "Salve as alteracoes antes de enviar" : "Enviar roteiro ao HeyGen"}
-                  disabled={dirty || sending || !avatarId || !voiceId}
+                  title={
+                    dirty
+                      ? "Salve as alteracoes antes de enviar"
+                      : !canSendToProduction
+                        ? "Revise o texto falado antes de enviar"
+                        : "Enviar roteiro ao HeyGen"
+                  }
+                  disabled={dirty || sending || !avatarId || !voiceId || !canSendToProduction}
                 >
                   <Film className="mr-1 h-4 w-4" /> Enviar para producao
                 </Button>
@@ -545,6 +566,21 @@ function RoteiroDetalhe() {
                 onChange={(event) => setNarrationText(event.target.value)}
                 className="leading-6"
               />
+              {qualityIssues.length > 0 ? (
+                <div className="mt-2 rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-[11px] leading-4 text-status-danger">
+                  <div className="mb-1 flex items-center gap-1.5 font-semibold">
+                    <TriangleAlert className="h-3.5 w-3.5" />
+                    Revise antes de enviar ao HeyGen
+                  </div>
+                  <ul className="space-y-0.5 pl-5">
+                    {qualityIssues.map((issue) => (
+                      <li key={issue} className="list-disc">
+                        {issue}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <div className="mt-2 flex justify-between text-[11px] text-muted-foreground">
                 <span>{narrationText.trim().split(/\s+/).filter(Boolean).length} palavras</span>
                 <span>

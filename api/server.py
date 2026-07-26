@@ -1377,7 +1377,7 @@ def create_video(payload: VideoCreateIn) -> dict:
 def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
     command = _heygen_cli()
     script = _find_script(payload.scriptId)
-    _validate_final_narration(script, payload.narrationText)
+    _validate_final_narration(script, payload.narrationText, payload.durationSeconds)
     try:
         balance_before, currency_before = _heygen_wallet(command)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
@@ -2408,7 +2408,36 @@ def _pack_compliance(pack: dict[str, Any]) -> dict[str, Any]:
     return {"ok": not issues, "blocked": bool(issues), "issues": list(dict.fromkeys(issues))}
 
 
-def _validate_final_narration(script: dict[str, Any], narration_text: str | None) -> str:
+_NARRATION_PLACEHOLDERS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"hook educativo sugerido|revise antes de aprovar", re.I), "Hook ainda parece sugestao automatica"),
+    (re.compile(r"\brascunho\b", re.I), "Texto ainda contem marcacao de rascunho"),
+    (re.compile(r"angulo:\s*angulo|ângulo:\s*ângulo", re.I), "Angulo duplicado ou com label tecnico"),
+    (re.compile(r"explicar o tema sem prescrever|virada educativa reforcando", re.I), "Trecho ainda esta escrito como instrucao interna"),
+]
+
+
+def _narration_quality_issues(text: str, duration_seconds: int) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    issues: list[str] = []
+    for pattern, issue in _NARRATION_PLACEHOLDERS:
+        if pattern.search(normalized):
+            issues.append(issue)
+
+    outro_matches = re.findall(re.escape(MANDATORY_VIDEO_OUTRO), normalized, flags=re.I)
+    if len(outro_matches) != 1:
+        issues.append("Encerramento padrao deve aparecer exatamente uma vez")
+    elif not normalized.lower().endswith(MANDATORY_VIDEO_OUTRO.lower()):
+        issues.append("Encerramento padrao precisa ser a ultima frase")
+
+    word_count = len([word for word in re.split(r"\s+", normalized) if word])
+    minimum_words = 18 if duration_seconds <= 15 else 35 if duration_seconds <= 30 else 50 if duration_seconds <= 45 else 65
+    if word_count < minimum_words:
+        issues.append(f"Texto muito curto para {duration_seconds}s")
+
+    return list(dict.fromkeys(issues))
+
+
+def _validate_final_narration(script: dict[str, Any], narration_text: str | None, duration_seconds: int = 45) -> str:
     """Valida exatamente a fala que sera incorporada ao prompt pago do HeyGen."""
     text = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
     if not text:
@@ -2422,6 +2451,13 @@ def _validate_final_narration(script: dict[str, Any], narration_text: str | None
         raise HTTPException(
             status_code=422,
             detail=f"Texto falado bloqueado pelo compliance final: {reasons}.",
+        )
+    quality_issues = _narration_quality_issues(final_text, duration_seconds)
+    if quality_issues:
+        reasons = "; ".join(quality_issues)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Texto falado bloqueado antes do HeyGen: {reasons}.",
         )
     return final_text
 
