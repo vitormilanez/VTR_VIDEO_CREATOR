@@ -131,6 +131,7 @@ export interface AppSettings {
   palavrasProibidas: string[];
   radar: {
     termosExtras: string[];
+    fontes: Array<"google_news" | "gdelt" | "pubmed" | "reddit" | "serpapi">;
     periodo: "dia" | "semana" | "quinzena" | "mes";
     limitePorBusca: number;
     potencialMinimo: number;
@@ -165,6 +166,7 @@ export const defaultSettings: AppSettings = {
   ],
   radar: {
     termosExtras: ["atividade fisica", "sono", "compulsao alimentar"],
+    fontes: ["google_news", "gdelt", "pubmed", "reddit", "serpapi"],
     periodo: "semana",
     limitePorBusca: 20,
     potencialMinimo: 1,

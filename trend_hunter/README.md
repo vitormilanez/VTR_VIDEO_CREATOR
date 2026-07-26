@@ -24,7 +24,25 @@ trend_hunter/output/trends_AAAA-MM-DD.json
 
 ## Fontes
 
-Por padrao, o script usa Google News RSS, que e gratuito.
+Por padrao, o script busca em fontes gratuitas e tolerantes a falha:
+
+- Google News RSS: noticias brasileiras recentes.
+- GDELT: cobertura global e alto volume de noticias.
+- PubMed: estudos cientificos recentes.
+- Reddit: duvidas reais do publico.
+- Google Trends via SerpAPI: opcional, apenas se houver `SERPAPI_KEY`.
+
+As fontes podem ser ligadas/desligadas na tela `Configuracoes > Radar de tendencias`.
+Tambem e possivel rodar manualmente:
+
+```bash
+../.venv/bin/python trend_hunter.py \
+  --query "GLP-1" \
+  --source google_news \
+  --source gdelt \
+  --source pubmed \
+  --source reddit
+```
 
 Opcionalmente, se houver uma chave `SERPAPI_KEY`, ele tambem tenta buscar dados de Google Trends via SerpAPI:
 
@@ -58,7 +76,8 @@ Para enviar tendencias do CSV mais recente para a aba `Radar Tendencias`:
 ## Campos gerados
 
 - `periodo`: dia, semana, quinzena ou mes.
-- `fonte`: Google News RSS ou SerpAPI Google Trends.
+- `fonte`: origem do sinal, como Google News RSS, GDELT, PubMed, Reddit ou SerpAPI Google Trends.
+- `tipo`: noticia, noticia global, estudo cientifico, duvida do publico ou busca em alta.
 - `trend`: titulo ou termo encontrado.
 - `score`: pontuacao de relevancia editorial.
 - `termos_encontrados`: termos de interesse encontrados no texto.

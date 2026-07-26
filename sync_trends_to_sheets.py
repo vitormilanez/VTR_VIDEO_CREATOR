@@ -52,6 +52,15 @@ def public_pain_from_terms(terms: str) -> str:
     return "Dúvida sobre emagrecimento, metabolismo e saúde."
 
 
+def public_pain_from_row(row: dict[str, str]) -> str:
+    source_type = row.get("tipo", "")
+    if "Dúvida" in source_type:
+        return "Dúvida real do público, boa para conteúdo de esclarecimento."
+    if "Estudo" in source_type:
+        return "Curiosidade sobre estudo novo; precisa de tradução simples e cautelosa."
+    return public_pain_from_terms(row.get("termos_encontrados", ""))
+
+
 def theme_from_trend(row: dict[str, str]) -> str:
     terms = [term.strip() for term in row.get("termos_encontrados", "").split(",") if term.strip()]
     if terms:
@@ -95,10 +104,14 @@ def trend_to_radar_row(row: dict[str, str]) -> list[object]:
         row.get("fonte", "Trend Hunter"),
         link,
         signal,
-        public_pain_from_terms(row.get("termos_encontrados", "")),
+        public_pain_from_row(row),
         priority_from_score(score),
         "Pendente",
-        f"Score {score}. {row.get('angulo_de_conteudo', '')} {row.get('cuidado_medico_compliance', '')}".strip(),
+        (
+            f"Tipo: {row.get('tipo', 'Tendência')}. Score {score}. "
+            f"{row.get('angulo_de_conteudo', '')} "
+            f"{row.get('cuidado_medico_compliance', '')}"
+        ).strip(),
     ]
     return [apply_portuguese_br_accents(value) if isinstance(value, str) else value for value in sheet_row]
 

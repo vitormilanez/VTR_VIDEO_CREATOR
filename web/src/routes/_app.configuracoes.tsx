@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -18,6 +19,36 @@ import {
 import { toast } from "sonner";
 import { Loader2, Save } from "lucide-react";
 import { defaultSettings } from "@/lib/mock-data";
+
+type RadarFonte = "google_news" | "gdelt" | "pubmed" | "reddit" | "serpapi";
+
+const radarSources: Array<{ id: RadarFonte; label: string; description: string }> = [
+  {
+    id: "google_news",
+    label: "Google News",
+    description: "Notícias brasileiras recentes",
+  },
+  {
+    id: "gdelt",
+    label: "GDELT",
+    description: "Mídia global e alto volume",
+  },
+  {
+    id: "pubmed",
+    label: "PubMed",
+    description: "Estudos científicos recentes",
+  },
+  {
+    id: "reddit",
+    label: "Reddit",
+    description: "Dúvidas reais do público",
+  },
+  {
+    id: "serpapi",
+    label: "Google Trends",
+    description: "Opcional, usa SERPAPI_KEY",
+  },
+];
 
 export const Route = createFileRoute("/_app/configuracoes")({
   head: () => ({
@@ -48,6 +79,9 @@ function ConfiguracoesPage() {
   const [temas, setTemas] = useState(settings.temasPrioritarios.join("\n"));
   const [palavras, setPalavras] = useState(settings.palavrasProibidas.join("\n"));
   const [termosExtras, setTermosExtras] = useState(currentRadar.termosExtras.join("\n"));
+  const [fontes, setFontes] = useState<RadarFonte[]>(
+    currentRadar.fontes ?? defaultSettings.radar.fontes,
+  );
   const [periodo, setPeriodo] = useState(currentRadar.periodo);
   const [limite, setLimite] = useState(String(currentRadar.limitePorBusca));
   const [potencialMinimo, setPotencialMinimo] = useState(String(currentRadar.potencialMinimo));
@@ -59,6 +93,7 @@ function ConfiguracoesPage() {
     setPalavras(settings.palavrasProibidas.join("\n"));
     const nextRadar = settings.radar ?? defaultSettings.radar;
     setTermosExtras(nextRadar.termosExtras.join("\n"));
+    setFontes(nextRadar.fontes ?? defaultSettings.radar.fontes);
     setPeriodo(nextRadar.periodo);
     setLimite(String(nextRadar.limitePorBusca));
     setPotencialMinimo(String(nextRadar.potencialMinimo));
@@ -72,6 +107,7 @@ function ConfiguracoesPage() {
       palavrasProibidas: lines(palavras),
       radar: {
         termosExtras: lines(termosExtras),
+        fontes: fontes.length ? fontes : defaultSettings.radar.fontes,
         periodo,
         limitePorBusca: clampNumber(limite, 1, 50, 20),
         potencialMinimo: clampNumber(potencialMinimo, 1, 10, 1),
@@ -182,6 +218,35 @@ function ConfiguracoesPage() {
                   value={potencialMinimo}
                   onChange={(event) => setPotencialMinimo(event.target.value)}
                 />
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs">Fontes de busca</Label>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                {radarSources.map((source) => (
+                  <label
+                    key={source.id}
+                    className="flex cursor-pointer items-start gap-3 rounded-md border p-3"
+                  >
+                    <Checkbox
+                      checked={fontes.includes(source.id)}
+                      onCheckedChange={(checked) => {
+                        setFontes((current) =>
+                          checked
+                            ? Array.from(new Set([...current, source.id]))
+                            : current.filter((item) => item !== source.id),
+                        );
+                      }}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium">{source.label}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {source.description}
+                      </span>
+                    </span>
+                  </label>
+                ))}
               </div>
             </div>
           </div>

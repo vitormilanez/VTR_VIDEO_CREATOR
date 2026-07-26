@@ -120,6 +120,9 @@ def build_search_queries(custom_terms: list[str]) -> list[str]:
 SOURCE_WEIGHT = {
     "Google News RSS": 12,
     "SerpAPI Google Trends": 18,
+    "GDELT": 14,
+    "PubMed": 16,
+    "Reddit": 10,
 }
 
 
@@ -127,6 +130,7 @@ SOURCE_WEIGHT = {
 class TrendItem:
     periodo: str
     fonte: str
+    tipo: str
     trend: str
     score: int
     termos_encontrados: str
@@ -149,6 +153,10 @@ def google_news_rss_url(query: str, period_filter: str) -> str:
         "https://news.google.com/rss/search?"
         f"q={quote_plus(full_query)}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
     )
+
+
+def period_days(period: str) -> int:
+    return {"dia": 1, "semana": 7, "quinzena": 15, "mes": 30}.get(period, 7)
 
 
 def extract_date(entry: dict) -> str:
@@ -249,6 +257,7 @@ def fetch_google_news(
                     TrendItem(
                         periodo=period,
                         fonte="Google News RSS",
+                        tipo="Notícia",
                         trend=title,
                         score=score,
                         termos_encontrados=", ".join(terms),
@@ -259,6 +268,193 @@ def fetch_google_news(
                     )
                 )
 
+    return items
+
+
+def fetch_gdelt(
+    *,
+    queries: list[str],
+    period: str,
+    keywords: dict[str, int],
+    per_query: int,
+) -> list[TrendItem]:
+    items: list[TrendItem] = []
+    endpoint = "https://api.gdeltproject.org/api/v2/doc/doc"
+    timespan = f"{period_days(period)}d"
+
+    for query in queries:
+        params = {
+            "query": query,
+            "mode": "ArtList",
+            "format": "json",
+            "maxrecords": max(3, min(per_query, 15)),
+            "sort": "HybridRel",
+            "timespan": timespan,
+        }
+        try:
+            response = requests.get(endpoint, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError):
+            continue
+
+        for article in data.get("articles", [])[:per_query]:
+            title = str(article.get("title") or "").strip()
+            url = str(article.get("url") or "").strip()
+            domain = str(article.get("domain") or "GDELT")
+            text = f"{title} {article.get('seendate') or ''} {domain}"
+            terms = found_terms(f"{query} {text}", keywords)
+            if not title or not terms:
+                continue
+            score = score_item(text, "GDELT", period, terms, keywords)
+            items.append(
+                TrendItem(
+                    periodo=period,
+                    fonte=f"GDELT · {domain}",
+                    tipo="Notícia global",
+                    trend=title,
+                    score=score,
+                    termos_encontrados=", ".join(terms),
+                    angulo_de_conteudo=content_angle(title, terms),
+                    cuidado_medico_compliance=compliance_note(title),
+                    link_da_fonte=url,
+                    publicado_em=parse_gdelt_date(str(article.get("seendate") or "")),
+                )
+            )
+    return items
+
+
+def parse_gdelt_date(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return date_parser.parse(value).date().isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def fetch_pubmed(
+    *,
+    queries: list[str],
+    period: str,
+    keywords: dict[str, int],
+    per_query: int,
+) -> list[TrendItem]:
+    items: list[TrendItem] = []
+    search_endpoint = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    summary_endpoint = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+    days = period_days(period)
+
+    for query in queries:
+        params = {
+            "db": "pubmed",
+            "term": query,
+            "retmode": "json",
+            "sort": "pub date",
+            "retmax": max(3, min(per_query, 10)),
+            "reldate": days,
+            "datetype": "pdat",
+        }
+        try:
+            response = requests.get(search_endpoint, params=params, timeout=30)
+            response.raise_for_status()
+            ids = response.json().get("esearchresult", {}).get("idlist", [])
+        except (requests.RequestException, ValueError):
+            continue
+        if not ids:
+            continue
+        try:
+            summary_response = requests.get(
+                summary_endpoint,
+                params={"db": "pubmed", "id": ",".join(ids), "retmode": "json"},
+                timeout=30,
+            )
+            summary_response.raise_for_status()
+            result = summary_response.json().get("result", {})
+        except (requests.RequestException, ValueError):
+            continue
+        for pubmed_id in ids:
+            row = result.get(pubmed_id) or {}
+            title = str(row.get("title") or "").strip().rstrip(".")
+            terms = found_terms(f"{query} {title}", keywords)
+            if not title or not terms:
+                continue
+            score = score_item(title, "PubMed", period, terms, keywords) + 6
+            items.append(
+                TrendItem(
+                    periodo=period,
+                    fonte="PubMed",
+                    tipo="Estudo científico",
+                    trend=title,
+                    score=score,
+                    termos_encontrados=", ".join(terms),
+                    angulo_de_conteudo="Traduzir o achado científico em linguagem simples, sem extrapolar causalidade nem prometer resultado.",
+                    cuidado_medico_compliance=compliance_note(title),
+                    link_da_fonte=f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/",
+                    publicado_em=str(row.get("pubdate") or ""),
+                )
+            )
+    return items
+
+
+def fetch_reddit(
+    *,
+    queries: list[str],
+    period: str,
+    keywords: dict[str, int],
+    per_query: int,
+) -> list[TrendItem]:
+    items: list[TrendItem] = []
+    endpoint = "https://www.reddit.com/search.json"
+    reddit_period = {"dia": "day", "semana": "week", "quinzena": "month", "mes": "month"}.get(
+        period,
+        "week",
+    )
+    headers = {"User-Agent": "VTRVideoCreatorTrendHunter/1.0"}
+    for query in queries:
+        params = {
+            "q": query,
+            "sort": "hot",
+            "t": reddit_period,
+            "limit": max(3, min(per_query, 10)),
+        }
+        try:
+            response = requests.get(endpoint, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+            children = response.json().get("data", {}).get("children", [])
+        except (requests.RequestException, ValueError):
+            continue
+        for child in children:
+            data = child.get("data") or {}
+            title = str(data.get("title") or "").strip()
+            subreddit = str(data.get("subreddit_name_prefixed") or "Reddit")
+            terms = found_terms(f"{query} {title}", keywords)
+            if not title or not terms:
+                continue
+            comments = int(data.get("num_comments") or 0)
+            ups = int(data.get("ups") or 0)
+            score = score_item(title, "Reddit", period, terms, keywords)
+            score += min(comments // 5, 12) + min(ups // 50, 10)
+            permalink = str(data.get("permalink") or "")
+            items.append(
+                TrendItem(
+                    periodo=period,
+                    fonte=f"Reddit · {subreddit}",
+                    tipo="Dúvida do público",
+                    trend=title,
+                    score=score,
+                    termos_encontrados=", ".join(terms),
+                    angulo_de_conteudo="Usar como sinal de dor real do público; transformar em explicação educativa sem responder como consulta individual.",
+                    cuidado_medico_compliance=compliance_note(title),
+                    link_da_fonte=f"https://www.reddit.com{permalink}" if permalink else "https://www.reddit.com/search/",
+                    publicado_em=datetime.fromtimestamp(
+                        float(data.get("created_utc") or 0),
+                        tz=timezone.utc,
+                    ).date().isoformat()
+                    if data.get("created_utc")
+                    else TODAY,
+                )
+            )
     return items
 
 
@@ -304,6 +500,7 @@ def fetch_serpapi_trends(*, queries: list[str], keywords: dict[str, int]) -> lis
                 TrendItem(
                     periodo="semana",
                     fonte="SerpAPI Google Trends",
+                    tipo="Busca em alta",
                     trend=trend,
                     score=score,
                     termos_encontrados=", ".join(terms),
@@ -362,6 +559,13 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Itens lidos por consulta no Google News.",
     )
+    parser.add_argument(
+        "--source",
+        action="append",
+        choices=["google_news", "gdelt", "pubmed", "reddit", "serpapi"],
+        default=[],
+        help="Fonte de busca. Pode repetir. Padrao: google_news, gdelt, pubmed, reddit e serpapi quando houver chave.",
+    )
     return parser.parse_args()
 
 
@@ -371,27 +575,40 @@ def main() -> int:
     custom_terms = [term.strip() for term in args.query if term.strip()]
     queries = build_search_queries(custom_terms)
     keywords = build_keywords(custom_terms)
+    sources = set(args.source or ["google_news", "gdelt", "pubmed", "reddit", "serpapi"])
     periods = [args.period]
     if args.period != "dia":
         periods.insert(0, "dia")
 
-    print("Coletando tendencias no Google News RSS...")
+    print("Coletando tendencias...")
+    print(f"Fontes ativas: {', '.join(sorted(sources))}")
     print(f"Consultas ativas: {len(queries)}")
     for query in queries[:12]:
         print(f"- {query}")
     if len(queries) > 12:
         print(f"... +{len(queries) - 12} consultas")
-    items = fetch_google_news(
-        queries=queries,
-        periods=periods,
-        keywords=keywords,
-        per_query=max(3, min(args.per_query, 15)),
-    )
+    per_query = max(3, min(args.per_query, 15))
+    items: list[TrendItem] = []
+    if "google_news" in sources:
+        items.extend(
+            fetch_google_news(
+                queries=queries,
+                periods=periods,
+                keywords=keywords,
+                per_query=per_query,
+            )
+        )
+    if "gdelt" in sources:
+        items.extend(fetch_gdelt(queries=queries, period=args.period, keywords=keywords, per_query=per_query))
+    if "pubmed" in sources:
+        items.extend(fetch_pubmed(queries=queries, period=args.period, keywords=keywords, per_query=per_query))
+    if "reddit" in sources:
+        items.extend(fetch_reddit(queries=queries, period=args.period, keywords=keywords, per_query=per_query))
 
-    if os.getenv("SERPAPI_KEY"):
+    if "serpapi" in sources and os.getenv("SERPAPI_KEY"):
         print("SERPAPI_KEY encontrada. Coletando Google Trends via SerpAPI...")
         items.extend(fetch_serpapi_trends(queries=queries, keywords=keywords))
-    else:
+    elif "serpapi" in sources:
         print("SERPAPI_KEY nao encontrada. Pulando Google Trends opcional.")
 
     ranked = dedupe_and_rank(items)

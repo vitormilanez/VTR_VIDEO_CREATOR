@@ -540,6 +540,7 @@ DEFAULT_SETTINGS = {
     ],
     "radar": {
         "termosExtras": ["atividade fisica", "sono", "compulsao alimentar"],
+        "fontes": ["google_news", "gdelt", "pubmed", "reddit", "serpapi"],
         "periodo": "semana",
         "limitePorBusca": 20,
         "potencialMinimo": 1,
@@ -551,6 +552,10 @@ DEFAULT_SETTINGS = {
 
 class RadarSettingsIn(BaseModel):
     termosExtras: list[str] = Field(default_factory=list, max_length=30)
+    fontes: list[Literal["google_news", "gdelt", "pubmed", "reddit", "serpapi"]] = Field(
+        default_factory=lambda: ["google_news", "gdelt", "pubmed", "reddit", "serpapi"],
+        max_length=5,
+    )
     periodo: Literal["dia", "semana", "quinzena", "mes"] = "semana"
     limitePorBusca: int = Field(default=20, ge=1, le=50)
     potencialMinimo: int = Field(default=1, ge=1, le=10)
@@ -607,6 +612,11 @@ def _merge_settings(raw: dict[str, Any] | None = None) -> dict[str, Any]:
         radar.get("termosExtras") or settings["radar"]["termosExtras"],
         limit=30,
     )
+    allowed_sources = {"google_news", "gdelt", "pubmed", "reddit", "serpapi"}
+    configured_sources = [
+        source for source in radar.get("fontes", settings["radar"]["fontes"]) if source in allowed_sources
+    ]
+    settings["radar"]["fontes"] = configured_sources or settings["radar"]["fontes"]
     integrations = raw.get("integracoes") if isinstance(raw.get("integracoes"), dict) else {}
     settings["integracoes"] = {
         "heygen": bool(integrations.get("heygen", settings["integracoes"]["heygen"])),
@@ -1863,6 +1873,8 @@ def hunt_trends() -> dict:
     for term in query_terms:
         trend_args.extend(["--query", term])
     trend_args.extend(["--period", str(radar_settings.get("periodo") or "semana")])
+    for source in radar_settings.get("fontes") or []:
+        trend_args.extend(["--source", str(source)])
     sync_limit = int(radar_settings.get("limitePorBusca") or 20)
 
     steps = [

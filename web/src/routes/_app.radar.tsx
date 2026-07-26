@@ -113,7 +113,7 @@ export function RadarPage() {
     if (familia !== "todas" && t.familia !== familia) return false;
     if (status !== "todos" && t.status !== status) return false;
     if (prioridade !== "todas" && t.prioridade !== prioridade) return false;
-    if (fonte !== "todas" && fonteLabel(t.fonte) !== fonte) return false;
+    if (fonte !== "todas" && sourceGroup(t.fonte) !== fonte) return false;
     if ((t.potencial || 0) < Number(potencialMinimo || 0)) return false;
     if (busca) {
       const q = busca.toLowerCase();
@@ -127,7 +127,7 @@ export function RadarPage() {
   });
 
   const fontes = Array.from(
-    new Set(trends.map((trend) => fonteLabel(trend.fonte)).filter(Boolean)),
+    new Set(trends.map((trend) => sourceGroup(trend.fonte)).filter(Boolean)),
   ).sort();
   const ordered = [...filtered].sort((a, b) => {
     if (ordenacao === "potencial") return (b.potencial || 0) - (a.potencial || 0);
@@ -389,12 +389,12 @@ export function RadarPage() {
                         className="flex items-center gap-1 truncate hover:text-foreground hover:underline"
                         title={t.fonte}
                       >
-                        <span className="truncate">{fonteLabel(t.fonte)}</span>
+                        <span className="truncate">{sourceGroup(t.fonte)}</span>
                         <ExternalLink className="h-3 w-3 shrink-0" />
                       </a>
                     ) : (
                       <span className="block truncate" title={t.fonte}>
-                        {fonteLabel(t.fonte)}
+                        {sourceGroup(t.fonte)}
                       </span>
                     )}
                   </TableCell>
@@ -453,7 +453,7 @@ export function RadarPage() {
                 <PotencialBadge valor={preview.potencial} />
               </div>
               <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                <Meta label="Fonte" value={fonteLabel(preview.fonte)} />
+                <Meta label="Fonte" value={preview.fonte} />
                 <Meta label="Familia" value={familiaLabel[preview.familia]} />
                 {preview.subtema ? <Meta label="Subtema" value={preview.subtema} /> : null}
                 <Meta
@@ -541,6 +541,15 @@ function fonteLabel(fonte: string): string {
     }
   }
   return fonte;
+}
+
+function sourceGroup(fonte: string): string {
+  if (fonte.startsWith("GDELT")) return "GDELT";
+  if (fonte.startsWith("Reddit")) return "Reddit";
+  if (fonte.startsWith("PubMed")) return "PubMed";
+  if (fonte.startsWith("SerpAPI")) return "Google Trends";
+  if (fonte.startsWith("Google News")) return "Google News";
+  return fonteLabel(fonte);
 }
 
 function priorityWeight(priority: Prioridade): number {
