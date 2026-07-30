@@ -190,9 +190,10 @@ class StableIdTests(unittest.TestCase):
             },
         ]
         with patch.object(server, "_run_heygen_json", side_effect=responses) as run:
-            returned_groups, looks = server._private_avatar_library("heygen")
+            returned_groups, looks, from_cache = server._private_avatar_library("heygen")
 
         self.assertEqual(returned_groups, groups)
+        self.assertFalse(from_cache)
         self.assertEqual([look["id"] for look in looks], ["visual-1", "visual-2", "visual-3"])
         self.assertEqual(looks[0]["group_name"], "Pessoa 1")
         self.assertEqual(looks[2]["group_id"], "grupo-2")

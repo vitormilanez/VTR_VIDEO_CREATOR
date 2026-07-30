@@ -2590,6 +2590,8 @@ Regras obrigatorias:
 - Destaque limites do estudo de forma simples.
 - Gere ideias especificas, com titulos fortes mas nao sensacionalistas.
 - Cada ideia deve ser pronta para virar roteiro educativo.
+- No campo "angulo" de cada ideia, inclua um briefing completo para o avatar: tese central, dado principal, contexto da população, limite do estudo, virada narrativa e cuidado médico final.
+- O avatar precisa conseguir falar o vídeo só com titulo, hook, angulo, publicoDor, cta e observacaoCompliance.
 - Responda somente no JSON solicitado."""
 
 
@@ -2603,20 +2605,42 @@ def _article_compact_text(text: str, limit: int = 24000) -> str:
 
 
 def _extract_article_numbers(text: str) -> list[str]:
+    normalized = (
+        text.replace("\u2009", " ")
+        .replace("\u202f", " ")
+        .replace("–", "-")
+        .replace("−", "-")
+    )
     patterns = [
-        r"hazard ratio\s*[^\.;,\n]{0,80}",
-        r"\bHR\s*[=:]?\s*0?\.\d+\s*(?:[,; ]+\s*95%[^;\.\n]{0,50})?",
-        r"\b\d{2,3}[  ,]\d{3}\b\s+patients",
-        r"\b\d+[,.]?\d*%\b[^;\.\n]{0,80}",
-        r"median follow-up[^;\.\n]{0,80}",
+        r"\b(?:HR|hazard ratio)\s*(?:was|of|=|:)?\s*\d+(?:[\.,]\d+)?(?:\s*,?\s*95%\s*(?:CI|confidence interval)?\s*(?:of)?\s*\d+(?:[\.,]\d+)?\s*(?:-|to)\s*\d+(?:[\.,]\d+)?)?",
+        r"\bmedian follow-up\s+(?:of\s+)?\d+(?:[\.,]\d+)?\s+years?\b",
+        r"\b\d{2,3}(?:[ ,]\d{3})+\s+(?:patients|individuals|participants|people)\b",
+        r"\bcohort included\s+\d{2,3}(?:[ ,]\d{3})+\s+(?:patients|individuals|participants|people)\b",
+        r"\b\d+(?:[\.,]\d+)?%\s*\([^)]{0,40}\)",
     ]
     found: list[str] = []
     for pattern in patterns:
-        for match in re.finditer(pattern, text, flags=re.I):
+        for match in re.finditer(pattern, normalized, flags=re.I):
             value = re.sub(r"\s+", " ", match.group(0)).strip(" .,;")
+            value = _format_article_number(value)
             if value and value not in found:
                 found.append(value)
     return found[:6]
+
+
+def _format_article_number(value: str) -> str:
+    formatted = value
+    formatted = re.sub(r"\bhazard ratio\b", "HR", formatted, flags=re.I)
+    formatted = re.sub(r"\b95%\s*confidence interval\b", "IC 95%", formatted, flags=re.I)
+    formatted = re.sub(r"\b95%\s*CI\b", "IC 95%", formatted, flags=re.I)
+    formatted = re.sub(r"\bmedian follow-up of ([\d\.,]+) years?\b", r"seguimento mediano de \1 anos", formatted, flags=re.I)
+    formatted = re.sub(r"\bmedian follow-up ([\d\.,]+) years?\b", r"seguimento mediano de \1 anos", formatted, flags=re.I)
+    formatted = re.sub(r"\bcohort included\b", "coorte incluiu", formatted, flags=re.I)
+    formatted = re.sub(r"\bpatients\b", "pacientes", formatted, flags=re.I)
+    formatted = re.sub(r"\bindividuals\b", "individuos", formatted, flags=re.I)
+    formatted = re.sub(r"\bparticipants\b", "participantes", formatted, flags=re.I)
+    formatted = re.sub(r"\bpeople\b", "pessoas", formatted, flags=re.I)
+    return formatted
 
 
 def _article_idea(
@@ -2652,6 +2676,23 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
     cancer = bool(re.search(r"cancer|câncer|tumou?r|oncolog|malignan|neoplasm", lowered))
     observational = bool(re.search(r"cohort|observational|retrospective|target trial emulation|trinetx", lowered))
     numbers = _extract_article_numbers(text)
+    sample = next(
+        (
+            n
+            for n in numbers
+            if re.search(
+                r"patients|pacientes|individuals|individuos|participants|participantes|people|pessoas",
+                n,
+                re.I,
+            )
+        ),
+        "Amostra descrita no artigo.",
+    )
+    follow_up = next(
+        (n for n in numbers if "follow-up" in n.lower() or "seguimento" in n.lower()),
+        "Seguimento descrito no artigo.",
+    )
+    primary_hr = next((n for n in numbers if re.search(r"\b(?:HR|hazard ratio)\b", n, re.I)), "")
     study_type = (
         "Coorte observacional com emulação de ensaio-alvo"
         if "target trial emulation" in lowered
@@ -2669,13 +2710,23 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
         if glp and cancer
         else "Nao extrapolar o artigo; separar achado, limite e orientacao individual."
     )
+    follow_up_context = (
+        f"com {follow_up.lower()}"
+        if follow_up != "Seguimento descrito no artigo."
+        else "com seguimento descrito no artigo"
+    )
+    evidence_context = (
+        "Contexto para o avatar: explique que foi uma coorte observacional em adultos com obesidade sem diabetes. "
+        f"O dado central foi {primary_hr or 'uma associacao estatistica favoravel'}, {follow_up_context}. "
+        "Deixe claro que isso não prova causalidade, não substitui rastreio e não vira indicação de remédio."
+    )
     analysis = {
         "tituloArtigo": "Artigo importado",
         "achadoPrincipal": finding,
         "tipoEstudo": study_type,
         "populacao": "Adultos com obesidade, sem diabetes, conforme texto importado." if glp and cancer else "Populacao descrita no artigo importado.",
-        "amostra": next((n for n in numbers if "patients" in n.lower()), "Amostra descrita no artigo."),
-        "seguimento": next((n for n in numbers if "follow" in n.lower()), "Seguimento descrito no artigo."),
+        "amostra": sample,
+        "seguimento": follow_up,
         "numerosChave": numbers or ["Extrair numeros principais antes de publicar."],
         "limitacoes": [
             "Desenho observacional nao prova causalidade.",
@@ -2698,7 +2749,7 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
             payload,
             "Canetas reduzem risco de câncer? Calma.",
             "Caneta emagrecedora pode reduzir risco de câncer? A resposta honesta começa com uma palavra: associação.",
-            "Abrir com a manchete forte e explicar por que estudo observacional promissor nao vira promessa de protecao.",
+            f"{evidence_context} Estrutura da fala: comece pela dúvida da manchete, traduza o estudo em linguagem simples, explique a diferença entre associação e prevenção, e finalize dizendo que a decisão continua individual.",
             "Pessoa que viu manchete sobre GLP-1 e câncer e quer saber se isso muda sua conduta.",
             compliance,
             "Salve para lembrar: artigo promissor não substitui avaliação individual.",
@@ -2707,7 +2758,7 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
             payload,
             "O rodapé que a manchete não conta",
             "A manchete fala em menos câncer. Mas o rodapé do estudo é onde mora a parte mais importante.",
-            "Explicar população, comparador, seguimento curto e necessidade de estudos prospectivos antes de transformar achado em regra.",
+            f"{evidence_context} Estrutura da fala: mostre o achado principal, depois puxe o espectador para o rodapé: população estudada, comparador, seguimento curto e pedido dos autores por estudos prospectivos.",
             "Pessoa animada com novidade científica, mas sem repertório para interpretar limite de estudo.",
             compliance,
             "Compartilhe com alguém que precisa entender a notícia inteira.",
@@ -2716,7 +2767,7 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
             payload,
             "HR 0,59 não é escudo contra câncer",
             "Quando um estudo fala em HR 0,59, isso não significa que você ganhou um escudo contra câncer.",
-            "Traduzir hazard ratio em linguagem simples e mostrar a diferença entre risco populacional, associação estatística e decisão clínica individual.",
+            f"{evidence_context} Estrutura da fala: explique o número sem aula estatística longa, traduza como menor incidência observada no grupo estudado e deixe claro que número populacional não é promessa individual.",
             "Pessoa que se impressiona com número científico e pode transformar estatística em promessa pessoal.",
             compliance,
             "Me siga para entender estudo sem cair em promessa bonita demais.",
@@ -2725,7 +2776,7 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
             payload,
             "GLP-1, obesidade e câncer: o que dá para dizer",
             "Existe uma conversa séria entre obesidade, inflamação, GLP-1 e câncer. Mas séria não quer dizer mágica.",
-            "Conectar obesidade e risco oncológico com cautela, separando mecanismo possível, perda de peso e evidência ainda em confirmação.",
+            f"{evidence_context} Estrutura da fala: conecte obesidade e risco oncológico com cautela, cite que há hipóteses biológicas em estudo e separe isso de uma afirmação de tratamento ou prevenção.",
             "Paciente tentando entender se emagrecer muda risco de saúde além da balança.",
             compliance,
             "Salve para conversar com seu médico com mais contexto.",
@@ -2734,7 +2785,7 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
             payload,
             "Caneta não substitui rastreio",
             "Mesmo que um estudo seja promissor, ele não cancela mamografia, colonoscopia ou acompanhamento médico.",
-            "Usar o artigo para reforçar que tratamento de obesidade e prevenção oncológica são complementares, não substitutos.",
+            f"{evidence_context} Estrutura da fala: use o artigo como gancho para explicar que tratamento de obesidade e prevenção oncológica são complementares; exame de rastreio não sai da rotina por causa de uma manchete.",
             "Pessoa inclinada a abandonar exame preventivo por confiar demais em uma medicação.",
             compliance,
             "Encaminhe para quem transforma manchete em decisão de saúde.",
