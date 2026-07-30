@@ -203,12 +203,20 @@ export function RadarPage() {
       const data = await fetchState();
       hydrate(data);
       const queryInfo = res.queries?.length ? ` ${res.queries.length} termos usados.` : "";
-      toast.success(
-        res.added
-          ? `${res.added} novas tendencias capturadas.${queryInfo}`
-          : `Radar atualizado.${queryInfo}`,
-        { id: aviso },
-      );
+      if (res.partial) {
+        toast.warning(
+          res.detail ||
+            `Tendencias capturadas localmente, mas a sincronizacao com o Sheets falhou no passo '${res.failedStep}'.`,
+          { id: aviso },
+        );
+      } else {
+        toast.success(
+          res.added
+            ? `${res.added} novas tendencias capturadas.${queryInfo}`
+            : `Radar atualizado.${queryInfo}`,
+          { id: aviso },
+        );
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel buscar tendencias.", {
         id: aviso,

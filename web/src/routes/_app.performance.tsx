@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { AppShell } from "@/components/app-shell";
 import { MetricCard } from "@/components/metric-card";
 import { EmptyState } from "@/components/empty-state";
@@ -44,6 +44,52 @@ function PerformancePage() {
 
   const fmt = (n: number) => n.toLocaleString("pt-BR");
 
+  const porTema = Object.values(
+    metrics.reduce<
+      Record<
+        string,
+        {
+          tema: string;
+          posts: number;
+          views: number;
+          comments: number;
+          saves: number;
+          shares: number;
+          retencaoSoma: number;
+          retencaoCount: number;
+        }
+      >
+    >((acc, m) => {
+      const tema = m.tema || "Sem tema";
+      const atual = acc[tema] || {
+        tema,
+        posts: 0,
+        views: 0,
+        comments: 0,
+        saves: 0,
+        shares: 0,
+        retencaoSoma: 0,
+        retencaoCount: 0,
+      };
+      atual.posts += 1;
+      atual.views += m.views;
+      atual.comments += m.comments;
+      atual.saves += m.saves;
+      atual.shares += m.shares;
+      if (m.retencao != null) {
+        atual.retencaoSoma += m.retencao;
+        atual.retencaoCount += 1;
+      }
+      acc[tema] = atual;
+      return acc;
+    }, {}),
+  )
+    .map((row) => ({
+      ...row,
+      retencaoMedia: row.retencaoCount ? row.retencaoSoma / row.retencaoCount : null,
+    }))
+    .sort((a, b) => b.views - a.views);
+
   return (
     <AppShell title="Performance">
       {!metaOn && (
@@ -88,6 +134,42 @@ function PerformancePage() {
         />
       </div>
 
+      {porTema.length > 0 ? (
+        <div className="mt-6 rounded-xl border bg-card shadow-sm">
+          <div className="border-b px-4 py-2.5 font-display text-sm font-semibold">
+            Por tema
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Tema</TableHead>
+                <TableHead className="text-right">Posts</TableHead>
+                <TableHead className="text-right">Views</TableHead>
+                <TableHead className="text-right">Retencao media</TableHead>
+                <TableHead className="text-right">Coment.</TableHead>
+                <TableHead className="text-right">Salv.</TableHead>
+                <TableHead className="text-right">Compart.</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {porTema.map((row) => (
+                <TableRow key={row.tema}>
+                  <TableCell className="font-medium">{row.tema}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.posts}</TableCell>
+                  <TableCell className="text-right tabular-nums">{fmt(row.views)}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.retencaoMedia != null ? `${row.retencaoMedia.toFixed(1)}%` : "—"}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">{fmt(row.comments)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{fmt(row.saves)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{fmt(row.shares)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : null}
+
       <div className="mt-6 rounded-xl border bg-card shadow-sm">
         <div className="border-b px-4 py-2.5 font-display text-sm font-semibold">
           Metricas por post
@@ -118,7 +200,19 @@ function PerformancePage() {
             <TableBody>
               {metrics.map((m) => (
                 <TableRow key={m.id}>
-                  <TableCell className="font-medium">{m.tema || "—"}</TableCell>
+                  <TableCell className="font-medium">
+                    {m.scriptId ? (
+                      <Link
+                        to="/roteiros/$id"
+                        params={{ id: m.scriptId }}
+                        className="hover:underline"
+                      >
+                        {m.tema || "—"}
+                      </Link>
+                    ) : (
+                      m.tema || "—"
+                    )}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {m.canal ? canalLabel[m.canal] : "—"}
                   </TableCell>

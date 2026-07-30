@@ -124,6 +124,11 @@ export interface PerformanceMetric {
   aprendizado?: string;
   link?: string;
   coletadoEm: string;
+  /** Preenchidos quando o Link post bate com um post do Calendario (ver /api/state). */
+  calendarPostId?: string | null;
+  scriptId?: string | null;
+  videoJobId?: string | null;
+  formatoSugerido?: string | null;
 }
 
 export interface AppSettings {

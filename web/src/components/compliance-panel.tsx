@@ -1,17 +1,19 @@
 import { AlertTriangle, CheckCircle2, ShieldAlert, ShieldCheck } from "lucide-react";
-import { scanCompliance, tokenizeWithForbidden } from "@/lib/compliance";
+import { scanCompliance, tokenizeWithForbidden, type ComplianceRule } from "@/lib/compliance";
 import { cn } from "@/lib/utils";
 
 export function CompliancePanel({
   fields,
   palavrasProibidas,
+  rules,
   className,
 }: {
   fields: Record<string, string>;
   palavrasProibidas: string[];
+  rules?: ComplianceRule[];
   className?: string;
 }) {
-  const { hits, alertas, ok } = scanCompliance(fields, palavrasProibidas);
+  const { hits, alertas, ok } = scanCompliance(fields, palavrasProibidas, rules);
 
   return (
     <div className={cn("rounded-xl border bg-card shadow-sm", className)}>

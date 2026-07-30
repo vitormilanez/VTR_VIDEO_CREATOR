@@ -14,6 +14,20 @@ export interface ComplianceAlert {
   severidade: "alta" | "media" | "baixa";
 }
 
+/**
+ * Formato das regras vindas de GET /api/state (complianceRules), a mesma
+ * lista que o backend usa para bloquear producao no HeyGen (_pack_compliance
+ * em api/server.py). Passar essa lista aqui evita que o preview do frontend
+ * fique com regras diferentes do bloqueio real.
+ */
+export interface ComplianceRule {
+  id: string;
+  pattern: string;
+  titulo: string;
+  detalhe: string;
+  severidade: "alta" | "media" | "baixa";
+}
+
 const medicalPatterns: Array<{
   id: string;
   regex: RegExp;
@@ -58,12 +72,23 @@ const medicalPatterns: Array<{
   },
 ];
 
+const defaultRules: ComplianceRule[] = medicalPatterns.map((p) => ({
+  id: p.id,
+  pattern: p.regex.source,
+  titulo: p.titulo,
+  detalhe: p.detalhe,
+  severidade: p.severidade,
+}));
+
 export function scanCompliance(
   fields: Record<string, string>,
   palavrasProibidas: string[],
+  rules: ComplianceRule[] = defaultRules,
 ): { hits: ComplianceHit[]; alertas: ComplianceAlert[]; ok: boolean } {
   const hitMap = new Map<string, ComplianceHit>();
   const alertMap = new Map<string, ComplianceAlert>();
+  const activeRules = rules.length ? rules : defaultRules;
+  const compiledRules = activeRules.map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, "i") }));
 
   const forbidden = palavrasProibidas
     .map((p) => p.trim())
@@ -87,7 +112,7 @@ export function scanCompliance(
         });
       }
     }
-    for (const p of medicalPatterns) {
+    for (const p of compiledRules) {
       if (p.regex.test(text)) {
         alertMap.set(p.id, {
           id: p.id,

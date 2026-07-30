@@ -54,6 +54,10 @@ export const Route = createFileRoute("/_app/roteiros/$id")({
   component: RoteiroDetalhe,
 });
 
+const HEYGEN_CATALOG_FALLBACK_VOICES: HeyGenCatalog["voices"] = [
+  { id: "33a98f732fe144d9a40f5cf33a7e95ec", name: "drguilhermeia", gender: "male" },
+];
+
 function RoteiroDetalhe() {
   const { id } = Route.useParams();
   const script = useStore((s) => s.scripts.find((x) => x.id === id));
@@ -61,12 +65,15 @@ function RoteiroDetalhe() {
   const addVideoJob = useStore((s) => s.addVideoJob);
   const videoJobs = useStore((s) => s.videoJobs);
   const palavras = useStore((s) => s.settings.palavrasProibidas);
+  const complianceRules = useStore((s) => s.complianceRules);
   const navigate = useNavigate();
 
   const [draft, setDraft] = useState<Script | undefined>(script);
   const [sending, setSending] = useState(false);
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<HeyGenCatalog | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [styles, setStyles] = useState<HeyGenStyle[]>([]);
   const [avatarId, setAvatarId] = useState("");
   const [voiceId, setVoiceId] = useState("");
@@ -103,16 +110,33 @@ function RoteiroDetalhe() {
     }
   }, [script]);
 
-  useEffect(() => {
+  const loadCatalog = (showSuccess = false) => {
+    setCatalogLoading(true);
+    setCatalogError(null);
     fetchHeyGenCatalog()
       .then((data) => {
         setCatalog(data);
         setAvatarId(data.defaultAvatarId || data.avatars[0]?.id || "");
         setVoiceId(data.defaultVoiceId || data.voices[0]?.id || "");
+        if (showSuccess) {
+          toast.success(
+            data.avatars.length
+              ? `${data.avatars.length} avatares carregados.`
+              : "HeyGen respondeu, mas nao retornou avatares prontos.",
+          );
+        }
       })
-      .catch((err) =>
-        toast.error(err instanceof Error ? err.message : "Falha ao carregar HeyGen."),
-      );
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : "Falha ao carregar HeyGen.";
+        setCatalogError(message);
+        setCatalog({ avatars: [], voices: HEYGEN_CATALOG_FALLBACK_VOICES, defaultAvatarId: null });
+        toast.error(message);
+      })
+      .finally(() => setCatalogLoading(false));
+  };
+
+  useEffect(() => {
+    loadCatalog();
     fetchHeyGenStyles("cinematic")
       .then((data) => setStyles(data.styles))
       .catch(() => setStyles([]));
@@ -420,10 +444,37 @@ function RoteiroDetalhe() {
               </p>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <Field label="Avatar">
-                <Select value={avatarId} onValueChange={setAvatarId} disabled={!catalog}>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-xs">Avatar</Label>
+                  {(catalogError || (!catalogLoading && !catalog?.avatars.length)) && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => loadCatalog(true)}
+                    >
+                      <RotateCcw className="mr-1 h-3.5 w-3.5" />
+                      Atualizar
+                    </Button>
+                  )}
+                </div>
+                <Select
+                  value={avatarId}
+                  onValueChange={setAvatarId}
+                  disabled={catalogLoading || !catalog?.avatars.length}
+                >
                   <SelectTrigger>
-                    <SelectValue placeholder="Carregando avatares..." />
+                    <SelectValue
+                      placeholder={
+                        catalogLoading
+                          ? "Carregando avatares..."
+                          : catalogError
+                            ? "Nao foi possivel carregar avatares"
+                            : "Nenhum avatar pronto encontrado"
+                      }
+                    />
                   </SelectTrigger>
                   <SelectContent>
                     {catalog?.avatars.map((avatar) => (
@@ -433,7 +484,13 @@ function RoteiroDetalhe() {
                     ))}
                   </SelectContent>
                 </Select>
-              </Field>
+                {catalogError ? (
+                  <p className="text-[11px] leading-4 text-status-danger">
+                    HeyGen demorou para responder. Tente atualizar; se houver cache, o app usa a
+                    ultima lista salva.
+                  </p>
+                ) : null}
+              </div>
               <Field label="Formato do vídeo">
                 <Select
                   value={orientation}
@@ -620,7 +677,11 @@ function RoteiroDetalhe() {
             <h3 className="mb-3 font-display text-sm font-semibold">Timeline</h3>
             <StatusTimeline steps={timeline} />
           </div>
-          <CompliancePanel fields={complianceFields} palavrasProibidas={palavras} />
+          <CompliancePanel
+            fields={complianceFields}
+            palavrasProibidas={palavras}
+            rules={complianceRules}
+          />
         </div>
       </div>
     </AppShell>

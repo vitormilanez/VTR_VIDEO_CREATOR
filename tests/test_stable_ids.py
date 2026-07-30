@@ -72,6 +72,21 @@ class FakeCalendarClient:
         return {"updatedRange": range_name}
 
 
+class FakeRadarClient:
+    def __init__(self) -> None:
+        self.values = [server.RADAR_HEADERS.copy()]
+
+    def get_values(self, _range_name: str) -> list[list[str]]:
+        return self.values
+
+    def append_rows(self, _range_name: str, rows: list[list[object]]) -> dict:
+        self.values.extend([[str(value) for value in row] for row in rows])
+        return {"updates": {"updatedRows": len(rows)}}
+
+    def update_values(self, range_name: str, _rows: list[list[object]]) -> dict:
+        return {"updatedRange": range_name}
+
+
 class StableIdTests(unittest.TestCase):
     def test_final_narration_compliance_blocks_before_production(self) -> None:
         with self.assertRaises(server.HTTPException) as raised:
@@ -804,6 +819,119 @@ class StableIdTests(unittest.TestCase):
                     )
             finally:
                 server.SNAPSHOT = original_snapshot
+
+    def test_manual_trend_is_persisted_and_mapped(self) -> None:
+        client = FakeRadarClient()
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary) / "snapshot.json"
+            snapshot.write_text(
+                json.dumps({"updated_at": "", "sheets": {"radar": []}}),
+                encoding="utf-8",
+            )
+            original_snapshot = server.SNAPSHOT
+            server.SNAPSHOT = snapshot
+            try:
+                with patch(
+                    "integrations.google_sheets_rest_client.GoogleSheetsRestClient",
+                    return_value=client,
+                ):
+                    created = server.append_trend(
+                        server.TrendIn(
+                            id="t-estavel",
+                            titulo="Fome noturna",
+                            fonte="Cadastro manual",
+                            potencial=7,
+                            prioridade="alta",
+                        )
+                    )["trend"]
+                    self.assertEqual(created["id"], "t-estavel")
+                    self.assertEqual(created["titulo"], "Fome noturna")
+                    self.assertEqual(created["potencial"], 7)
+                    self.assertEqual(created["prioridade"], "alta")
+                    self.assertEqual(created["status"], "novo")
+                    persisted = json.loads(snapshot.read_text(encoding="utf-8"))
+                    self.assertEqual(persisted["sheets"]["radar"][0]["ID"], "t-estavel")
+                    self.assertEqual(
+                        persisted["sheets"]["radar"][0]["Fonte"], "Cadastro manual"
+                    )
+            finally:
+                server.SNAPSHOT = original_snapshot
+
+    def test_pack_compliance_blocks_sensational_tone(self) -> None:
+        result = server._pack_compliance(
+            {"hook": "Voce nao vai acreditar no que a ciencia descobriu!"}
+        )
+        self.assertTrue(result["blocked"])
+        self.assertTrue(any("sensacionalista" in issue.lower() for issue in result["issues"]))
+
+    def test_pack_compliance_blocks_self_diagnosis_suggestion(self) -> None:
+        result = server._pack_compliance(
+            {"hook": "Voce tem resistencia a insulina e nem sabe."}
+        )
+        self.assertTrue(result["blocked"])
+        self.assertTrue(any("autodiagn" in issue.lower() for issue in result["issues"]))
+
+    def test_pack_compliance_allows_clean_educational_text(self) -> None:
+        result = server._pack_compliance(
+            {"hook": "Cada pessoa precisa de avaliacao individual antes de qualquer tratamento."}
+        )
+        self.assertFalse(result["blocked"])
+        self.assertEqual(result["issues"], [])
+
+    def test_attach_calendar_links_matches_by_link_post(self) -> None:
+        calendar_posts = [
+            {
+                "id": "p-1",
+                "link": "https://instagram.com/p/abc",
+                "scriptId": "s-1",
+                "videoJobId": "v-1",
+                "formato": "Reel",
+            },
+            {"id": "p-2", "link": None, "scriptId": "s-2", "videoJobId": None, "formato": "Reel"},
+        ]
+        performance = [
+            {"id": "m-0", "link": "https://instagram.com/p/abc"},
+            {"id": "m-1", "link": None},
+            {"id": "m-2", "link": "https://instagram.com/p/nao-existe"},
+        ]
+        result = server._attach_calendar_links(performance, calendar_posts)
+        self.assertEqual(result[0]["calendarPostId"], "p-1")
+        self.assertEqual(result[0]["scriptId"], "s-1")
+        self.assertEqual(result[0]["videoJobId"], "v-1")
+        self.assertEqual(result[0]["formatoSugerido"], "Reel")
+        self.assertIsNone(result[1]["calendarPostId"])
+        self.assertIsNone(result[2]["calendarPostId"])
+
+    def test_hunt_trends_returns_partial_result_when_sync_step_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary) / "snapshot.json"
+            snapshot.write_text(
+                json.dumps({"updated_at": "", "sheets": {"radar": []}}),
+                encoding="utf-8",
+            )
+            original_snapshot = server.SNAPSHOT
+            server.SNAPSHOT = snapshot
+            calls: list[str] = []
+
+            def fake_run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
+                calls.append(args[0])
+                if len(calls) == 1:
+                    return subprocess.CompletedProcess(
+                        args, 0, stdout="tendencias capturadas", stderr=""
+                    )
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="token expirado")
+
+            try:
+                with patch.object(server, "_run", side_effect=fake_run):
+                    result = server.hunt_trends()
+            finally:
+                server.SNAPSHOT = original_snapshot
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["partial"])
+            self.assertEqual(result["failedStep"], "sync_sheets")
+            self.assertIn("token expirado", result["detail"])
+            self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

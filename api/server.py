@@ -530,6 +530,27 @@ def map_performance(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _attach_calendar_links(
+    performance: list[dict[str, Any]], calendar_posts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Cruza Performance com Calendario pelo 'Link post' (coluna presente nas duas
+    abas hoje). Nao exige mudar o schema da planilha: linhas de Performance sem
+    link preenchido simplesmente ficam sem o cruzamento."""
+    by_link: dict[str, dict[str, Any]] = {}
+    for post in calendar_posts:
+        link = (post.get("link") or "").strip()
+        if link and link not in by_link:
+            by_link[link] = post
+    for metric in performance:
+        link = (metric.get("link") or "").strip()
+        match = by_link.get(link) if link else None
+        metric["calendarPostId"] = match.get("id") if match else None
+        metric["scriptId"] = match.get("scriptId") if match else None
+        metric["videoJobId"] = match.get("videoJobId") if match else None
+        metric["formatoSugerido"] = match.get("formato") if match else None
+    return performance
+
+
 DEFAULT_SETTINGS = {
     "temasPrioritarios": [
         "obesidade", "GLP-1", "Mounjaro", "Ozempic", "Wegovy",
@@ -549,6 +570,42 @@ DEFAULT_SETTINGS = {
     # Integracoes reais existem no backend, mas so ligar quando testadas.
     "integracoes": {"heygen": False, "meta": False, "googleSheets": True},
 }
+
+
+# Fonte unica das regras medicas de compliance. O backend usa isto para
+# bloquear producao no HeyGen (_pack_compliance); o frontend recebe a mesma
+# lista via /api/state e usa para o preview em tempo real (web/src/lib/compliance.ts),
+# evitando que as duas pontas fiquem com regras divergentes.
+MEDICAL_COMPLIANCE_RULES: list[dict[str, str]] = [
+    {
+        "id": "dose",
+        "pattern": r"\b\d+\s?(mg|mcg|ml|g)\b|\bdose\b|\bcomprimid|\bampola",
+        "titulo": "Possível menção de dose ou formulação",
+        "detalhe": "Não citar dose, mg ou formato de administração. Reforçar avaliação médica.",
+        "severidade": "alta",
+    },
+    {
+        "id": "prescrever",
+        "pattern": r"\b(prescreva|tome|use|aumente|reduza|pare|comece)\b",
+        "titulo": "Possível linguagem prescritiva",
+        "detalhe": "Não prescrever pelo vídeo. Reforçar consulta individual.",
+        "severidade": "alta",
+    },
+    {
+        "id": "sensacional",
+        "pattern": r"\b(chocante|inacreditavel|voce nao vai acreditar|surreal|absurdo)\b",
+        "titulo": "Tom sensacionalista",
+        "detalhe": "Evitar sensacionalismo. Manter tom educativo.",
+        "severidade": "media",
+    },
+    {
+        "id": "autodx",
+        "pattern": r"\bvoce (esta|tem)\s+(diabetes|resistencia|obesidade)\b",
+        "titulo": "Sugestão de autodiagnóstico",
+        "detalhe": "Não induzir autodiagnóstico. Reforçar avaliação clínica.",
+        "severidade": "media",
+    },
+]
 
 
 class RadarSettingsIn(BaseModel):
@@ -1122,14 +1179,19 @@ def state() -> dict:
     """Payload unico que hidrata o store do frontend."""
     snap = _load_snapshot()
     sheets = snap.get("sheets", {})
+    calendar_posts = map_calendar(sheets.get("calendario", []))
+    performance = _attach_calendar_links(
+        map_performance(sheets.get("performance", [])), calendar_posts
+    )
     return {
         "trends": map_trends(sheets.get("radar", [])),
         "ideas": map_ideas(sheets.get("ideias", [])),
         "scripts": map_scripts(sheets.get("roteiros", [])),
         "videoJobs": _load_video_jobs(),
-        "calendarPosts": map_calendar(sheets.get("calendario", [])),
-        "performance": map_performance(sheets.get("performance", [])),
+        "calendarPosts": calendar_posts,
+        "performance": performance,
         "settings": _load_settings(),
+        "complianceRules": MEDICAL_COMPLIANCE_RULES,
         "updatedAt": snap.get("updated_at"),
     }
 
@@ -1886,29 +1948,58 @@ def hunt_trends() -> dict:
         ("refresh_snapshot", [str(ROOT / "sync_sheets_snapshot.py")], 120),
     ]
     log: list[str] = []
-    for nome, args, timeout in steps:
+    for index, (nome, args, timeout) in enumerate(steps):
         if not Path(args[0]).exists():
             raise HTTPException(status_code=404, detail=f"{nome}: script nao encontrado")
         try:
             proc = _run(args, timeout=timeout)
         except subprocess.TimeoutExpired:
-            raise HTTPException(status_code=504, detail=f"{nome}: tempo esgotado")
+            if index == 0:
+                raise HTTPException(status_code=504, detail=f"{nome}: tempo esgotado")
+            return _hunt_partial_result(log, query_terms, nome, "tempo esgotado")
         log.append(f"[{nome}] rc={proc.returncode}\n{(proc.stdout or proc.stderr)[-400:]}")
         if proc.returncode != 0:
-            # Passos 2/3 falham sem credenciais (.env / token OAuth do Sheets).
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    f"Falha no passo '{nome}'. Verifique .env e .google_sheets_token.json "
-                    f"na raiz do projeto.\n{(proc.stderr or proc.stdout)[-400:]}"
-                ),
-            )
+            if index == 0:
+                # Passo 1 falhou: nao ha nenhuma tendencia capturada, erro completo faz sentido.
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"Falha no passo '{nome}'. Verifique .env e .google_sheets_token.json "
+                        f"na raiz do projeto.\n{(proc.stderr or proc.stdout)[-400:]}"
+                    ),
+                )
+            # Passos 2/3 falham sem credenciais (.env / token OAuth do Sheets), mas o
+            # Trend Hunter (passo 1) ja capturou tendencias localmente: nao descartamos
+            # esse trabalho so porque a sincronizacao com o Sheets falhou.
+            return _hunt_partial_result(log, query_terms, nome, (proc.stderr or proc.stdout)[-400:])
 
     depois = len(map_trends(_load_snapshot().get("sheets", {}).get("radar", [])))
     return {
         "ok": True,
+        "partial": False,
         "added": max(depois - antes, 0),
         "queries": query_terms,
+        "log": "\n\n".join(log)[-1500:],
+    }
+
+
+def _hunt_partial_result(
+    log: list[str], query_terms: list[str], failed_step: str, reason: str
+) -> dict:
+    """Passo 1 (captura) funcionou, mas um passo seguinte falhou. Devolve 200 com
+    partial=True em vez de estourar erro, para o frontend nao esconder o que
+    ja deu certo."""
+    return {
+        "ok": True,
+        "partial": True,
+        "added": 0,
+        "queries": query_terms,
+        "failedStep": failed_step,
+        "detail": (
+            f"Trend Hunter capturou tendencias localmente, mas o passo '{failed_step}' falhou "
+            "antes de chegar ao Sheets. Verifique .env e .google_sheets_token.json e rode "
+            f"'Buscar tendencias' de novo.\n{reason}"
+        ),
         "log": "\n\n".join(log)[-1500:],
     }
 
@@ -2714,10 +2805,9 @@ def _pack_compliance(pack: dict[str, Any]) -> dict[str, Any]:
     for term in DEFAULT_SETTINGS["palavrasProibidas"]:
         if _norm(term) in text:
             issues.append(f"Palavra ou promessa proibida: {term}")
-    if re.search(r"\b\d+\s?(mg|mcg|ml|g)\b|\bdose\b|\bcomprimid|\bampola", text):
-        issues.append("Possivel mencao de dose ou forma de administracao")
-    if re.search(r"\b(prescreva|tome|use|aumente|reduza|pare|comece)\b", text):
-        issues.append("Possivel linguagem prescritiva")
+    for rule in MEDICAL_COMPLIANCE_RULES:
+        if re.search(rule["pattern"], text):
+            issues.append(rule["titulo"])
     return {"ok": not issues, "blocked": bool(issues), "issues": list(dict.fromkeys(issues))}
 
 

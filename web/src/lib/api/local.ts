@@ -213,7 +213,16 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
   return response.settings;
 }
 
-export async function huntTrends(): Promise<{ ok: boolean; added?: number; queries?: string[] }> {
+export interface HuntTrendsResult {
+  ok: boolean;
+  partial?: boolean;
+  added?: number;
+  queries?: string[];
+  failedStep?: string;
+  detail?: string;
+}
+
+export async function huntTrends(): Promise<HuntTrendsResult> {
   const res = await fetch(`${BASE}/api/trends/hunt`, { method: "POST" });
   if (!res.ok) {
     let detail = `API /api/trends/hunt -> ${res.status}`;
@@ -225,7 +234,7 @@ export async function huntTrends(): Promise<{ ok: boolean; added?: number; queri
     }
     throw new Error(detail);
   }
-  return (await res.json()) as { ok: boolean; added?: number; queries?: string[] };
+  return (await res.json()) as HuntTrendsResult;
 }
 
 export interface HeyGenCatalog {

@@ -12,6 +12,7 @@ import {
   type VideoJob,
   type VideoJobStatus,
 } from "./mock-data";
+import type { ComplianceRule } from "./compliance";
 
 interface State {
   trends: Trend[];
@@ -21,6 +22,7 @@ interface State {
   calendarPosts: CalendarPost[];
   performance: PerformanceMetric[];
   settings: AppSettings;
+  complianceRules: ComplianceRule[];
   syncedAt: string | null;
   // acoes basicas
   addTrend: (t: Trend) => void;
@@ -57,6 +59,7 @@ export interface HydratePayload {
   calendarPosts: CalendarPost[];
   performance: PerformanceMetric[];
   settings: AppSettings;
+  complianceRules?: ComplianceRule[];
   updatedAt?: string | null;
 }
 
@@ -69,6 +72,7 @@ const initial = {
   calendarPosts: [] as CalendarPost[],
   performance: [] as PerformanceMetric[],
   settings: defaultSettings,
+  complianceRules: [] as ComplianceRule[],
   syncedAt: null as string | null,
 };
 
@@ -135,6 +139,7 @@ export const useStore = create<State>()(
           calendarPosts: payload.calendarPosts ?? s.calendarPosts,
           performance: payload.performance ?? s.performance,
           settings: payload.settings ?? s.settings,
+          complianceRules: payload.complianceRules ?? s.complianceRules,
           syncedAt: payload.updatedAt ?? s.syncedAt,
         })),
 
