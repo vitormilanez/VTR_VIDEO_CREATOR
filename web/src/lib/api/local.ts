@@ -372,6 +372,8 @@ export async function fetchHeyGenAvatars(): Promise<{
   avatars: HeyGenAvatarGroup[];
   looks: HeyGenAvatarLook[];
   jobs: AvatarJob[];
+  /** true quando a HeyGen estava indisponivel e a lista veio do cache local. */
+  fromCache?: boolean;
 }> {
   return requestJson("/api/heygen/avatars", { method: "GET" });
 }

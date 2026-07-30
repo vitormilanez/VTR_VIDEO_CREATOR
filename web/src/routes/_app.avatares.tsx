@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
+  AlertTriangle,
   Captions,
   CheckCircle2,
   Clapperboard,
@@ -108,6 +109,7 @@ function AvataresPage() {
   const [jobs, setJobs] = useState<AvatarJob[]>([]);
   const [styles, setStyles] = useState<HeyGenStyle[]>([]);
   const [loading, setLoading] = useState(true);
+  const [avatarsFromCache, setAvatarsFromCache] = useState(false);
 
   async function loadData() {
     setLoading(true);
@@ -119,6 +121,7 @@ function AvataresPage() {
       setAvatars(avatarResult.value.avatars);
       setLooks(avatarResult.value.looks);
       setJobs(avatarResult.value.jobs);
+      setAvatarsFromCache(Boolean(avatarResult.value.fromCache));
     } else {
       toast.error(
         avatarResult.reason instanceof Error
@@ -146,6 +149,16 @@ function AvataresPage() {
         </Button>
       }
     >
+      {avatarsFromCache ? (
+        <div className="mb-3 flex items-start gap-2 rounded-md border border-status-warn/40 bg-status-warn/10 p-3 text-xs">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-warn-foreground" />
+          <div>
+            A HeyGen não respondeu agora — esta lista é do último cache local e pode estar
+            desatualizada (avatares removidos ou criados recentemente podem não aparecer
+            corretamente). Clique em "Atualizar" para tentar de novo.
+          </div>
+        </div>
+      ) : null}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList className="grid h-auto w-full grid-cols-3 md:w-auto">
           <TabsTrigger value="library">

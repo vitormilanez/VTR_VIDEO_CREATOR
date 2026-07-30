@@ -740,15 +740,20 @@ def _private_avatar_library(
     command: str | None = None,
     *,
     allow_cache: bool = True,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Lista identidades privadas e todos os visuais de cada identidade."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """Lista identidades privadas e todos os visuais de cada identidade.
+
+    O terceiro valor (from_cache) indica se algum dado veio do cache local em
+    vez de uma consulta ao vivo na HeyGen. Chamadas que vao gastar producao
+    real (ex.: criar video) devem passar allow_cache=False para nunca validar
+    o avatar escolhido contra uma lista desatualizada."""
     if command is None:
         try:
             command = _heygen_cli()
         except HTTPException:
             cached = _load_heygen_avatar_cache() if allow_cache else None
             if cached:
-                return cached
+                return cached[0], cached[1], True
             raise
     try:
         response = _run_heygen_json(
@@ -759,7 +764,7 @@ def _private_avatar_library(
     except HTTPException:
         cached = _load_heygen_avatar_cache() if allow_cache else None
         if cached:
-            return cached
+            return cached[0], cached[1], True
         raise
     groups = _find_value(response, "data")
     if not isinstance(groups, list):
@@ -776,6 +781,7 @@ def _private_avatar_library(
                 cached_lookup.setdefault(str(cached_look.get("group_id") or ""), []).append(cached_look)
 
     looks: list[dict[str, Any]] = []
+    used_cache_for_some_looks = False
     for group in groups:
         group_id = str(group.get("id") or "")
         if not group_id:
@@ -789,6 +795,8 @@ def _private_avatar_library(
             group_looks = _find_value(look_response, "data")
         except HTTPException:
             group_looks = cached_lookup.get(group_id, [])
+            if group_looks:
+                used_cache_for_some_looks = True
         if not isinstance(group_looks, list):
             continue
         for raw_look in group_looks:
@@ -800,11 +808,12 @@ def _private_avatar_library(
             looks.append(look)
     if looks:
         _save_heygen_avatar_cache(groups, looks)
-    elif allow_cache:
+        return groups, looks, used_cache_for_some_looks
+    if allow_cache:
         cached = _load_heygen_avatar_cache()
         if cached:
-            return cached
-    return groups, looks
+            return cached[0], cached[1], True
+    return groups, looks, False
 
 
 def _heygen_default_avatar_id(avatars: list[dict[str, Any]]) -> str:
@@ -841,7 +850,7 @@ def health() -> dict:
 @app.get("/api/heygen/catalog")
 def heygen_catalog() -> dict:
     """Catalogo de avatares e vozes privados disponiveis para producao."""
-    _, looks = _private_avatar_library()
+    _, looks, _from_cache = _private_avatar_library()
     avatars = [
         {
             "id": look.get("id"),
@@ -867,8 +876,13 @@ def heygen_catalog() -> dict:
 @app.get("/api/heygen/avatars")
 def heygen_avatars() -> dict:
     """Lista identidades privadas e todos os visuais criados na conta conectada."""
-    groups, looks = _private_avatar_library()
-    return {"avatars": groups, "looks": looks, "jobs": _load_avatar_jobs()}
+    groups, looks, from_cache = _private_avatar_library()
+    return {
+        "avatars": groups,
+        "looks": looks,
+        "jobs": _load_avatar_jobs(),
+        "fromCache": from_cache,
+    }
 
 
 @app.get("/api/heygen/styles")
@@ -1506,7 +1520,10 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
         balance_before, currency_before = _heygen_wallet(command)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
         balance_before, currency_before = None, None
-    _, private_looks = _private_avatar_library(command)
+    # allow_cache=False: este e o momento de gastar producao real na HeyGen, entao
+    # o avatar escolhido precisa ser validado contra a lista ao vivo, nunca contra
+    # um cache que pode estar desatualizado (avatar removido ou criado recentemente).
+    _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
     ready_looks = [look for look in private_looks if look.get("status") == "completed"]
     avatar_id = payload.avatarId or _heygen_default_avatar_id(ready_looks)
     voice_id = payload.voiceId or _heygen_default_voice_id()

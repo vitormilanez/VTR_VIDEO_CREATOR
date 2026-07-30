@@ -7,6 +7,7 @@ export function buildScriptFromIdea(
 ): Script {
   const theme = cleanTheme(idea.titulo);
   const medication = idea.familia === "medicamento" || hasMedicationTerms(theme);
+  const fromArticle = /artigo|cient/i.test(idea.tipo || "") || /estudo|artigo|coorte|observacional/i.test(idea.angulo);
   const audiencePain = cleanSentence(
     idea.publicoDor || "A pessoa quer uma resposta simples para um tema que depende de contexto.",
   );
@@ -21,8 +22,8 @@ export function buildScriptFromIdea(
     titulo: buildTitle(idea, theme, medication),
     hook,
     dorConflito: audiencePain,
-    explicacaoSimples: buildExplanation(theme, angle, medication),
-    virada: buildTurn(theme, medication),
+    explicacaoSimples: buildExplanation(theme, angle, medication, fromArticle),
+    virada: buildTurn(theme, medication, fromArticle),
     cta: buildCta(idea, medication),
     cuidadosMedicos: buildMedicalCautions(idea, medication),
     risco: medication ? "alto" : idea.familia === "comportamento" ? "alto" : "medio",
@@ -30,6 +31,7 @@ export function buildScriptFromIdea(
     formatoSugerido: idea.tipo || "Reel educativo",
     status: "aguardando_validacao",
     criadoEm: createdAt,
+    link: idea.linkOrigem || undefined,
   };
 }
 
@@ -73,7 +75,19 @@ function buildHook(idea: Idea, theme: string, medication: boolean): string {
   return `Se todo mundo fala sobre ${theme}, por que quase ninguém explica do jeito certo?`;
 }
 
-function buildExplanation(theme: string, angle: string, medication: boolean): string {
+function buildExplanation(
+  theme: string,
+  angle: string,
+  medication: boolean,
+  fromArticle: boolean,
+): string {
+  if (fromArticle) {
+    return [
+      angle || "Explique o achado do artigo em linguagem simples, sem transformar associação em promessa.",
+      "Traduza o estudo para o público: o que foi observado, em quem foi observado, qual número importa e qual limite precisa aparecer.",
+      "A mensagem central deve ser: evidência promissora ajuda a fazer perguntas melhores, mas não substitui consulta, rastreio ou decisão individual.",
+    ].join(" ");
+  }
   if (medication) {
     return [
       `${theme} pode aparecer nas notícias como solução simples, mas tratamento não começa pelo nome do remédio.`,
@@ -87,7 +101,10 @@ function buildExplanation(theme: string, angle: string, medication: boolean): st
   ].join(" ");
 }
 
-function buildTurn(theme: string, medication: boolean): string {
+function buildTurn(theme: string, medication: boolean, fromArticle: boolean): string {
+  if (fromArticle) {
+    return "A virada é simples: artigo bom não serve para vender certeza. Serve para explicar melhor o que ainda precisa ser confirmado.";
+  }
   if (medication) {
     return `A pergunta não é “${theme} serve para todo mundo?”. A pergunta é “qual é o contexto de cada paciente?”.`;
   }

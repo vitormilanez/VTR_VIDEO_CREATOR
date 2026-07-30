@@ -337,6 +337,16 @@ function RoteiroDetalhe() {
             <StatusBadge {...scriptStatusLabel[draft.status]} />
             <StatusBadge {...riskLabel[draft.risco]} />
             <StatusBadge {...prioridadeLabel[draft.prioridade]} />
+            {draft.link ? (
+              <a
+                href={draft.link}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-status-info underline-offset-2 hover:underline"
+              >
+                Fonte / artigo original
+              </a>
+            ) : null}
           </div>
 
           <WorkflowJump />
