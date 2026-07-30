@@ -54,8 +54,23 @@ async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
   if (!res.ok) {
     let detail = `API ${path} -> ${res.status}`;
     try {
-      const b = (await res.json()) as { detail?: string };
-      if (b.detail) detail = b.detail;
+      const b = (await res.json()) as { detail?: unknown };
+      if (typeof b.detail === "string") {
+        detail = b.detail;
+      } else if (Array.isArray(b.detail)) {
+        detail = b.detail
+          .map((item) => {
+            if (typeof item === "string") return item;
+            if (item && typeof item === "object" && "msg" in item) {
+              return String((item as { msg: unknown }).msg);
+            }
+            return JSON.stringify(item);
+          })
+          .filter(Boolean)
+          .join(" ");
+      } else if (b.detail) {
+        detail = JSON.stringify(b.detail);
+      }
     } catch {
       /* corpo nao-JSON */
     }
@@ -72,6 +87,22 @@ async function postJson<T = { ok: boolean }>(path: string, body: unknown): Promi
 export async function appendIdea(idea: Idea): Promise<Idea> {
   const response = await postJson<{ ok: boolean; idea: Idea }>("/api/sheets/ideias", idea);
   return response.idea;
+}
+
+export interface ExpandIdeasInput {
+  seed: string;
+  quantity?: number;
+  familia?: Idea["familia"];
+  prioridade?: Idea["prioridade"];
+}
+
+/** Expande uma ideia livre em opcoes editoriais prontas para roteiro. */
+export async function expandIdeas(input: ExpandIdeasInput): Promise<Idea[]> {
+  const response = await postJson<{ ok: boolean; provider: "claude" | "fallback"; ideas: Idea[] }>(
+    "/api/ideas/expand",
+    input,
+  );
+  return response.ideas;
 }
 
 /** Persiste um roteiro gerado na aba Roteiros do Sheets. */
@@ -381,7 +412,7 @@ export interface CutProject {
   youtubeUrl?: string | null;
   selectionMode?: "anthropic" | "local";
   settings: {
-    clipCount: number;
+    clipCount: number | null;
     minDuration: number;
     maxDuration: number;
     durationMode?: "preset" | "auto";
@@ -415,7 +446,7 @@ export async function createCutProject(input: {
   uploadId?: string;
   youtubeUrl?: string;
   sourceName?: string;
-  clipCount: number;
+  clipCount: number | null;
   minDuration: number;
   maxDuration: number;
   durationMode: "preset" | "auto";

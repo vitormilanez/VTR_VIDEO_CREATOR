@@ -1543,7 +1543,7 @@ class CutCreateIn(BaseModel):
     uploadId: str | None = None
     youtubeUrl: str | None = Field(default=None, max_length=500)
     sourceName: str | None = Field(default=None, max_length=300)
-    clipCount: int = Field(default=3, ge=1, le=8)
+    clipCount: int | None = Field(default=3)
     minDuration: int = Field(default=15, ge=8, le=90)
     maxDuration: int = Field(default=45, ge=10, le=120)
     durationMode: Literal["preset", "auto"] = "preset"
@@ -1687,6 +1687,8 @@ def create_cut_project(payload: CutCreateIn) -> dict:
         )
     if payload.maxDuration < payload.minDuration:
         raise HTTPException(status_code=422, detail="A duracao maxima deve superar a minima.")
+    if payload.clipCount is not None and not 1 <= payload.clipCount <= 8:
+        raise HTTPException(status_code=422, detail="A quantidade deve ficar entre 1 e 8 cortes.")
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise HTTPException(status_code=503, detail="FFmpeg nao esta instalado.")
 
@@ -2126,6 +2128,13 @@ class IdeaIn(BaseModel):
     criadoEm: str | None = None
 
 
+class ExpandIdeasIn(BaseModel):
+    seed: str = Field(min_length=8, max_length=2000)
+    quantity: int = Field(default=3, ge=1, le=5)
+    familia: Literal["medicamento", "comportamento", "metabolismo", "obesidade", "educativo"] = "educativo"
+    prioridade: Literal["alta", "media", "baixa"] = "media"
+
+
 class ScriptIn(BaseModel):
     id: str | None = None
     categoria: str = "educativo"
@@ -2257,6 +2266,209 @@ def _ensure_idea_headers(client: Any) -> None:
         if value and index < 11:
             merged[index] = value
     client.update_values("'Ideias'!A1:M1", [merged])
+
+
+_EXPAND_IDEAS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "ideas": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "titulo": {"type": "string"},
+                    "hook": {"type": "string"},
+                    "angulo": {"type": "string"},
+                    "tipo": {"type": "string"},
+                    "publicoDor": {"type": "string"},
+                    "cta": {"type": "string"},
+                    "observacaoCompliance": {"type": "string"},
+                    "prioridade": {"type": "string"},
+                },
+                "required": [
+                    "titulo",
+                    "hook",
+                    "angulo",
+                    "tipo",
+                    "publicoDor",
+                    "cta",
+                    "observacaoCompliance",
+                    "prioridade",
+                ],
+            },
+        }
+    },
+    "required": ["ideas"],
+}
+
+_EXPAND_IDEAS_SYSTEM = """Voce e estrategista editorial de videos curtos para um medico brasileiro.
+Transforme uma ideia bruta em ideias melhores para Reels, TikTok e Shorts.
+
+Regras obrigatorias:
+- Conteudo educativo e nao prescritivo.
+- Nao cite doses.
+- Nao prometa resultado.
+- Nao use cura, milagre, garantia ou sensacionalismo medico.
+- Nao incentive uso de medicamento sem avaliacao individual.
+- Crie titulos especificos, com dor clara, sem ficar generico.
+- Escreva hooks em fala natural brasileira.
+- Contextualize a dor do publico e o angulo do roteiro.
+- CTA deve ser simples e seguro.
+- Responda somente no JSON solicitado."""
+
+
+def _manual_idea_fallback(payload: ExpandIdeasIn) -> list[dict[str, Any]]:
+    seed = re.sub(r"\s+", " ", payload.seed).strip()
+    lowered = seed.lower()
+    medication = bool(
+        re.search(
+            r"glp|mounjaro|ozempic|wegovy|semaglutida|tirzepatida|rem[eé]dio|medica[cç][aã]o|caneta",
+            lowered,
+        )
+    )
+    family = "medicamento" if medication else payload.familia
+    compliance = (
+        "Nao prescrever, nao citar dose, nao prometer resultado e reforcar avaliacao individual."
+        if medication
+        else "Evitar promessa de resultado, diagnostico direto e culpabilizacao."
+    )
+    topic = _idea_seed_topic(seed)
+    angles = [
+        (
+            f"{topic}: o erro que quase ninguem percebe",
+            f"Tem uma parte sobre {topic} que parece simples, mas costuma ser explicada do jeito errado.",
+            "Abrir com a crenca comum, mostrar o contexto que falta e virar para uma orientacao educativa.",
+            "Pessoa que viu uma explicacao curta demais e quer entender sem cair em atalho.",
+        ),
+        (
+            f"{topic}: antes de transformar isso em regra",
+            f"Antes de transformar {topic} em regra para todo mundo, vale olhar para o contexto.",
+            "Explorar quando a dica faz sentido, quando pode confundir e por que avaliacao individual importa.",
+            "Pessoa tentando copiar uma conduta pronta da internet para a propria rotina.",
+        ),
+        (
+            f"{topic}: a verdade menos conveniente",
+            f"A verdade sobre {topic} talvez seja menos chamativa, mas e bem mais util.",
+            "Trocar promessa facil por explicacao pratica, segura e conectada ao comportamento.",
+            "Pessoa cansada de promessas rapidas e procurando um criterio mais realista.",
+        ),
+    ]
+    return [
+        {
+            "id": f"i-{uuid.uuid4().hex[:12]}",
+            "titulo": title,
+            "familia": family,
+            "hook": hook,
+            "angulo": angle,
+            "tipo": "Reel educativo contextualizado",
+            "publicoDor": pain,
+            "cta": "Salve para rever antes de transformar conteudo curto em decisao de saude.",
+            "linkOrigem": None,
+            "observacaoCompliance": compliance,
+            "prioridade": payload.prioridade,
+            "status": "novo",
+            "criadoEm": _now(),
+        }
+        for title, hook, angle, pain in angles[: payload.quantity]
+    ]
+
+
+def _idea_seed_topic(seed: str) -> str:
+    cleaned = re.sub(
+        r"^(quero falar que|quero falar sobre|minha ideia e|minha ideia é|pensei em|falar sobre|falar que|quero|queria)\s+",
+        "",
+        seed.strip(),
+        flags=re.I,
+    )
+    cleaned = cleaned.split(".")[0].split("?")[0].strip(" ,:;")
+    cleaned = re.split(r":|;|\bcasos proibidos\b|\bn[aã]o substitui\b|\balerta\b", cleaned, flags=re.I)[0].strip(" ,:;")
+    words = cleaned.split()
+    if len(words) > 10:
+        cleaned = " ".join(words[:10])
+    return cleaned[:90].rstrip(" ,:;.") or "essa ideia"
+
+
+def _normalize_expanded_ideas(payload: ExpandIdeasIn, rows: Any) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return _manual_idea_fallback(payload)
+    out: list[dict[str, Any]] = []
+    for item in rows[: payload.quantity]:
+        if not isinstance(item, dict):
+            continue
+        raw_priority = _norm(item.get("prioridade") or payload.prioridade)
+        if "alt" in raw_priority:
+            priority = "alta"
+        elif "baix" in raw_priority:
+            priority = "baixa"
+        else:
+            priority = payload.prioridade
+        family = payload.familia
+        if re.search(
+            r"glp|mounjaro|ozempic|wegovy|semaglutida|tirzepatida|rem[eé]dio|medica[cç][aã]o|caneta",
+            json.dumps(item, ensure_ascii=False),
+            re.I,
+        ):
+            family = "medicamento"
+        out.append(
+            {
+                "id": f"i-{uuid.uuid4().hex[:12]}",
+                "titulo": str(item.get("titulo") or "Ideia contextualizada").strip()[:180],
+                "familia": family,
+                "hook": str(item.get("hook") or "").strip()[:500],
+                "angulo": str(item.get("angulo") or "").strip()[:1000],
+                "tipo": str(item.get("tipo") or "Reel educativo contextualizado").strip()[:120],
+                "publicoDor": str(item.get("publicoDor") or "").strip()[:500],
+                "cta": str(item.get("cta") or "Salve para rever com calma.").strip()[:300],
+                "linkOrigem": None,
+                "observacaoCompliance": str(item.get("observacaoCompliance") or "Revisar linguagem antes de gravar.").strip()[:600],
+                "prioridade": priority,
+                "status": "novo",
+                "criadoEm": _now(),
+            }
+        )
+    return out or _manual_idea_fallback(payload)
+
+
+@app.post("/api/ideas/expand")
+def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
+    """Expande uma ideia livre em opcoes editoriais prontas para virar roteiro."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
+
+    import anthropic
+
+    prompt = (
+        f"IDEIA BRUTA:\n{payload.seed}\n\n"
+        f"Quantidade: {payload.quantity}\n"
+        f"Familia sugerida: {payload.familia}\n"
+        f"Prioridade sugerida: {payload.prioridade}\n"
+        "Crie variacoes distintas, especificas e prontas para virar roteiro."
+    )
+    try:
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            max_tokens=1800,
+            system=_EXPAND_IDEAS_SYSTEM,
+            output_config={"format": {"type": "json_schema", "schema": _EXPAND_IDEAS_SCHEMA}},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw_text = "".join(getattr(block, "text", "") for block in message.content)
+        parsed = json.loads(raw_text)
+    except anthropic.APIStatusError:
+        return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
+    except Exception:
+        return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
+
+    return {
+        "ok": True,
+        "provider": "claude",
+        "ideas": _normalize_expanded_ideas(payload, parsed.get("ideas")),
+    }
 
 
 def _append(tab: str, row: list) -> None:

@@ -93,15 +93,17 @@ def _probe_duration(video: Path) -> float:
     return float(process.stdout.strip())
 
 
-def _clip_schema(count: int) -> dict[str, Any]:
+def _clip_schema(count: int | None) -> dict[str, Any]:
+    min_items = 0 if count is None else count
+    max_items = 8 if count is None else count
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "clips": {
                 "type": "array",
-                "minItems": count,
-                "maxItems": count,
+                "minItems": min_items,
+                "maxItems": max_items,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
@@ -247,14 +249,16 @@ def _editorial_score(
     elif word_count < 14:
         score -= 15
     if auto_duration:
-        if 9 <= duration <= 16:
-            score += 12
-        elif 16 < duration <= 24:
-            score += 6 - round(duration - 16)
-        elif 24 < duration <= 30:
-            score -= round(duration - 22)
-        elif duration > 30:
-            score -= 8 + round((duration - 30) * 1.5)
+        if 24 <= duration <= 45:
+            score += 14
+        elif 18 <= duration < 24:
+            score += 6
+        elif 45 < duration <= 60:
+            score += 5
+        elif duration < 18:
+            score -= 16
+        elif duration > 60:
+            score -= round((duration - 60) * 0.9)
         else:
             score -= 4
     else:
@@ -264,10 +268,87 @@ def _editorial_score(
     return max(30, min(96, score)), reason[0].upper() + reason[1:] + "."
 
 
+def _bad_clip_start(text: str) -> bool:
+    stripped = text.strip()
+    lowered = stripped.lower()
+    first = stripped[:1]
+    if first and first == first.lower() and first != first.upper():
+        return True
+    return lowered.startswith(
+        (
+            "beleza",
+            "certo",
+            "então",
+            "entao",
+            "e ",
+            "mas ",
+            "aí ",
+            "ai ",
+            "isso ",
+            "ele ",
+            "ela ",
+            "pensando ",
+            "na verdade ",
+            "ou seja",
+        )
+    )
+
+
+def _expand_auto_window(
+    segments: list[dict[str, Any]],
+    *,
+    start_index: int,
+    end_index: int,
+    video_duration: float,
+    min_duration: int,
+    max_duration: int,
+) -> tuple[int, int, float, float]:
+    expanded_start = start_index
+    expanded_end = end_index
+
+    def bounds() -> tuple[float, float, float]:
+        start = max(0.0, float(segments[expanded_start]["start"]))
+        end = min(video_duration, float(segments[expanded_end]["end"]))
+        return start, end, end - start
+
+    while expanded_start > 0:
+        current_text = " ".join(
+            str(item.get("text") or "").strip()
+            for item in segments[expanded_start : expanded_end + 1]
+        )
+        previous_text = str(segments[expanded_start - 1].get("text") or "").strip()
+        previous_is_open_sentence = bool(previous_text) and not previous_text.endswith((".", "!", "?"))
+        candidate_start = max(0.0, float(segments[expanded_start - 1]["start"]))
+        _, end, _ = bounds()
+        if end - candidate_start > max_duration:
+            break
+        if (
+            _bad_clip_start(current_text)
+            or previous_is_open_sentence
+            or end - candidate_start <= max(min_duration, 24)
+        ):
+            expanded_start -= 1
+            continue
+        break
+
+    while expanded_end + 1 < len(segments):
+        start, _, current_duration = bounds()
+        candidate_end = min(video_duration, float(segments[expanded_end + 1]["end"]))
+        if candidate_end - start > max_duration:
+            break
+        if current_duration < max(min_duration, 28):
+            expanded_end += 1
+            continue
+        break
+
+    start, end, _ = bounds()
+    return expanded_start, expanded_end, start, end
+
+
 def _local_clip_suggestions(
     transcript: dict[str, Any],
     *,
-    count: int,
+    count: int | None,
     min_duration: int,
     max_duration: int,
     auto_duration: bool = False,
@@ -293,6 +374,29 @@ def _local_clip_suggestions(
             ).strip()
             if not text:
                 continue
+            effective_start_index = start_index
+            effective_end_index = end_index
+            if auto_duration:
+                (
+                    effective_start_index,
+                    effective_end_index,
+                    start,
+                    end,
+                ) = _expand_auto_window(
+                    segments,
+                    start_index=start_index,
+                    end_index=end_index,
+                    video_duration=duration,
+                    min_duration=min_duration,
+                    max_duration=max_duration,
+                )
+                text = " ".join(
+                    str(item.get("text") or "").strip()
+                    for item in segments[effective_start_index : effective_end_index + 1]
+                ).strip()
+                candidate_duration = end - start
+                if not text or candidate_duration < min_duration or candidate_duration > max_duration:
+                    continue
             score, reason = _editorial_score(
                 text,
                 duration=candidate_duration,
@@ -316,15 +420,28 @@ def _local_clip_suggestions(
                     "hashtags": "#saude #bemestar #conteudoeducativo",
                     "reason": reason,
                     "_words": _content_words(text),
+                    "_span": (effective_start_index, effective_end_index),
                 }
             )
 
-    ranked = sorted(candidates, key=lambda item: (-int(item["score"]), float(item["start"])))[:800]
-    if len(ranked) < count:
+    unique_candidates: dict[tuple[int, int], dict[str, Any]] = {}
+    for candidate in candidates:
+        span = candidate["_span"]
+        current = unique_candidates.get(span)
+        if not current or int(candidate["score"]) > int(current["score"]):
+            unique_candidates[span] = candidate
+
+    ranked = sorted(
+        unique_candidates.values(),
+        key=lambda item: (-int(item["score"]), float(item["start"])),
+    )[:800]
+    if count is not None and len(ranked) < count:
         raise RuntimeError("O video nao possui fala suficiente para a quantidade de cortes pedida.")
 
     selected: list[dict[str, Any]] = []
-    while len(selected) < count:
+    target_count = count or 8
+    minimum_auto_score = 83
+    while len(selected) < target_count:
         remaining = [candidate for candidate in ranked if candidate not in selected]
         if not remaining:
             break
@@ -353,18 +470,22 @@ def _local_clip_suggestions(
                 overlap = max(overlap, intersection / max(shorter, 0.1))
             return float(candidate["score"]) - similarity * 45 - overlap * 55
 
-        selected.append(max(remaining, key=lambda candidate: (adjusted_score(candidate), -candidate["start"])))
-    if len(selected) < count:
+        best = max(remaining, key=lambda candidate: (adjusted_score(candidate), -candidate["start"]))
+        if count is None and int(best["score"]) < minimum_auto_score:
+            break
+        selected.append(best)
+    if count is not None and len(selected) < count:
         raise RuntimeError("O video nao possui fala suficiente para a quantidade de cortes pedida.")
     for candidate in selected:
         candidate.pop("_words", None)
+        candidate.pop("_span", None)
     return selected
 
 
 def _suggest_clips(
     transcript: dict[str, Any],
     *,
-    count: int,
+    count: int | None,
     min_duration: int,
     max_duration: int,
     auto_duration: bool = False,
@@ -389,11 +510,18 @@ def _suggest_clips(
     )
     if len(timeline) > 80000:
         timeline = timeline[:80000]
-    prompt = f"""Analise esta transcricao em portugues brasileiro e escolha exatamente {count}
-trechos independentes com maior potencial para Reels, TikTok e Shorts.
+    quantity_rule = (
+        "Escolha de 0 a 8 trechos. Se nenhum trecho tiver potencial viral real, retorne clips vazio."
+        if count is None
+        else f"Escolha exatamente {count} trechos independentes."
+    )
+    prompt = f"""Analise esta transcricao em portugues brasileiro.
+{quantity_rule}
 
 Regras:
 - Cada trecho deve ter entre {min_duration} e {max_duration} segundos.
+- Priorize somente potencial viral: hook forte, tensão, clareza, opinião memorável, quebra de expectativa ou utilidade imediata.
+- Nao force cortes medianos apenas para preencher quantidade.
 - {"Escolha livremente a duracao de cada corte pelo inicio e fechamento natural da ideia." if auto_duration else "Mantenha os cortes dentro da faixa solicitada, priorizando frases completas."}
 - Use somente timestamps existentes e preserve frases completas.
 - Evite sobreposicao entre os cortes.
@@ -444,7 +572,7 @@ TRANSCRICAO:
         clip["end"] = round(end, 3)
         clip["score"] = max(0, min(100, int(clip["score"])))
         valid.append(clip)
-    if len(valid) != count:
+    if count is not None and len(valid) != count:
         raise RuntimeError("A analise nao retornou a quantidade esperada de cortes validos.")
     return valid, "anthropic"
 
@@ -505,9 +633,10 @@ def process_cut_project(
         update(progresso=45, etapa="Escolhendo melhores trechos")
 
         settings = job["settings"]
+        clip_count = settings.get("clipCount")
         clips, selection_mode = _suggest_clips(
             transcript,
-            count=int(settings["clipCount"]),
+            count=int(clip_count) if clip_count is not None else None,
             min_duration=int(settings["minDuration"]),
             max_duration=int(settings["maxDuration"]),
             auto_duration=settings.get("durationMode") == "auto",
@@ -518,6 +647,14 @@ def process_cut_project(
             clips=clips,
             selectionMode=selection_mode,
         )
+        if not clips:
+            update(
+                status="pronto",
+                progresso=100,
+                etapa="Nenhum trecho com potencial viral suficiente",
+                clips=[],
+            )
+            return
 
         caption_python = _caption_python(root)
         rendered = []

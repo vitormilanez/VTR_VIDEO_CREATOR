@@ -605,12 +605,12 @@ class StableIdTests(unittest.TestCase):
 
     def test_automatic_cut_duration_uses_natural_speech_boundaries(self) -> None:
         transcript = {
-            "duration": 50,
+            "duration": 80,
             "segments": [
                 {
-                    "start": index * 5,
-                    "end": (index + 1) * 5 - (0.8 if index % 2 else 0),
-                    "text": f"Esta e a ideia importante numero {index}.",
+                    "start": index * 8,
+                    "end": (index + 1) * 8 - (0.8 if index % 2 else 0),
+                    "text": f"Esta e a ideia importante numero {index} com contexto claro.",
                 }
                 for index in range(10)
             ],
@@ -618,14 +618,67 @@ class StableIdTests(unittest.TestCase):
         clips = cut_service._local_clip_suggestions(
             transcript,
             count=3,
-            min_duration=8,
-            max_duration=60,
+            min_duration=18,
+            max_duration=75,
             auto_duration=True,
         )
         natural_ends = {round(float(segment["end"]), 3) for segment in transcript["segments"]}
         self.assertEqual(len(clips), 3)
         self.assertTrue(all(round(float(clip["end"]), 3) in natural_ends for clip in clips))
+        self.assertTrue(all(float(clip["end"] - clip["start"]) >= 18 for clip in clips))
         self.assertTrue(all(clip["reason"].endswith(".") for clip in clips))
+
+    def test_automatic_cut_expands_bad_start_for_context(self) -> None:
+        transcript = {
+            "duration": 48,
+            "segments": [
+                {
+                    "start": 0,
+                    "end": 8,
+                    "text": "Vou explicar uma coisa importante sobre fome e rotina.",
+                },
+                {
+                    "start": 8,
+                    "end": 16,
+                    "text": "Beleza? Porque o problema aparece quando voce muda tudo por poucos dias.",
+                },
+                {
+                    "start": 16,
+                    "end": 24,
+                    "text": "Por isso o resultado depende de consistencia e acompanhamento.",
+                },
+            ],
+        }
+        clips = cut_service._local_clip_suggestions(
+            transcript,
+            count=1,
+            min_duration=18,
+            max_duration=40,
+            auto_duration=True,
+        )
+        self.assertEqual(clips[0]["start"], 0)
+        self.assertIn("Vou explicar", clips[0]["caption"])
+
+    def test_automatic_cut_count_can_skip_weak_video(self) -> None:
+        transcript = {
+            "duration": 30,
+            "segments": [
+                {
+                    "start": index * 5,
+                    "end": (index + 1) * 5,
+                    "text": f"Continuação genérica do assunto sem gancho numero {index}.",
+                }
+                for index in range(6)
+            ],
+        }
+        clips = cut_service._local_clip_suggestions(
+            transcript,
+            count=None,
+            min_duration=18,
+            max_duration=75,
+            auto_duration=True,
+        )
+        self.assertEqual(clips, [])
 
     def test_repeated_api_request_submits_to_heygen_only_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

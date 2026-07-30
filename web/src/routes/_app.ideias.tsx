@@ -10,7 +10,7 @@ import { ConfirmAction } from "@/components/confirm-action";
 import { buildScriptFromIdea } from "@/lib/script-builder";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
-import { appendScript, setSheetStatus } from "@/lib/api/local";
+import { appendIdea, appendScript, expandIdeas, setSheetStatus } from "@/lib/api/local";
 import type { Idea, IdeaStatus, ThemeFamily } from "@/lib/mock-data";
 import {
   Table,
@@ -30,13 +30,33 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
   Sheet,
   SheetContent,
   SheetDescription,
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { CircleCheck, ExternalLink, FileText, Lightbulb, Sparkles, Trash2 } from "lucide-react";
+import {
+  CircleCheck,
+  ExternalLink,
+  FileText,
+  Lightbulb,
+  Loader2,
+  Plus,
+  Sparkles,
+  Trash2,
+  Wand2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/ideias")({
@@ -67,6 +87,7 @@ export function IdeiasPage() {
   const ideas = useStore((s) => s.ideas);
   const scripts = useStore((s) => s.scripts);
   const videoJobs = useStore((s) => s.videoJobs);
+  const addIdea = useStore((s) => s.addIdea);
   const updateIdea = useStore((s) => s.updateIdea);
   const addScript = useStore((s) => s.addScript);
   const navigate = useNavigate();
@@ -76,6 +97,13 @@ export function IdeiasPage() {
   const [prioridade, setPrioridade] = useState("todas");
   const [busca, setBusca] = useState("");
   const [preview, setPreview] = useState<Idea | null>(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualSeed, setManualSeed] = useState("");
+  const [manualFamilia, setManualFamilia] = useState<ThemeFamily>("educativo");
+  const [manualPrioridade, setManualPrioridade] = useState<Idea["prioridade"]>("media");
+  const [manualIdeas, setManualIdeas] = useState<Idea[]>([]);
+  const [isExpanding, setIsExpanding] = useState(false);
+  const [savingIdeaId, setSavingIdeaId] = useState<string | null>(null);
 
   const filtered = ideas.filter((i) => {
     if (familia !== "todas" && i.familia !== familia) return false;
@@ -128,6 +156,55 @@ export function IdeiasPage() {
     }
   }
 
+  async function explorarIdeiaManual() {
+    const seed = manualSeed.trim();
+    if (seed.length < 8) {
+      toast.error("Escreva um pouco mais sobre a ideia.");
+      return;
+    }
+    setIsExpanding(true);
+    try {
+      const expanded = await expandIdeas({
+        seed,
+        quantity: 3,
+        familia: manualFamilia,
+        prioridade: manualPrioridade,
+      });
+      setManualIdeas(expanded);
+      toast.success("Ideias exploradas. Escolha uma para virar roteiro.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel explorar a ideia.");
+    } finally {
+      setIsExpanding(false);
+    }
+  }
+
+  async function salvarIdeiaERoteiro(idea: Idea) {
+    setSavingIdeaId(idea.id);
+    try {
+      const savedIdea = await appendIdea(idea);
+      addIdea(savedIdea);
+      const script = buildScriptFromIdea(savedIdea, genId("s"));
+      const savedScript = await appendScript(script);
+      addScript(savedScript);
+      updateIdea(savedIdea.id, { status: "aprovado" });
+      try {
+        await setSheetStatus("ideias", savedIdea.id, "aprovado");
+      } catch {
+        toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
+      }
+      setManualOpen(false);
+      setManualSeed("");
+      setManualIdeas([]);
+      toast.success("Ideia contextualizada e roteiro criado.");
+      navigate({ to: "/roteiros/$id", params: { id: savedScript.id } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel criar o roteiro.");
+    } finally {
+      setSavingIdeaId(null);
+    }
+  }
+
   async function descartarIdeia(i: Idea) {
     updateIdea(i.id, { status: "descartado" });
     try {
@@ -140,7 +217,34 @@ export function IdeiasPage() {
   }
 
   return (
-    <AppShell title="Ideias">
+    <AppShell
+      title="Ideias"
+      actions={
+        <Dialog open={manualOpen} onOpenChange={setManualOpen}>
+          <DialogTrigger asChild>
+            <Button size="sm">
+              <Plus className="mr-1 h-4 w-4" /> Nova ideia
+            </Button>
+          </DialogTrigger>
+          <NovaIdeiaDialog
+            seed={manualSeed}
+            onSeedChange={(value) => {
+              setManualSeed(value);
+              if (manualIdeas.length) setManualIdeas([]);
+            }}
+            familia={manualFamilia}
+            onFamiliaChange={setManualFamilia}
+            prioridade={manualPrioridade}
+            onPrioridadeChange={setManualPrioridade}
+            ideas={manualIdeas}
+            isExpanding={isExpanding}
+            savingIdeaId={savingIdeaId}
+            onExpand={explorarIdeiaManual}
+            onCreateScript={salvarIdeiaERoteiro}
+          />
+        </Dialog>
+      }
+    >
       {usedIdeas.length > 0 ? (
         <div className="mb-3 flex items-center gap-2 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs">
           <CircleCheck className="h-4 w-4 shrink-0 text-status-info" />
@@ -383,5 +487,142 @@ function Block({ label, text }: { label: string; text: string }) {
       </div>
       <p className="mt-0.5 text-sm">{text}</p>
     </div>
+  );
+}
+
+function NovaIdeiaDialog({
+  seed,
+  onSeedChange,
+  familia,
+  onFamiliaChange,
+  prioridade,
+  onPrioridadeChange,
+  ideas,
+  isExpanding,
+  savingIdeaId,
+  onExpand,
+  onCreateScript,
+}: {
+  seed: string;
+  onSeedChange: (value: string) => void;
+  familia: ThemeFamily;
+  onFamiliaChange: (value: ThemeFamily) => void;
+  prioridade: Idea["prioridade"];
+  onPrioridadeChange: (value: Idea["prioridade"]) => void;
+  ideas: Idea[];
+  isExpanding: boolean;
+  savingIdeaId: string | null;
+  onExpand: () => void;
+  onCreateScript: (idea: Idea) => void;
+}) {
+  return (
+    <DialogContent className="max-h-[88vh] max-w-3xl overflow-y-auto">
+      <DialogHeader>
+        <DialogTitle>Nova ideia</DialogTitle>
+      </DialogHeader>
+
+      <div className="grid gap-4">
+        <div className="grid gap-2">
+          <Label>Escreva a ideia bruta</Label>
+          <Textarea
+            rows={5}
+            value={seed}
+            onChange={(e) => onSeedChange(e.target.value)}
+            placeholder="Ex: Quero falar que emagrecer com remédio sem mudar rotina faz a pessoa voltar para os mesmos hábitos depois..."
+          />
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2">
+            <Label>Família</Label>
+            <Select value={familia} onValueChange={(value) => onFamiliaChange(value as ThemeFamily)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {familias.map((f) => (
+                  <SelectItem key={f} value={f}>
+                    {familiaLabel[f]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid gap-2">
+            <Label>Prioridade</Label>
+            <Select
+              value={prioridade}
+              onValueChange={(value) => onPrioridadeChange(value as Idea["prioridade"])}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="alta">Alta</SelectItem>
+                <SelectItem value="media">Media</SelectItem>
+                <SelectItem value="baixa">Baixa</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <Button onClick={onExpand} disabled={isExpanding || seed.trim().length < 8}>
+          {isExpanding ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <Wand2 className="mr-2 h-4 w-4" />
+          )}
+          Explorar com IA
+        </Button>
+
+        {ideas.length > 0 ? (
+          <div className="grid gap-3">
+            <div>
+              <h3 className="font-display text-sm font-semibold">Sugestões prontas para roteiro</h3>
+              <p className="text-xs text-muted-foreground">
+                Escolha a melhor. Ela será salva em Ideias e já abrirá o roteiro.
+              </p>
+            </div>
+            {ideas.map((idea) => (
+              <div key={idea.id} className="rounded-lg border bg-card p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="font-semibold">{idea.titulo}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                        {familiaLabel[idea.familia]}
+                      </span>
+                      <StatusBadge {...prioridadeLabel[idea.prioridade]} />
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => onCreateScript(idea)}
+                    disabled={Boolean(savingIdeaId)}
+                  >
+                    {savingIdeaId === idea.id ? (
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="mr-1 h-3.5 w-3.5" />
+                    )}
+                    Criar roteiro
+                  </Button>
+                </div>
+                <Block label="Hook" text={idea.hook} />
+                <Block label="Contexto" text={idea.angulo} />
+                {idea.publicoDor ? <Block label="Público / Dor" text={idea.publicoDor} /> : null}
+                <Block label="Compliance" text={idea.observacaoCompliance} />
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      <DialogFooter>
+        <p className="text-xs text-muted-foreground">
+          O roteiro final continua passando pelas regras de conteúdo educativo e não prescritivo.
+        </p>
+      </DialogFooter>
+    </DialogContent>
   );
 }

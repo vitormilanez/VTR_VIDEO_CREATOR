@@ -60,7 +60,7 @@ function CortesPage() {
   const [uploadId, setUploadId] = useState("");
   const [uploadName, setUploadName] = useState("");
   const [youtubeUrl, setYoutubeUrl] = useState("");
-  const [clipCount, setClipCount] = useState(3);
+  const [clipCount, setClipCount] = useState<"auto" | number>("auto");
   const [durationPreset, setDurationPreset] = useState("auto");
   const [captions, setCaptions] = useState(true);
   const [layout, setLayout] = useState<"fit" | "fill">("fit");
@@ -117,7 +117,7 @@ function CortesPage() {
 
   async function generate() {
     const [minDuration, maxDuration] =
-      durationPreset === "auto" ? [8, 60] : durationPreset.split("-").map(Number);
+      durationPreset === "auto" ? [18, 75] : durationPreset.split("-").map(Number);
     if (!requestId.current) requestId.current = globalThis.crypto.randomUUID();
     setSubmitting(true);
     try {
@@ -132,7 +132,7 @@ function CortesPage() {
             : sourceMode === "youtube"
               ? "Video do YouTube"
               : undefined,
-        clipCount,
+        clipCount: clipCount === "auto" ? null : clipCount,
         minDuration,
         maxDuration,
         durationMode: durationPreset === "auto" ? "auto" : "preset",
@@ -280,11 +280,17 @@ function CortesPage() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label className="text-xs">Quantidade</Label>
-                <Select value={String(clipCount)} onValueChange={(value) => setClipCount(+value)}>
+                <Select
+                  value={String(clipCount)}
+                  onValueChange={(value) =>
+                    setClipCount(value === "auto" ? "auto" : Number(value))
+                  }
+                >
                   <SelectTrigger className="mt-1.5">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="auto">IA decide</SelectItem>
                     {[1, 3, 5, 8].map((count) => (
                       <SelectItem key={count} value={String(count)}>
                         {count} {count === 1 ? "corte" : "cortes"}
@@ -292,6 +298,9 @@ function CortesPage() {
                     ))}
                   </SelectContent>
                 </Select>
+                <p className="mt-1.5 text-[11px] text-muted-foreground">
+                  No automático, só cria trechos com potencial viral real.
+                </p>
               </div>
               <div>
                 <Label className="text-xs">Duração</Label>
@@ -301,6 +310,7 @@ function CortesPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="auto">Automática</SelectItem>
+                    <SelectItem value="18-75">18 a 75s</SelectItem>
                     <SelectItem value="8-20">8 a 20s</SelectItem>
                     <SelectItem value="15-45">15 a 45s</SelectItem>
                     <SelectItem value="30-60">30 a 60s</SelectItem>
@@ -530,6 +540,14 @@ function ProjectResult({
                 </div>
               </article>
             ))}
+        </div>
+      ) : project.status === "pronto" ? (
+        <div className="rounded-md border border-dashed bg-muted/40 px-4 py-5 text-sm">
+          <div className="font-medium">Nenhum corte criado</div>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            A seleção automática não encontrou um trecho com força viral suficiente. Tente outro
+            vídeo ou escolha uma quantidade fixa para forçar cortes editoriais.
+          </p>
         </div>
       ) : null}
     </section>
