@@ -15,6 +15,7 @@ data/sheets_snapshot.json
 data/video_jobs.json
 data/avatar_jobs.json
 data/app_settings.json
+data/heygen_avatar_cache.json
 data/operations.db
 data/operations.db-shm
 data/operations.db-wal
@@ -30,6 +31,9 @@ assets/personas/*/raw/
 assets/personas/*/processed/
 assets/personas/*/reference/
 production_videos/
+exports/
+output/
+tmp/
 
 # Exports gerados pelo botao "Salvar local" (regeneraveis)
 content/packs/

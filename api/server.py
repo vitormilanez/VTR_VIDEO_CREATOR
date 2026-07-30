@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -41,6 +41,7 @@ SNAPSHOT = ROOT / "data" / "sheets_snapshot.json"
 VIDEO_JOBS = ROOT / "data" / "video_jobs.json"
 AVATAR_JOBS = ROOT / "data" / "avatar_jobs.json"
 APP_SETTINGS = ROOT / "data" / "app_settings.json"
+HEYGEN_AVATAR_CACHE = ROOT / "data" / "heygen_avatar_cache.json"
 OPERATIONAL_DB = ROOT / "data" / "operations.db"
 CUT_UPLOADS = ROOT / "data" / "cut_uploads"
 CUT_OUTPUTS = ROOT / "data" / "cuts"
@@ -711,29 +712,83 @@ HEYGEN_CATALOG = {
 }
 
 
-def _private_avatar_library(command: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Lista identidades privadas e todos os visuais de cada identidade."""
-    command = command or _heygen_cli()
-    response = _run_heygen_json(
-        command,
-        ["avatar", "list", "--ownership", "private", "--limit", "50"],
-        timeout=45,
+def _load_heygen_avatar_cache() -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    try:
+        cached = json.loads(HEYGEN_AVATAR_CACHE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    groups = cached.get("groups")
+    looks = cached.get("looks")
+    if not isinstance(groups, list) or not isinstance(looks, list):
+        return None
+    return groups, looks
+
+
+def _save_heygen_avatar_cache(groups: list[dict[str, Any]], looks: list[dict[str, Any]]) -> None:
+    HEYGEN_AVATAR_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    HEYGEN_AVATAR_CACHE.write_text(
+        json.dumps(
+            {"updatedAt": _now(), "groups": groups, "looks": looks},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
+
+
+def _private_avatar_library(
+    command: str | None = None,
+    *,
+    allow_cache: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Lista identidades privadas e todos os visuais de cada identidade."""
+    if command is None:
+        try:
+            command = _heygen_cli()
+        except HTTPException:
+            cached = _load_heygen_avatar_cache() if allow_cache else None
+            if cached:
+                return cached
+            raise
+    try:
+        response = _run_heygen_json(
+            command,
+            ["avatar", "list", "--ownership", "private", "--limit", "50"],
+            timeout=45,
+        )
+    except HTTPException:
+        cached = _load_heygen_avatar_cache() if allow_cache else None
+        if cached:
+            return cached
+        raise
     groups = _find_value(response, "data")
     if not isinstance(groups, list):
         groups = []
+
+    cached_lookup: dict[str, list[dict[str, Any]]] = {}
+    if allow_cache:
+        cached = _load_heygen_avatar_cache()
+        if cached:
+            _, cached_looks = cached
+            for cached_look in cached_looks:
+                if not isinstance(cached_look, dict):
+                    continue
+                cached_lookup.setdefault(str(cached_look.get("group_id") or ""), []).append(cached_look)
 
     looks: list[dict[str, Any]] = []
     for group in groups:
         group_id = str(group.get("id") or "")
         if not group_id:
             continue
-        look_response = _run_heygen_json(
-            command,
-            ["avatar", "looks", "list", "--group-id", group_id, "--limit", "50"],
-            timeout=45,
-        )
-        group_looks = _find_value(look_response, "data")
+        try:
+            look_response = _run_heygen_json(
+                command,
+                ["avatar", "looks", "list", "--group-id", group_id, "--limit", "50"],
+                timeout=45,
+            )
+            group_looks = _find_value(look_response, "data")
+        except HTTPException:
+            group_looks = cached_lookup.get(group_id, [])
         if not isinstance(group_looks, list):
             continue
         for raw_look in group_looks:
@@ -743,6 +798,12 @@ def _private_avatar_library(command: str | None = None) -> tuple[list[dict[str, 
             look["group_id"] = look.get("group_id") or group_id
             look["group_name"] = group.get("name") or "Identidade sem nome"
             looks.append(look)
+    if looks:
+        _save_heygen_avatar_cache(groups, looks)
+    elif allow_cache:
+        cached = _load_heygen_avatar_cache()
+        if cached:
+            return cached
     return groups, looks
 
 
@@ -798,7 +859,7 @@ def heygen_catalog() -> dict:
     return {
         "avatars": avatars,
         "voices": HEYGEN_CATALOG["voices"],
-        "defaultAvatarId": _heygen_default_avatar_id(avatars),
+        "defaultAvatarId": _heygen_default_avatar_id(avatars) if avatars else None,
         "defaultVoiceId": _heygen_default_voice_id(),
     }
 
@@ -2449,6 +2510,9 @@ Regras obrigatorias:
 - Crie titulos especificos, com dor clara, sem ficar generico.
 - Escreva hooks em fala natural brasileira.
 - Contextualize a dor do publico e o angulo do roteiro.
+- Extraia a tese central do briefing. Nao use frases como "perguntei se" ou pedacos de conversa como titulo.
+- Quando houver estudo, congresso ou dado numerico, trate como "estudos sugerem/associam", nunca como certeza absoluta.
+- Gere ideias diferentes entre si: uma de descoberta, uma de alerta/cuidado e uma de mito/limite.
 - CTA deve ser simples e seguro.
 - Responda somente no JSON solicitado."""
 
@@ -2468,6 +2532,10 @@ def _manual_idea_fallback(payload: ExpandIdeasIn) -> list[dict[str, Any]]:
         if medication
         else "Evitar promessa de resultado, diagnostico direto e culpabilizacao."
     )
+    if re.search(r"c[aâ]ncer|tumor|oncolog|asco|met[aá]stase", lowered) and medication:
+        return _manual_glp_cancer_ideas(payload, family, compliance, _research_context_for_seed(seed))
+    if re.search(r"contraindica|nem2|tireoide|pirataria|falsificad|sem registro|receita", lowered) and medication:
+        return _manual_medication_safety_ideas(payload, family, compliance, _research_context_for_seed(seed))
     topic = _idea_seed_topic(seed)
     angles = [
         (
@@ -2509,6 +2577,210 @@ def _manual_idea_fallback(payload: ExpandIdeasIn) -> list[dict[str, Any]]:
     ]
 
 
+def _idea_base(
+    payload: ExpandIdeasIn,
+    family: str,
+    compliance: str,
+    title: str,
+    hook: str,
+    angle: str,
+    pain: str,
+    cta: str,
+    tipo: str = "Reel educativo contextualizado",
+) -> dict[str, Any]:
+    return {
+        "id": f"i-{uuid.uuid4().hex[:12]}",
+        "titulo": title,
+        "familia": family,
+        "hook": hook,
+        "angulo": angle,
+        "tipo": tipo,
+        "publicoDor": pain,
+        "cta": cta,
+        "linkOrigem": None,
+        "observacaoCompliance": compliance,
+        "prioridade": payload.prioridade,
+        "status": "novo",
+        "criadoEm": _now(),
+    }
+
+
+def _manual_glp_cancer_ideas(
+    payload: ExpandIdeasIn,
+    family: str,
+    compliance: str,
+    research_context: str = "",
+) -> list[dict[str, Any]]:
+    suffix = f" Fontes para checagem: {research_context}" if research_context else ""
+    ideas = [
+        _idea_base(
+            payload,
+            family,
+            compliance + " Tratar reducao de risco como associacao/estudo promissor, nao como promessa de protecao.",
+            "Canetas emagrecedoras reduzem risco de câncer?",
+            "Caneta emagrecedora pode diminuir risco de câncer? A resposta curta é: talvez, mas não do jeito mágico que parece.",
+            "Explicar que estudos recentes apontam associacao entre GLP-1/perda de peso e menor risco de alguns tumores, mas sem vender a medicacao como prevencao oncologica. Separar efeito do emagrecimento, reducao de inflamacao e hipoteses biologicas ainda em estudo." + suffix,
+            "Pessoa que viu uma manchete forte sobre GLP-1 e câncer e quer saber se isso significa protecao garantida.",
+            "Salve para lembrar: estudo promissor não é autorização para usar remédio sem avaliação médica.",
+        ),
+        _idea_base(
+            payload,
+            family,
+            compliance + " Nao dizer que trata cancer; reforcar acompanhamento com medico e exames preventivos.",
+            "O que ninguém contou sobre GLP-1 e câncer",
+            "A manchete fala em menos câncer. Mas a parte mais importante está no rodapé.",
+            "Usar o gancho dos dados de congresso/estudos para mostrar limites: quem foi estudado, que tipo de associacao apareceu, por que isso nao substitui rastreio, consulta, mamografia, colonoscopia ou acompanhamento oncologico quando indicado." + suffix,
+            "Pessoa animada com a noticia e inclinada a transformar um achado cientifico em regra pessoal.",
+            "Compartilhe com alguém que precisa entender a notícia inteira, não só o título.",
+        ),
+        _idea_base(
+            payload,
+            family,
+            compliance + " Evitar promessa de emagrecimento, prevencao ou sobrevida.",
+            "Caneta não é escudo contra câncer",
+            "Se alguém te vendeu caneta emagrecedora como escudo contra câncer, acenda o alerta.",
+            "Contrapor marketing simplista com educacao: obesidade e risco oncologico têm relacao, emagrecer pode reduzir fatores de risco, mas medicamento tem indicacao, contraindicações e acompanhamento. Incluir alerta sobre falsificados e uso sem receita." + suffix,
+            "Pessoa exposta a promessa agressiva, pirataria ou venda irregular de canetas.",
+            "Me siga para entender saúde sem cair em promessa bonita demais.",
+        ),
+    ]
+    return ideas[: payload.quantity]
+
+
+def _manual_medication_safety_ideas(
+    payload: ExpandIdeasIn,
+    family: str,
+    compliance: str,
+    research_context: str = "",
+) -> list[dict[str, Any]]:
+    suffix = f" Fontes para checagem: {research_context}" if research_context else ""
+    ideas = [
+        _idea_base(
+            payload,
+            family,
+            compliance,
+            "Caneta emagrecedora não começa pelo clique",
+            "Se a sua caneta emagrecedora começou num link aleatório, o problema já começou antes da primeira aplicação.",
+            "Explorar risco de versões falsificadas, necessidade de receita legitima, acompanhamento e avaliacao de contraindicações antes do uso." + suffix,
+            "Pessoa seduzida por compra online, preço baixo ou indicação de terceiros.",
+            "Salve para lembrar: medicamento sério exige caminho sério.",
+        ),
+        _idea_base(
+            payload,
+            family,
+            compliance,
+            "Quem não deve usar canetas emagrecedoras?",
+            "Tem gente que não deveria usar caneta emagrecedora, mesmo querendo muito emagrecer.",
+            "Explicar de forma educativa que historico pessoal/familiar, contraindicações e riscos individuais mudam a indicacao. Evitar listar como prescricao definitiva; orientar consulta." + suffix,
+            "Pessoa que acha que todo medicamento famoso serve para todo mundo.",
+            "Procure avaliação individual antes de transformar vídeo em decisão médica.",
+        ),
+        _idea_base(
+            payload,
+            family,
+            compliance,
+            "Caneta não substitui exame",
+            "Usar medicação não te dá licença para abandonar exames de rotina.",
+            "Mostrar que tratamento de peso e prevencao sao trilhos complementares: acompanhamento, exames indicados, rastreios e seguranca continuam importantes." + suffix,
+            "Pessoa que confunde estar em tratamento com estar protegida de outros riscos de saúde.",
+            "Salve para revisar seus cuidados com acompanhamento profissional.",
+        ),
+    ]
+    return ideas[: payload.quantity]
+
+
+def _research_context_for_seed(seed: str) -> str:
+    query = _research_query_from_seed(seed)
+    if not query:
+        return ""
+    sources = _fetch_google_news_context(query) + _fetch_pubmed_context(query)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for source in sources:
+        key = _norm(source)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(source)
+    return " | ".join(unique[:5])
+
+
+def _research_query_from_seed(seed: str) -> str:
+    lowered = seed.lower()
+    if re.search(r"c[aâ]ncer|tumor|oncolog|asco", lowered) and re.search(
+        r"glp|tirzepatida|tirzepatide|semaglutida|semaglutide|caneta|ozempic|mounjaro|wegovy",
+        lowered,
+    ):
+        return "GLP-1 semaglutide tirzepatide cancer risk obesity"
+    if re.search(r"pirataria|falsificad|sem registro|receita", lowered):
+        return "canetas emagrecedoras falsificadas sem receita risco"
+    if re.search(r"contraindica|nem2|tireoide", lowered):
+        return "GLP-1 contraindication medullary thyroid carcinoma MEN2"
+    return ""
+
+
+def _fetch_google_news_context(query: str) -> list[str]:
+    try:
+        import feedparser
+    except Exception:
+        return []
+    url = (
+        "https://news.google.com/rss/search?"
+        f"q={quote_plus(query + ' when:30d')}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+    )
+    try:
+        feed = feedparser.parse(url)
+    except Exception:
+        return []
+    out: list[str] = []
+    for entry in getattr(feed, "entries", [])[:3]:
+        title = str(entry.get("title") or "").strip()
+        link = str(entry.get("link") or "").strip()
+        if title:
+            out.append(f"Google News: {title}" + (f" ({link})" if link else ""))
+    return out
+
+
+def _fetch_pubmed_context(query: str) -> list[str]:
+    cancer_query = bool(re.search(r"cancer|tumor|oncolog", query, re.I))
+    try:
+        search = requests.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            params={
+                "db": "pubmed",
+                "term": query,
+                "retmode": "json",
+                "sort": "pub date",
+                "retmax": 3,
+                "reldate": 365,
+                "datetype": "pdat",
+            },
+            timeout=8,
+        )
+        search.raise_for_status()
+        ids = search.json().get("esearchresult", {}).get("idlist", [])
+        if not ids:
+            return []
+        summary = requests.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+            params={"db": "pubmed", "id": ",".join(ids), "retmode": "json"},
+            timeout=8,
+        )
+        summary.raise_for_status()
+        result = summary.json().get("result", {})
+    except (requests.RequestException, ValueError):
+        return []
+    out: list[str] = []
+    for pubmed_id in ids:
+        row = result.get(pubmed_id) or {}
+        title = str(row.get("title") or "").strip().rstrip(".")
+        if cancer_query and not re.search(r"cancer|tumou?r|neoplasm|oncolog|risk", title, re.I):
+            continue
+        if title:
+            out.append(f"PubMed: {title} (https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/)")
+    return out
+
+
 def _idea_seed_topic(seed: str) -> str:
     cleaned = re.sub(
         r"^(quero falar que|quero falar sobre|minha ideia e|minha ideia é|pensei em|falar sobre|falar que|quero|queria)\s+",
@@ -2516,6 +2788,9 @@ def _idea_seed_topic(seed: str) -> str:
         seed.strip(),
         flags=re.I,
     )
+    question_match = re.search(r"(canetas? emagrecedoras?.{0,80}c[aâ]ncer|glp-?1.{0,80}c[aâ]ncer|mounjaro.{0,80}c[aâ]ncer|ozempic.{0,80}c[aâ]ncer)", cleaned, re.I)
+    if question_match:
+        return "canetas emagrecedoras e risco de câncer"
     cleaned = cleaned.split(".")[0].split("?")[0].strip(" ,:;")
     cleaned = re.split(r":|;|\bcasos proibidos\b|\bn[aã]o substitui\b|\balerta\b", cleaned, flags=re.I)[0].strip(" ,:;")
     words = cleaned.split()
@@ -2568,6 +2843,7 @@ def _normalize_expanded_ideas(payload: ExpandIdeasIn, rows: Any) -> list[dict[st
 @app.post("/api/ideas/expand")
 def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
     """Expande uma ideia livre em opcoes editoriais prontas para virar roteiro."""
+    research_context = _research_context_for_seed(payload.seed)
     if not os.getenv("ANTHROPIC_API_KEY"):
         return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
 
@@ -2578,6 +2854,7 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
         f"Quantidade: {payload.quantity}\n"
         f"Familia sugerida: {payload.familia}\n"
         f"Prioridade sugerida: {payload.prioridade}\n"
+        f"FONTES RECENTES PARA CONTEXTUALIZAR, SE RELEVANTES:\n{research_context or 'Nenhuma fonte externa encontrada rapidamente.'}\n"
         "Crie variacoes distintas, especificas e prontas para virar roteiro."
     )
     try:

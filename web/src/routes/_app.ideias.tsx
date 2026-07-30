@@ -523,9 +523,13 @@ function NovaIdeiaDialog({
 
       <div className="grid gap-4">
         <div className="grid gap-2">
-          <Label>Escreva a ideia bruta</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label>Escreva a ideia bruta</Label>
+            <span className="text-xs text-muted-foreground">{seed.length}/10000</span>
+          </div>
           <Textarea
             rows={5}
+            maxLength={10000}
             value={seed}
             onChange={(e) => onSeedChange(e.target.value)}
             placeholder="Ex: Quero falar que emagrecer com remédio sem mudar rotina faz a pessoa voltar para os mesmos hábitos depois..."
