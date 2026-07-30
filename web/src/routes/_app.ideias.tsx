@@ -200,6 +200,7 @@ export function IdeiasPage() {
       toast.error("Cole um trecho maior do artigo para a análise fazer sentido.");
       return;
     }
+    setArticleResult(null);
     setIsAnalyzingArticle(true);
     try {
       const result = await analyzeArticle({

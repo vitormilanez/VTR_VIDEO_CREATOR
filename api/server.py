@@ -2598,6 +2598,33 @@ def _article_compact_text(text: str, limit: int = 24000) -> str:
     return f"{head}\n\n[... trecho intermediario omitido para caber na analise ...]\n\n{tail}"
 
 
+def _article_source_text(text: str) -> str:
+    """Remove pedacos da UI quando o usuario cola o modal inteiro por acidente."""
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    cut_markers = [
+        "\nLink, DOI ou PubMed",
+        "\nO que a IA entendeu",
+        "\nIdeias a partir do artigo",
+        "\nAnalisar artigo\nO que a IA entendeu",
+    ]
+    cut_positions = [cleaned.find(marker) for marker in cut_markers if cleaned.find(marker) >= 0]
+    if cut_positions:
+        cleaned = cleaned[: min(cut_positions)]
+    lines = [line.strip() for line in cleaned.splitlines()]
+    drop_prefixes = {
+        "Importar artigo",
+        "Cole artigo, resumo, abstract, link ou DOI",
+    }
+    useful_lines = [
+        line
+        for line in lines
+        if line
+        and line not in drop_prefixes
+        and not re.fullmatch(r"\d{1,5}/50000", line)
+    ]
+    return "\n".join(useful_lines).strip()
+
+
 def _extract_article_numbers(text: str) -> list[str]:
     normalized = (
         text.replace("\u2009", " ")
@@ -2663,11 +2690,68 @@ def _article_idea(
     }
 
 
+def _article_skin_ideas(payload: ArticleIdeasIn, compliance: str) -> list[dict[str, Any]]:
+    context = (
+        "Contexto para o avatar: explique que perda de peso importante pode mudar sustentacao "
+        "facial, flacidez e qualidade da pele. A mensagem nao e que a tirzepatida envelhece a pele, "
+        "mas que o corpo inteiro se adapta ao emagrecimento. Reforce acompanhamento individual, "
+        "nutricao, massa muscular e dermatologia quando fizer sentido."
+    )
+    return [
+        _article_idea(
+            payload,
+            "A caneta emagrece, mas a pele acompanha?",
+            "Quando o peso cai rápido, a pele nem sempre acompanha no mesmo ritmo.",
+            f"{context} Estrutura da fala: comece pela pergunta do espelho, explique perda de gordura de suporte, acolha a surpresa do paciente e finalize com cuidado integrado.",
+            "Pessoa que emagreceu ou quer emagrecer com caneta e tem medo de flacidez, rosto cansado ou mudanca na imagem.",
+            compliance,
+            "Salve para lembrar que emagrecer tambem pede cuidado com pele e massa muscular.",
+        ),
+        _article_idea(
+            payload,
+            "Tirzepatida não envelhece a pele",
+            "A tirzepatida envelhece a pele? Não é bem assim.",
+            f"{context} Estrutura da fala: desmonte o mito, explique que a mudanca visual vem da perda de volume e mostre por que planejar o acompanhamento evita sustos.",
+            "Pessoa que ouviu falar em rosto envelhecido depois de emagrecer e quer entender sem panico.",
+            compliance,
+            "Compartilhe com quem acha que toda mudança no espelho é culpa direta do remédio.",
+        ),
+        _article_idea(
+            payload,
+            "O emagrecimento que aparece no rosto",
+            "Tem um efeito do emagrecimento que quase ninguém conversa antes: o rosto muda.",
+            f"{context} Estrutura da fala: mostre que gordura tambem sustenta tecido, explique sulcos e flacidez em linguagem simples e conecte com prevencao dermatologica sem vender procedimento.",
+            "Paciente que esta focado apenas na balanca e nao espera mudancas esteticas durante o processo.",
+            compliance,
+            "Me siga para entender o tratamento inteiro, não só o número da balança.",
+        ),
+        _article_idea(
+            payload,
+            "Pele não é detalhe no tratamento",
+            "Cuidar da pele durante o emagrecimento não é vaidade. Pode ser parte do cuidado.",
+            f"{context} Estrutura da fala: tire a pele do campo da vaidade, conecte imagem corporal, bem-estar, qualidade da pele e acompanhamento seguro.",
+            "Pessoa que acha que cuidado dermatologico so entra depois que o peso alvo chegou.",
+            compliance,
+            "Salve para conversar sobre isso antes, não só depois.",
+        ),
+        _article_idea(
+            payload,
+            "Nem toda mudança é efeito colateral",
+            "Nem toda mudança no espelho durante o uso da caneta é efeito colateral direto.",
+            f"{context} Estrutura da fala: diferencie efeito direto da medicação, efeito da perda de peso e adaptacao do corpo; finalize orientando avaliacao individual.",
+            "Paciente preocupado em abandonar tratamento ao notar flacidez ou rosto mais cansado.",
+            compliance,
+            "Procure avaliação individual antes de transformar susto em decisão.",
+        ),
+    ][: payload.quantity]
+
+
 def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
-    text = payload.article
+    text = _article_source_text(payload.article)
     lowered = text.lower()
     glp = bool(re.search(r"glp|semaglutide|semaglutida|tirzepatide|tirzepatida|mounjaro|ozempic", lowered))
     cancer = bool(re.search(r"cancer|câncer|tumou?r|oncolog|malignan|neoplasm", lowered))
+    skin = bool(re.search(r"pele|flacidez|col[aá]geno|rosto|dermatolog|cut[aâ]ne|cicatriz|hidradenite|psor[ií]ase|queda de cabelo", lowered))
     observational = bool(re.search(r"cohort|observational|retrospective|target trial emulation|trinetx", lowered))
     numbers = _extract_article_numbers(text)
     sample = next(
@@ -2692,18 +2776,50 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
         if "target trial emulation" in lowered
         else "Estudo observacional"
         if observational
+        else "Artigo de opinião/revisão editorial"
+        if "opinião" in lowered or "opinion" in lowered
         else "Artigo cientifico"
     )
     finding = (
         "Uso de GLP-1RA foi associado a menor incidência de cânceres relacionados à obesidade no curto prazo."
         if glp and cancer
+        else "Perda de peso importante com tirzepatida pode trazer mudanças perceptíveis na pele e no rosto, exigindo cuidado integrado."
+        if glp and skin
         else "O artigo traz um achado promissor, mas precisa ser comunicado como evidência em contexto."
     )
     compliance = (
         "Tratar como associacao observacional; nao afirmar prevencao, tratamento ou protecao garantida; reforcar avaliacao individual e exames de rastreio."
         if glp and cancer
+        else "Nao afirmar que o medicamento envelhece a pele; nao prometer resultado estetico; reforcar avaliacao individual, nutricao, massa muscular e acompanhamento dermatologico quando indicado."
+        if glp and skin
         else "Nao extrapolar o artigo; separar achado, limite e orientacao individual."
     )
+    if glp and skin and not cancer:
+        analysis = {
+            "tituloArtigo": "Tirzepatida, emagrecimento e pele",
+            "achadoPrincipal": finding,
+            "tipoEstudo": study_type,
+            "populacao": "Pessoas em tratamento de emagrecimento com tirzepatida ou GLP-1/GIP, conforme texto importado.",
+            "amostra": sample,
+            "seguimento": follow_up,
+            "numerosChave": numbers or ["Texto editorial sem numeros principais; revisar fontes cientificas antes de publicar como evidência."],
+            "limitacoes": [
+                "Texto de opinião/editorial não prova causalidade.",
+                "Mudanças na pele dependem de velocidade de perda de peso, idade, genética, massa muscular e histórico individual.",
+                "Relatos sobre melhora de doenças cutâneas ainda não devem virar recomendação clínica geral.",
+            ],
+            "podeFalar": [
+                "Perda de peso relevante pode reduzir volume de suporte e deixar flacidez ou sulcos mais perceptíveis.",
+                "A medicação não deve ser descrita como causa direta de envelhecimento da pele.",
+                "Acompanhamento nutricional, muscular e dermatológico pode ajudar a planejar melhor o processo.",
+            ],
+            "naoPodeFalar": [
+                "Tirzepatida envelhece a pele.",
+                "Todo paciente precisa fazer procedimento estético.",
+                "Protocolo de colágeno resolve ou previne flacidez para todos.",
+            ],
+        }
+        return {"analysis": analysis, "ideas": _article_skin_ideas(payload, compliance)}
     follow_up_context = (
         f"com {follow_up.lower()}"
         if follow_up != "Seguimento descrito no artigo."
@@ -3154,14 +3270,16 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
 @app.post("/api/articles/analyze")
 def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
     """Analisa artigo cientifico e devolve contexto + ideias prontas para roteiro."""
+    source_article = _article_source_text(payload.article)
+    clean_payload = payload.model_copy(update={"article": source_article or payload.article})
     if not os.getenv("ANTHROPIC_API_KEY"):
-        result = _manual_article_analysis(payload)
+        result = _manual_article_analysis(clean_payload)
         return {"ok": True, "provider": "fallback", **result}
 
     import anthropic
 
     prompt = (
-        f"ARTIGO OU RESUMO:\n{_article_compact_text(payload.article)}\n\n"
+        f"ARTIGO OU RESUMO:\n{_article_compact_text(clean_payload.article)}\n\n"
         f"Link/DOI informado: {payload.sourceUrl or 'nao informado'}\n"
         f"Quantidade de ideias: {payload.quantity}\n"
         f"Familia editorial sugerida: {payload.familia}\n"
@@ -3182,7 +3300,7 @@ def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
         analysis = parsed.get("analysis") if isinstance(parsed.get("analysis"), dict) else {}
         ideas = _normalize_expanded_ideas(
             ExpandIdeasIn(
-                seed=payload.article[:10000],
+                seed=clean_payload.article[:10000],
                 quantity=payload.quantity,
                 familia=payload.familia,
                 prioridade=payload.prioridade,
@@ -3190,10 +3308,10 @@ def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
             parsed.get("ideas"),
         )
     except anthropic.APIStatusError:
-        result = _manual_article_analysis(payload)
+        result = _manual_article_analysis(clean_payload)
         return {"ok": True, "provider": "fallback", **result}
     except Exception:
-        result = _manual_article_analysis(payload)
+        result = _manual_article_analysis(clean_payload)
         return {"ok": True, "provider": "fallback", **result}
 
     for idea in ideas:

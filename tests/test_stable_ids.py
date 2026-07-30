@@ -126,6 +126,30 @@ class StableIdTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 422)
         self.assertIn("antes do HeyGen", raised.exception.detail)
 
+    def test_article_fallback_does_not_reuse_cancer_ideas_for_skin_article(self) -> None:
+        payload = server.ArticleIdeasIn(
+            article=(
+                "Importar artigo\nCole artigo, resumo, abstract, link ou DOI\n3387/50000\n"
+                "Tirzepatida, emagrecimento e pele: o que precisamos conversar além da balança\n"
+                "Quando a perda de peso e rápida, a pele nem sempre acompanha no mesmo ritmo. "
+                "Pode aparecer flacidez, rosto cansado, sulcos mais visíveis e dúvidas sobre "
+                "acompanhamento dermatológico. Não porque a medicação esteja envelhecendo a pele, "
+                "mas porque a gordura que sumiu também sustentava tecidos por baixo. "
+                "Acompanhamento nutricional, preservação de massa muscular e cuidado dermatológico "
+                "podem fazer parte do processo.\n"
+                "Link, DOI ou PubMed\nhttps://doi.org/... ou PMID...\n"
+                "O que a IA entendeu\nCanetas reduzem risco de câncer? Calma."
+            ),
+            familia="comportamento",
+            prioridade="alta",
+        )
+        result = server._manual_article_analysis(payload)
+        titles = " ".join(idea["titulo"] for idea in result["ideas"]).lower()
+        self.assertIn("pele", result["analysis"]["achadoPrincipal"].lower())
+        self.assertIn("pele", titles)
+        self.assertNotIn("câncer", titles)
+        self.assertNotIn("cancer", titles)
+
     def test_video_prompt_applies_production_preferences(self) -> None:
         prompt = server._video_prompt(
             {"hook": "GLP-1 funciona em 30s?"},
