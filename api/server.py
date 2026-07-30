@@ -2328,6 +2328,14 @@ class ExpandIdeasIn(BaseModel):
     prioridade: Literal["alta", "media", "baixa"] = "media"
 
 
+class ArticleIdeasIn(BaseModel):
+    article: str = Field(min_length=120, max_length=50000)
+    sourceUrl: str | None = Field(default=None, max_length=1000)
+    quantity: int = Field(default=5, ge=1, le=6)
+    familia: Literal["medicamento", "comportamento", "metabolismo", "obesidade", "educativo"] = "medicamento"
+    prioridade: Literal["alta", "media", "baixa"] = "alta"
+
+
 class ScriptIn(BaseModel):
     id: str | None = None
     categoria: str = "educativo"
@@ -2515,6 +2523,207 @@ Regras obrigatorias:
 - Gere ideias diferentes entre si: uma de descoberta, uma de alerta/cuidado e uma de mito/limite.
 - CTA deve ser simples e seguro.
 - Responda somente no JSON solicitado."""
+
+
+_ARTICLE_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "analysis": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "tituloArtigo": {"type": "string"},
+                "achadoPrincipal": {"type": "string"},
+                "tipoEstudo": {"type": "string"},
+                "populacao": {"type": "string"},
+                "amostra": {"type": "string"},
+                "seguimento": {"type": "string"},
+                "numerosChave": {"type": "array", "items": {"type": "string"}},
+                "limitacoes": {"type": "array", "items": {"type": "string"}},
+                "podeFalar": {"type": "array", "items": {"type": "string"}},
+                "naoPodeFalar": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "tituloArtigo",
+                "achadoPrincipal",
+                "tipoEstudo",
+                "populacao",
+                "amostra",
+                "seguimento",
+                "numerosChave",
+                "limitacoes",
+                "podeFalar",
+                "naoPodeFalar",
+            ],
+        },
+        "ideas": _EXPAND_IDEAS_SCHEMA["properties"]["ideas"],
+    },
+    "required": ["analysis", "ideas"],
+}
+
+_ARTICLE_ANALYSIS_SYSTEM = """Voce e analista cientifico-editorial para um medico brasileiro.
+Transforme artigo cientifico em ideias de videos curtos sem extrapolar evidência.
+
+Regras obrigatorias:
+- Diferencie associacao, causalidade, hipotese biologica e recomendacao clinica.
+- Nunca diga que medicamento previne, cura ou trata cancer se o artigo nao for ensaio prospectivo desenhado para isso.
+- Nao cite doses.
+- Nao prescreva conduta.
+- Destaque limites do estudo de forma simples.
+- Gere ideias especificas, com titulos fortes mas nao sensacionalistas.
+- Cada ideia deve ser pronta para virar roteiro educativo.
+- Responda somente no JSON solicitado."""
+
+
+def _article_compact_text(text: str, limit: int = 24000) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    head = cleaned[: int(limit * 0.58)]
+    tail = cleaned[-int(limit * 0.32):]
+    return f"{head}\n\n[... trecho intermediario omitido para caber na analise ...]\n\n{tail}"
+
+
+def _extract_article_numbers(text: str) -> list[str]:
+    patterns = [
+        r"hazard ratio\s*[^\.;,\n]{0,80}",
+        r"\bHR\s*[=:]?\s*0?\.\d+\s*(?:[,; ]+\s*95%[^;\.\n]{0,50})?",
+        r"\b\d{2,3}[  ,]\d{3}\b\s+patients",
+        r"\b\d+[,.]?\d*%\b[^;\.\n]{0,80}",
+        r"median follow-up[^;\.\n]{0,80}",
+    ]
+    found: list[str] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.I):
+            value = re.sub(r"\s+", " ", match.group(0)).strip(" .,;")
+            if value and value not in found:
+                found.append(value)
+    return found[:6]
+
+
+def _article_idea(
+    payload: ArticleIdeasIn,
+    title: str,
+    hook: str,
+    angle: str,
+    pain: str,
+    compliance: str,
+    cta: str,
+) -> dict[str, Any]:
+    return {
+        "id": f"i-{uuid.uuid4().hex[:12]}",
+        "titulo": title,
+        "familia": payload.familia,
+        "hook": hook,
+        "angulo": angle,
+        "tipo": "Reel artigo cientifico",
+        "publicoDor": pain,
+        "cta": cta,
+        "linkOrigem": payload.sourceUrl,
+        "observacaoCompliance": compliance,
+        "prioridade": payload.prioridade,
+        "status": "novo",
+        "criadoEm": _now(),
+    }
+
+
+def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
+    text = payload.article
+    lowered = text.lower()
+    glp = bool(re.search(r"glp|semaglutide|semaglutida|tirzepatide|tirzepatida|mounjaro|ozempic", lowered))
+    cancer = bool(re.search(r"cancer|câncer|tumou?r|oncolog|malignan|neoplasm", lowered))
+    observational = bool(re.search(r"cohort|observational|retrospective|target trial emulation|trinetx", lowered))
+    numbers = _extract_article_numbers(text)
+    study_type = (
+        "Coorte observacional com emulação de ensaio-alvo"
+        if "target trial emulation" in lowered
+        else "Estudo observacional"
+        if observational
+        else "Artigo cientifico"
+    )
+    finding = (
+        "Uso de GLP-1RA foi associado a menor incidência de cânceres relacionados à obesidade no curto prazo."
+        if glp and cancer
+        else "O artigo traz um achado promissor, mas precisa ser comunicado como evidência em contexto."
+    )
+    compliance = (
+        "Tratar como associacao observacional; nao afirmar prevencao, tratamento ou protecao garantida; reforcar avaliacao individual e exames de rastreio."
+        if glp and cancer
+        else "Nao extrapolar o artigo; separar achado, limite e orientacao individual."
+    )
+    analysis = {
+        "tituloArtigo": "Artigo importado",
+        "achadoPrincipal": finding,
+        "tipoEstudo": study_type,
+        "populacao": "Adultos com obesidade, sem diabetes, conforme texto importado." if glp and cancer else "Populacao descrita no artigo importado.",
+        "amostra": next((n for n in numbers if "patients" in n.lower()), "Amostra descrita no artigo."),
+        "seguimento": next((n for n in numbers if "follow" in n.lower()), "Seguimento descrito no artigo."),
+        "numerosChave": numbers or ["Extrair numeros principais antes de publicar."],
+        "limitacoes": [
+            "Desenho observacional nao prova causalidade.",
+            "Seguimento curto pode nao capturar desfechos de longo prazo.",
+            "Pode haver confundimento residual mesmo com ajuste estatistico.",
+        ],
+        "podeFalar": [
+            "O estudo encontrou associacao com menor incidencia, nao prova de protecao garantida.",
+            "Os autores pedem estudos prospectivos para confirmar causalidade.",
+            "Exames preventivos e acompanhamento medico continuam necessarios.",
+        ],
+        "naoPodeFalar": [
+            "Caneta previne câncer.",
+            "GLP-1 trata câncer.",
+            "Todo paciente deve usar medicamento por esse motivo.",
+        ],
+    }
+    ideas = [
+        _article_idea(
+            payload,
+            "Canetas reduzem risco de câncer? Calma.",
+            "Caneta emagrecedora pode reduzir risco de câncer? A resposta honesta começa com uma palavra: associação.",
+            "Abrir com a manchete forte e explicar por que estudo observacional promissor nao vira promessa de protecao.",
+            "Pessoa que viu manchete sobre GLP-1 e câncer e quer saber se isso muda sua conduta.",
+            compliance,
+            "Salve para lembrar: artigo promissor não substitui avaliação individual.",
+        ),
+        _article_idea(
+            payload,
+            "O rodapé que a manchete não conta",
+            "A manchete fala em menos câncer. Mas o rodapé do estudo é onde mora a parte mais importante.",
+            "Explicar população, comparador, seguimento curto e necessidade de estudos prospectivos antes de transformar achado em regra.",
+            "Pessoa animada com novidade científica, mas sem repertório para interpretar limite de estudo.",
+            compliance,
+            "Compartilhe com alguém que precisa entender a notícia inteira.",
+        ),
+        _article_idea(
+            payload,
+            "HR 0,59 não é escudo contra câncer",
+            "Quando um estudo fala em HR 0,59, isso não significa que você ganhou um escudo contra câncer.",
+            "Traduzir hazard ratio em linguagem simples e mostrar a diferença entre risco populacional, associação estatística e decisão clínica individual.",
+            "Pessoa que se impressiona com número científico e pode transformar estatística em promessa pessoal.",
+            compliance,
+            "Me siga para entender estudo sem cair em promessa bonita demais.",
+        ),
+        _article_idea(
+            payload,
+            "GLP-1, obesidade e câncer: o que dá para dizer",
+            "Existe uma conversa séria entre obesidade, inflamação, GLP-1 e câncer. Mas séria não quer dizer mágica.",
+            "Conectar obesidade e risco oncológico com cautela, separando mecanismo possível, perda de peso e evidência ainda em confirmação.",
+            "Paciente tentando entender se emagrecer muda risco de saúde além da balança.",
+            compliance,
+            "Salve para conversar com seu médico com mais contexto.",
+        ),
+        _article_idea(
+            payload,
+            "Caneta não substitui rastreio",
+            "Mesmo que um estudo seja promissor, ele não cancela mamografia, colonoscopia ou acompanhamento médico.",
+            "Usar o artigo para reforçar que tratamento de obesidade e prevenção oncológica são complementares, não substitutos.",
+            "Pessoa inclinada a abandonar exame preventivo por confiar demais em uma medicação.",
+            compliance,
+            "Encaminhe para quem transforma manchete em decisão de saúde.",
+        ),
+    ]
+    return {"analysis": analysis, "ideas": ideas[: payload.quantity]}
 
 
 def _manual_idea_fallback(payload: ExpandIdeasIn) -> list[dict[str, Any]]:
@@ -2878,6 +3087,56 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
         "provider": "claude",
         "ideas": _normalize_expanded_ideas(payload, parsed.get("ideas")),
     }
+
+
+@app.post("/api/articles/analyze")
+def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
+    """Analisa artigo cientifico e devolve contexto + ideias prontas para roteiro."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        result = _manual_article_analysis(payload)
+        return {"ok": True, "provider": "fallback", **result}
+
+    import anthropic
+
+    prompt = (
+        f"ARTIGO OU RESUMO:\n{_article_compact_text(payload.article)}\n\n"
+        f"Link/DOI informado: {payload.sourceUrl or 'nao informado'}\n"
+        f"Quantidade de ideias: {payload.quantity}\n"
+        f"Familia editorial sugerida: {payload.familia}\n"
+        f"Prioridade sugerida: {payload.prioridade}\n\n"
+        "Analise o estudo e gere ideias prontas para roteiro em portugues brasileiro."
+    )
+    try:
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            max_tokens=2600,
+            system=_ARTICLE_ANALYSIS_SYSTEM,
+            output_config={"format": {"type": "json_schema", "schema": _ARTICLE_ANALYSIS_SCHEMA}},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw_text = "".join(getattr(block, "text", "") for block in message.content)
+        parsed = json.loads(raw_text)
+        analysis = parsed.get("analysis") if isinstance(parsed.get("analysis"), dict) else {}
+        ideas = _normalize_expanded_ideas(
+            ExpandIdeasIn(
+                seed=payload.article[:10000],
+                quantity=payload.quantity,
+                familia=payload.familia,
+                prioridade=payload.prioridade,
+            ),
+            parsed.get("ideas"),
+        )
+    except anthropic.APIStatusError:
+        result = _manual_article_analysis(payload)
+        return {"ok": True, "provider": "fallback", **result}
+    except Exception:
+        result = _manual_article_analysis(payload)
+        return {"ok": True, "provider": "fallback", **result}
+
+    for idea in ideas:
+        idea["linkOrigem"] = payload.sourceUrl
+    return {"ok": True, "provider": "claude", "analysis": analysis, "ideas": ideas}
 
 
 def _append(tab: str, row: list) -> None:

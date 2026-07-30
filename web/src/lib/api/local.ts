@@ -111,6 +111,46 @@ export async function expandIdeas(input: ExpandIdeasInput): Promise<Idea[]> {
   return response.ideas;
 }
 
+export interface ArticleIdeasInput {
+  article: string;
+  sourceUrl?: string | null;
+  quantity?: number;
+  familia?: Idea["familia"];
+  prioridade?: Idea["prioridade"];
+}
+
+export interface ArticleAnalysis {
+  tituloArtigo: string;
+  achadoPrincipal: string;
+  tipoEstudo: string;
+  populacao: string;
+  amostra: string;
+  seguimento: string;
+  numerosChave: string[];
+  limitacoes: string[];
+  podeFalar: string[];
+  naoPodeFalar: string[];
+}
+
+export interface ArticleIdeasResult {
+  provider: "claude" | "fallback";
+  analysis: ArticleAnalysis;
+  ideas: Idea[];
+}
+
+/** Analisa artigo cientifico e gera ideias editoriais com limites de compliance. */
+export async function analyzeArticle(input: ArticleIdeasInput): Promise<ArticleIdeasResult> {
+  const response = await postJson<{ ok: boolean } & ArticleIdeasResult>(
+    "/api/articles/analyze",
+    input,
+  );
+  return {
+    provider: response.provider,
+    analysis: response.analysis,
+    ideas: response.ideas,
+  };
+}
+
 /** Persiste um roteiro gerado na aba Roteiros do Sheets. */
 export async function appendScript(script: Script): Promise<Script> {
   const response = await postJson<{ ok: boolean; script: Script }>("/api/sheets/roteiros", script);

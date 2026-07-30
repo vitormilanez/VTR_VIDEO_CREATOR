@@ -10,7 +10,14 @@ import { ConfirmAction } from "@/components/confirm-action";
 import { buildScriptFromIdea } from "@/lib/script-builder";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
-import { appendIdea, appendScript, expandIdeas, setSheetStatus } from "@/lib/api/local";
+import {
+  analyzeArticle,
+  appendIdea,
+  appendScript,
+  expandIdeas,
+  setSheetStatus,
+  type ArticleIdeasResult,
+} from "@/lib/api/local";
 import type { Idea, IdeaStatus, ThemeFamily } from "@/lib/mock-data";
 import {
   Table,
@@ -22,6 +29,7 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -103,6 +111,13 @@ export function IdeiasPage() {
   const [manualPrioridade, setManualPrioridade] = useState<Idea["prioridade"]>("media");
   const [manualIdeas, setManualIdeas] = useState<Idea[]>([]);
   const [isExpanding, setIsExpanding] = useState(false);
+  const [articleOpen, setArticleOpen] = useState(false);
+  const [articleText, setArticleText] = useState("");
+  const [articleUrl, setArticleUrl] = useState("");
+  const [articleFamilia, setArticleFamilia] = useState<ThemeFamily>("medicamento");
+  const [articlePrioridade, setArticlePrioridade] = useState<Idea["prioridade"]>("alta");
+  const [articleResult, setArticleResult] = useState<ArticleIdeasResult | null>(null);
+  const [isAnalyzingArticle, setIsAnalyzingArticle] = useState(false);
   const [savingIdeaId, setSavingIdeaId] = useState<string | null>(null);
 
   const filtered = ideas.filter((i) => {
@@ -179,6 +194,30 @@ export function IdeiasPage() {
     }
   }
 
+  async function analisarArtigo() {
+    const article = articleText.trim();
+    if (article.length < 120) {
+      toast.error("Cole um trecho maior do artigo para a análise fazer sentido.");
+      return;
+    }
+    setIsAnalyzingArticle(true);
+    try {
+      const result = await analyzeArticle({
+        article,
+        sourceUrl: articleUrl.trim() || null,
+        quantity: 5,
+        familia: articleFamilia,
+        prioridade: articlePrioridade,
+      });
+      setArticleResult(result);
+      toast.success("Artigo analisado. Revise os limites antes de criar roteiro.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel analisar o artigo.");
+    } finally {
+      setIsAnalyzingArticle(false);
+    }
+  }
+
   async function salvarIdeiaERoteiro(idea: Idea) {
     setSavingIdeaId(idea.id);
     try {
@@ -194,6 +233,7 @@ export function IdeiasPage() {
         toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
       }
       setManualOpen(false);
+      setArticleOpen(false);
       setManualSeed("");
       setManualIdeas([]);
       toast.success("Ideia contextualizada e roteiro criado.");
@@ -220,29 +260,56 @@ export function IdeiasPage() {
     <AppShell
       title="Ideias"
       actions={
-        <Dialog open={manualOpen} onOpenChange={setManualOpen}>
-          <DialogTrigger asChild>
-            <Button size="sm">
-              <Plus className="mr-1 h-4 w-4" /> Nova ideia
-            </Button>
-          </DialogTrigger>
-          <NovaIdeiaDialog
-            seed={manualSeed}
-            onSeedChange={(value) => {
-              setManualSeed(value);
-              if (manualIdeas.length) setManualIdeas([]);
-            }}
-            familia={manualFamilia}
-            onFamiliaChange={setManualFamilia}
-            prioridade={manualPrioridade}
-            onPrioridadeChange={setManualPrioridade}
-            ideas={manualIdeas}
-            isExpanding={isExpanding}
-            savingIdeaId={savingIdeaId}
-            onExpand={explorarIdeiaManual}
-            onCreateScript={salvarIdeiaERoteiro}
-          />
-        </Dialog>
+        <div className="flex flex-wrap gap-2">
+          <Dialog open={articleOpen} onOpenChange={setArticleOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" variant="secondary">
+                <FileText className="mr-1 h-4 w-4" /> Importar artigo
+              </Button>
+            </DialogTrigger>
+            <ArticleImportDialog
+              article={articleText}
+              onArticleChange={(value) => {
+                setArticleText(value);
+                if (articleResult) setArticleResult(null);
+              }}
+              sourceUrl={articleUrl}
+              onSourceUrlChange={setArticleUrl}
+              familia={articleFamilia}
+              onFamiliaChange={setArticleFamilia}
+              prioridade={articlePrioridade}
+              onPrioridadeChange={setArticlePrioridade}
+              result={articleResult}
+              isAnalyzing={isAnalyzingArticle}
+              savingIdeaId={savingIdeaId}
+              onAnalyze={analisarArtigo}
+              onCreateScript={salvarIdeiaERoteiro}
+            />
+          </Dialog>
+          <Dialog open={manualOpen} onOpenChange={setManualOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm">
+                <Plus className="mr-1 h-4 w-4" /> Nova ideia
+              </Button>
+            </DialogTrigger>
+            <NovaIdeiaDialog
+              seed={manualSeed}
+              onSeedChange={(value) => {
+                setManualSeed(value);
+                if (manualIdeas.length) setManualIdeas([]);
+              }}
+              familia={manualFamilia}
+              onFamiliaChange={setManualFamilia}
+              prioridade={manualPrioridade}
+              onPrioridadeChange={setManualPrioridade}
+              ideas={manualIdeas}
+              isExpanding={isExpanding}
+              savingIdeaId={savingIdeaId}
+              onExpand={explorarIdeiaManual}
+              onCreateScript={salvarIdeiaERoteiro}
+            />
+          </Dialog>
+        </div>
       }
     >
       {usedIdeas.length > 0 ? (
@@ -486,6 +553,225 @@ function Block({ label, text }: { label: string; text: string }) {
         {label}
       </div>
       <p className="mt-0.5 text-sm">{text}</p>
+    </div>
+  );
+}
+
+function ArticleImportDialog({
+  article,
+  onArticleChange,
+  sourceUrl,
+  onSourceUrlChange,
+  familia,
+  onFamiliaChange,
+  prioridade,
+  onPrioridadeChange,
+  result,
+  isAnalyzing,
+  savingIdeaId,
+  onAnalyze,
+  onCreateScript,
+}: {
+  article: string;
+  onArticleChange: (value: string) => void;
+  sourceUrl: string;
+  onSourceUrlChange: (value: string) => void;
+  familia: ThemeFamily;
+  onFamiliaChange: (value: ThemeFamily) => void;
+  prioridade: Idea["prioridade"];
+  onPrioridadeChange: (value: Idea["prioridade"]) => void;
+  result: ArticleIdeasResult | null;
+  isAnalyzing: boolean;
+  savingIdeaId: string | null;
+  onAnalyze: () => void;
+  onCreateScript: (idea: Idea) => void;
+}) {
+  return (
+    <DialogContent className="max-h-[88vh] max-w-5xl overflow-y-auto">
+      <DialogHeader>
+        <DialogTitle>Importar artigo</DialogTitle>
+      </DialogHeader>
+
+      <div className="grid gap-4">
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <Label>Cole artigo, resumo, abstract, link ou DOI</Label>
+            <span className="text-xs text-muted-foreground">{article.length}/50000</span>
+          </div>
+          <Textarea
+            rows={7}
+            maxLength={50000}
+            value={article}
+            onChange={(event) => onArticleChange(event.target.value)}
+            placeholder="Cole aqui o abstract, highlights, discussão ou o texto completo do artigo..."
+          />
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-[1.3fr_0.8fr_0.8fr]">
+          <div className="grid gap-2">
+            <Label>Link, DOI ou PubMed</Label>
+            <Input
+              value={sourceUrl}
+              onChange={(event) => onSourceUrlChange(event.target.value)}
+              placeholder="https://doi.org/... ou PMID..."
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label>Família</Label>
+            <Select value={familia} onValueChange={(value) => onFamiliaChange(value as ThemeFamily)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {familias.map((f) => (
+                  <SelectItem key={f} value={f}>
+                    {familiaLabel[f]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid gap-2">
+            <Label>Prioridade</Label>
+            <Select
+              value={prioridade}
+              onValueChange={(value) => onPrioridadeChange(value as Idea["prioridade"])}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="alta">Alta</SelectItem>
+                <SelectItem value="media">Media</SelectItem>
+                <SelectItem value="baixa">Baixa</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <Button onClick={onAnalyze} disabled={isAnalyzing || article.trim().length < 120}>
+          {isAnalyzing ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <FileText className="mr-2 h-4 w-4" />
+          )}
+          Analisar artigo
+        </Button>
+
+        {result ? (
+          <div className="grid gap-4">
+            <div className="rounded-lg border border-status-info/30 bg-status-info/5 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h3 className="font-display text-sm font-semibold">O que a IA entendeu</h3>
+                  <p className="text-xs text-muted-foreground">
+                    Revise esta leitura antes de transformar em roteiro.
+                  </p>
+                </div>
+                <Badge variant="outline" className="text-[10px]">
+                  {result.provider === "claude" ? "IA" : "Fallback local"}
+                </Badge>
+              </div>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <ArticleFact label="Achado principal" value={result.analysis.achadoPrincipal} />
+                <ArticleFact label="Tipo de estudo" value={result.analysis.tipoEstudo} />
+                <ArticleFact label="População" value={result.analysis.populacao} />
+                <ArticleFact label="Amostra" value={result.analysis.amostra} />
+                <ArticleFact label="Seguimento" value={result.analysis.seguimento} />
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <ArticleList title="Números-chave" rows={result.analysis.numerosChave} />
+                <ArticleList title="Limitações" rows={result.analysis.limitacoes} />
+                <ArticleList title="Pode falar" rows={result.analysis.podeFalar} />
+                <ArticleList title="Não pode falar" rows={result.analysis.naoPodeFalar} danger />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-display text-sm font-semibold">Ideias a partir do artigo</h3>
+              <p className="text-xs text-muted-foreground">
+                Escolha uma. Ela será salva em Ideias e já abrirá o roteiro.
+              </p>
+            </div>
+            {result.ideas.map((idea) => (
+              <div key={idea.id} className="rounded-lg border bg-card p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="font-semibold">{idea.titulo}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                        {familiaLabel[idea.familia]}
+                      </span>
+                      <StatusBadge {...prioridadeLabel[idea.prioridade]} />
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => onCreateScript(idea)}
+                    disabled={Boolean(savingIdeaId)}
+                  >
+                    {savingIdeaId === idea.id ? (
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="mr-1 h-3.5 w-3.5" />
+                    )}
+                    Criar roteiro
+                  </Button>
+                </div>
+                <Block label="Hook" text={idea.hook} />
+                <Block label="Contexto" text={idea.angulo} />
+                {idea.publicoDor ? <Block label="Público / Dor" text={idea.publicoDor} /> : null}
+                <Block label="Compliance" text={idea.observacaoCompliance} />
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      <DialogFooter>
+        <p className="text-xs text-muted-foreground">
+          Artigos observacionais viram conteúdo educativo: associação não deve ser vendida como
+          causalidade ou promessa clínica.
+        </p>
+      </DialogFooter>
+    </DialogContent>
+  );
+}
+
+function ArticleFact({ label, value }: { label: string; value?: string }) {
+  return (
+    <div className="rounded-md border bg-background px-3 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <p className="mt-1 text-xs leading-5">{value || "—"}</p>
+    </div>
+  );
+}
+
+function ArticleList({
+  title,
+  rows,
+  danger = false,
+}: {
+  title: string;
+  rows?: string[];
+  danger?: boolean;
+}) {
+  return (
+    <div className={`rounded-md border bg-background px-3 py-2 ${danger ? "border-status-danger/30" : ""}`}>
+      <div
+        className={`text-[10px] font-semibold uppercase tracking-wider ${
+          danger ? "text-status-danger" : "text-muted-foreground"
+        }`}
+      >
+        {title}
+      </div>
+      <ul className="mt-1 space-y-1 text-xs leading-5">
+        {(rows?.length ? rows : ["—"]).map((row, index) => (
+          <li key={`${title}-${index}`}>{row}</li>
+        ))}
+      </ul>
     </div>
   );
 }
