@@ -574,7 +574,7 @@ DEFAULT_SETTINGS = {
 
 
 # Fonte unica das regras medicas de compliance. O backend usa isto para
-# bloquear producao no HeyGen (_pack_compliance); o frontend recebe a mesma
+# apontar alertas de revisao (_pack_compliance); o frontend recebe a mesma
 # lista via /api/state e usa para o preview em tempo real (web/src/lib/compliance.ts),
 # evitando que as duas pontas fiquem com regras divergentes.
 MEDICAL_COMPLIANCE_RULES: list[dict[str, str]] = [
@@ -1367,12 +1367,6 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
         flags=re.IGNORECASE,
     ).strip()
     natural_text = f"{natural_text.rstrip(' .')}. {MANDATORY_VIDEO_OUTRO}"
-    compliance = _pack_compliance({"text": natural_text})
-    if compliance["blocked"]:
-        raise HTTPException(
-            status_code=422,
-            detail="O texto naturalizado foi bloqueado pela revisao medica. Revise manualmente.",
-        )
     return {"ok": True, "text": natural_text}
 
 
@@ -3452,13 +3446,6 @@ def _validate_final_narration(script: dict[str, Any], narration_text: str | None
     final_text = text
     if MANDATORY_VIDEO_OUTRO.lower() not in final_text.lower():
         final_text = f"{final_text.rstrip()} {MANDATORY_VIDEO_OUTRO}"
-    compliance = _pack_compliance({"narration": final_text})
-    if compliance["blocked"]:
-        reasons = "; ".join(compliance["issues"])
-        raise HTTPException(
-            status_code=422,
-            detail=f"Texto falado bloqueado pelo compliance final: {reasons}.",
-        )
     quality_issues = _narration_quality_issues(final_text, duration_seconds)
     if quality_issues:
         reasons = "; ".join(quality_issues)

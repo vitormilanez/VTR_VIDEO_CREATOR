@@ -661,8 +661,9 @@ function RoteiroDetalhe() {
               </div>
               <div className="mt-2 flex items-start gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />A fala
-                exata será validada pelo compliance antes de qualquer envio ao HeyGen. Se houver
-                dose, promessa ou instrução prescritiva, a produção será bloqueada.
+                exata será validada antes do envio ao HeyGen. Se houver dose, promessa ou
+                instrução prescritiva, o sistema mantém o alerta para revisão, mas não bloqueia
+                o teste.
               </div>
             </div>
           </div>

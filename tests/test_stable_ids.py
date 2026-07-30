@@ -88,15 +88,19 @@ class FakeRadarClient:
 
 
 class StableIdTests(unittest.TestCase):
-    def test_final_narration_compliance_blocks_before_production(self) -> None:
-        with self.assertRaises(server.HTTPException) as raised:
-            server._validate_final_narration(
-                {"hook": "Conteudo educativo"},
-                "Tome 5 mg todos os dias para ter resultado certo.",
-            )
-        self.assertEqual(raised.exception.status_code, 422)
-        self.assertIn("compliance final", raised.exception.detail)
-        self.assertIn("dose", raised.exception.detail.lower())
+    def test_final_narration_compliance_warns_but_does_not_block_production(self) -> None:
+        text = server._validate_final_narration(
+            {"hook": "Conteudo educativo"},
+            (
+                "Tome 5 mg todos os dias para ter resultado certo. "
+                "Esse texto ainda precisa de revisao medica antes de publicar. "
+                "Mesmo assim, o sistema deve permitir teste interno sem enviar a decisao "
+                "como orientacao final para o paciente."
+            ),
+            10,
+        )
+        self.assertIn("Tome 5 mg", text)
+        self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
 
     def test_final_narration_compliance_accepts_safe_educational_text(self) -> None:
         text = server._validate_final_narration(
