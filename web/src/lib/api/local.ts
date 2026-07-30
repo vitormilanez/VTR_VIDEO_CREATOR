@@ -1,7 +1,7 @@
 // Cliente da API local (FastAPI em api/server.py) que serve os dados reais
 // do Google Sheets. Base configuravel via VITE_API_URL.
 import type { HydratePayload } from "../store";
-import type { AppSettings, CalendarPost, Idea, Script } from "../mock-data";
+import type { AppSettings, CalendarPost, Idea, Script, Trend } from "../mock-data";
 import type { VideoJob } from "../mock-data";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
@@ -81,6 +81,12 @@ async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
 
 async function postJson<T = { ok: boolean }>(path: string, body: unknown): Promise<T> {
   return requestJson<T>(path, { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Persiste uma tendencia cadastrada manualmente na aba Radar Tendencias do Sheets. */
+export async function appendTrend(trend: Trend): Promise<Trend> {
+  const response = await postJson<{ ok: boolean; trend: Trend }>("/api/sheets/radar", trend);
+  return response.trend;
 }
 
 /** Persiste uma ideia gerada na aba Ideias do Sheets. */

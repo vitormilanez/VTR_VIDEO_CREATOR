@@ -2112,6 +2112,47 @@ _ROTEIRO_STATUS = {
 }
 
 
+class TrendIn(BaseModel):
+    id: str | None = None
+    titulo: str = Field(min_length=1, max_length=300)
+    subtema: str | None = None
+    sinal: str | None = None
+    dorPublico: str | None = None
+    fonte: str = Field(min_length=1, max_length=200)
+    link: str | None = None
+    potencial: int = Field(default=5, ge=0, le=10)
+    prioridade: Literal["alta", "media", "baixa"] = "media"
+    status: Literal["novo", "em_analise", "descartado"] = "novo"
+    notas: str | None = None
+    criadoEm: str | None = None
+
+
+RADAR_HEADERS = [
+    "Data",
+    "Potencial Viral",
+    "Tema",
+    "Subtema",
+    "Fonte",
+    "Link referência",
+    "Sinal de tendência",
+    "Dor do público",
+    "Prioridade",
+    "Status",
+    "Observações",
+    "ID",
+]
+
+
+def _radar_date(value: str | None) -> str:
+    raw = (value or "").strip()
+    if raw:
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).date().isoformat()
+        except ValueError:
+            pass
+    return datetime.now().date().isoformat()
+
+
 class IdeaIn(BaseModel):
     id: str | None = None
     trendId: str | None = None
@@ -2129,7 +2170,7 @@ class IdeaIn(BaseModel):
 
 
 class ExpandIdeasIn(BaseModel):
-    seed: str = Field(min_length=8, max_length=2000)
+    seed: str = Field(min_length=8, max_length=10000)
     quantity: int = Field(default=3, ge=1, le=5)
     familia: Literal["medicamento", "comportamento", "metabolismo", "obesidade", "educativo"] = "educativo"
     prioridade: Literal["alta", "media", "baixa"] = "media"
@@ -2482,6 +2523,30 @@ def _append(tab: str, row: list) -> None:
         client.append_rows(TAB_RANGE[tab], [row])
     except Exception as exc:  # credenciais / rede
         raise HTTPException(status_code=503, detail=f"falha ao gravar no Sheets: {exc}")
+
+
+@app.post("/api/sheets/radar")
+def append_trend(payload: TrendIn) -> dict:
+    """Grava uma tendencia cadastrada manualmente na aba 'Radar Tendencias'."""
+    item_id = payload.id or f"t-{uuid.uuid4().hex[:12]}"
+    row = [
+        _radar_date(payload.criadoEm),                    # Data
+        payload.potencial,                                # Potencial Viral
+        payload.titulo,                                   # Tema
+        payload.subtema or "",                             # Subtema
+        payload.fonte,                                     # Fonte
+        payload.link or "",                                # Link referência
+        payload.sinal or "",                               # Sinal de tendência
+        payload.dorPublico or "",                          # Dor do público
+        _PRIORIDADE.get(payload.prioridade, "Média"),      # Prioridade
+        STATUS_LABELS["radar"].get(payload.status, "Pendente"),  # Status
+        payload.notas or "",                               # Observações
+        item_id,                                           # ID permanente
+    ]
+    _append("radar", row)
+    raw = dict(zip(RADAR_HEADERS, row))
+    _append_snapshot_row("radar", raw)
+    return {"ok": True, "trend": map_trends([raw])[0]}
 
 
 @app.post("/api/sheets/ideias")

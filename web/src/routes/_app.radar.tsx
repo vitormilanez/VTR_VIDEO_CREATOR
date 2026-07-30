@@ -10,7 +10,7 @@ import { ConfirmAction } from "@/components/confirm-action";
 import { buildIdeaFromTrend } from "@/lib/idea-builder";
 import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
-import { appendIdea, fetchState, huntTrends, setSheetStatus } from "@/lib/api/local";
+import { appendIdea, appendTrend, fetchState, huntTrends, setSheetStatus } from "@/lib/api/local";
 import { defaultSettings } from "@/lib/mock-data";
 import type { Prioridade, ThemeFamily, Trend, TrendStatus } from "@/lib/mock-data";
 import {
@@ -161,6 +161,12 @@ export function RadarPage() {
       navigate({ to: "/ideias/$id", params: { id: existingIdea.id } });
       return;
     }
+    if (t.status === "em_analise") {
+      toast.warning(
+        "Esta tendencia ja esta marcada como em analise, mas a ideia vinculada nao foi encontrada localmente. Atualize a pagina (Buscar tendencias) antes de gerar outra ideia.",
+      );
+      return;
+    }
     const idea = buildIdeaFromTrend(t, genId("i"));
     try {
       const saved = await appendIdea(idea);
@@ -239,7 +245,7 @@ export function RadarPage() {
               onClose={() => setOpen(false)}
               onCreate={(t) => {
                 addTrend(t);
-                toast.success("Tendencia registrada.");
+                toast.success("Tendencia registrada e salva no Sheets.");
                 setOpen(false);
               }}
             />
@@ -640,6 +646,37 @@ function NovaTendenciaDialog({
   const [sinal, setSinal] = useState("");
   const [dorPublico, setDorPublico] = useState("");
   const [notas, setNotas] = useState("");
+  const [salvando, setSalvando] = useState(false);
+
+  async function handleSubmit() {
+    const draft: Trend = {
+      id: genId("t"),
+      titulo,
+      subtema: subtema || undefined,
+      sinal: sinal || undefined,
+      dorPublico: dorPublico || undefined,
+      fonte,
+      volume: 0,
+      potencial: Math.max(0, Math.min(10, Number(potencial) || 0)),
+      familia,
+      risco: "medio",
+      prioridade,
+      status: "novo",
+      notas,
+      criadoEm: new Date().toISOString(),
+    };
+    setSalvando(true);
+    try {
+      const saved = await appendTrend(draft);
+      onCreate(saved);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Nao foi possivel salvar a tendencia no Sheets.",
+      );
+    } finally {
+      setSalvando(false);
+    }
+  }
 
   return (
     <DialogContent>
@@ -722,28 +759,8 @@ function NovaTendenciaDialog({
         <Button variant="ghost" onClick={onClose}>
           Cancelar
         </Button>
-        <Button
-          disabled={!titulo || !fonte}
-          onClick={() =>
-            onCreate({
-              id: genId("t"),
-              titulo,
-              subtema: subtema || undefined,
-              sinal: sinal || undefined,
-              dorPublico: dorPublico || undefined,
-              fonte,
-              volume: 0,
-              potencial: Math.max(0, Math.min(10, Number(potencial) || 0)),
-              familia,
-              risco: "medio",
-              prioridade,
-              status: "novo",
-              notas,
-              criadoEm: new Date().toISOString(),
-            })
-          }
-        >
-          Registrar
+        <Button disabled={!titulo || !fonte || salvando} onClick={handleSubmit}>
+          {salvando ? "Salvando..." : "Registrar"}
         </Button>
       </DialogFooter>
     </DialogContent>
