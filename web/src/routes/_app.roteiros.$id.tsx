@@ -199,7 +199,14 @@ function RoteiroDetalhe() {
     }
     setSending(true);
     try {
-      const job = await createHeyGenVideo(script.id, {
+      let scriptToSend = script;
+      if (dirty) {
+        const saved = await saveScript(draft);
+        updateScript(saved.id, saved);
+        setDraft(saved);
+        scriptToSend = saved;
+      }
+      const job = await createHeyGenVideo(scriptToSend.id, {
         avatarId,
         voiceId,
         orientation,
@@ -212,7 +219,11 @@ function RoteiroDetalhe() {
         narrationText,
       });
       addVideoJob(job);
-      toast.success("Roteiro enviado para producao no HeyGen.");
+      toast.success(
+        dirty
+          ? "Roteiro salvo e enviado para producao no HeyGen."
+          : "Roteiro enviado para producao no HeyGen.",
+      );
       navigate({ to: "/producao/$id", params: { id: job.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel enviar ao HeyGen.");
@@ -296,9 +307,11 @@ function RoteiroDetalhe() {
                     title={
                       !canSendToProduction
                         ? "Revise o texto falado antes de enviar"
-                        : "Gerar outra versão deste roteiro"
+                        : dirty
+                          ? "Salvar alteracoes e gerar outra versao"
+                          : "Gerar outra versão deste roteiro"
                     }
-                    disabled={dirty || sending || !avatarId || !voiceId || !canSendToProduction}
+                    disabled={saving || sending || !avatarId || !voiceId || !canSendToProduction}
                   >
                     <History className="mr-1 h-4 w-4" /> Nova versão
                   </Button>
@@ -315,15 +328,15 @@ function RoteiroDetalhe() {
                 <Button
                   size="sm"
                   title={
-                    dirty
-                      ? "Salve as alteracoes antes de enviar"
-                      : !canSendToProduction
+                    !canSendToProduction
                         ? "Revise o texto falado antes de enviar"
-                        : "Enviar roteiro ao HeyGen"
+                        : dirty
+                          ? "Salvar alteracoes e enviar roteiro ao HeyGen"
+                          : "Enviar roteiro ao HeyGen"
                   }
-                  disabled={dirty || sending || !avatarId || !voiceId || !canSendToProduction}
+                  disabled={saving || sending || !avatarId || !voiceId || !canSendToProduction}
                 >
-                  <Film className="mr-1 h-4 w-4" /> Enviar para producao
+                  <Film className="mr-1 h-4 w-4" /> {dirty ? "Salvar e enviar" : "Enviar para producao"}
                 </Button>
               }
             />
