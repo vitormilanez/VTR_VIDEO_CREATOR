@@ -13,10 +13,12 @@ ou:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -93,6 +95,145 @@ def _load_snapshot() -> dict[str, Any]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _ai_db() -> sqlite3.Connection:
+    """Abre o banco operacional usado para cache e medicao de chamadas de IA."""
+    conn = sqlite3.connect(OPERATIONAL_DB, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ai_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            model TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS ai_response_cache (
+            cache_key TEXT PRIMARY KEY,
+            operation TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    return conn
+
+
+def _ai_cache_key(operation: str, payload: Any) -> str:
+    canonical = json.dumps(
+        {"operation": operation, "payload": payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _ai_cache_get(operation: str, payload: Any, max_age_seconds: int = 86400) -> dict[str, Any] | None:
+    key = _ai_cache_key(operation, payload)
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT response_json, created_at FROM ai_response_cache WHERE cache_key = ?",
+            (key,),
+        ).fetchone()
+        if not row:
+            return None
+        created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - created).total_seconds() > max_age_seconds:
+            conn.execute("DELETE FROM ai_response_cache WHERE cache_key = ?", (key,))
+            conn.commit()
+            return None
+        return json.loads(str(row["response_json"]))
+    finally:
+        conn.close()
+
+
+def _ai_cache_put(operation: str, payload: Any, response: dict[str, Any]) -> None:
+    key = _ai_cache_key(operation, payload)
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """INSERT INTO ai_response_cache(cache_key, operation, response_json, created_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(cache_key) DO UPDATE SET response_json=excluded.response_json,
+               created_at=excluded.created_at""",
+            (key, operation, json.dumps(response, ensure_ascii=False), _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _record_anthropic_usage(operation: str, model: str, message: Any) -> None:
+    """Persiste tokens retornados pelo Claude; falhas nunca entram como custo."""
+    usage = getattr(message, "usage", None)
+    if usage is None:
+        return
+
+    def number(name: str) -> int:
+        value = getattr(usage, name, 0)
+        return int(value or 0) if isinstance(value, (int, float)) else 0
+
+    input_tokens = number("input_tokens")
+    output_tokens = number("output_tokens")
+    cache_read_tokens = number("cache_read_input_tokens")
+    cache_write_tokens = number("cache_creation_input_tokens")
+    input_rate = float(os.getenv("ANTHROPIC_INPUT_COST_PER_MILLION_USD", "1"))
+    output_rate = float(os.getenv("ANTHROPIC_OUTPUT_COST_PER_MILLION_USD", "5"))
+    cache_read_rate = float(os.getenv("ANTHROPIC_CACHE_READ_COST_PER_MILLION_USD", "0.1"))
+    cache_write_rate = float(os.getenv("ANTHROPIC_CACHE_WRITE_COST_PER_MILLION_USD", "1.25"))
+    cost = (
+        input_tokens * input_rate
+        + output_tokens * output_rate
+        + cache_read_tokens * cache_read_rate
+        + cache_write_tokens * cache_write_rate
+    ) / 1_000_000
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """INSERT INTO ai_usage(
+                created_at, operation, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, estimated_cost_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (_now(), operation, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _anthropic_usage_summary() -> dict[str, Any]:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*) AS calls,
+                      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                      COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                      COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                      COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+                 FROM ai_usage"""
+        ).fetchone()
+        return {
+            "calls": int(row["calls"]),
+            "inputTokens": int(row["input_tokens"]),
+            "outputTokens": int(row["output_tokens"]),
+            "cacheReadTokens": int(row["cache_read_tokens"]),
+            "cacheWriteTokens": int(row["cache_write_tokens"]),
+            "estimatedCostUsd": round(float(row["estimated_cost_usd"]), 6),
+        }
+    finally:
+        conn.close()
 
 
 def _job_store() -> JobStore:
@@ -1332,6 +1473,10 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
             status_code=503,
             detail="Defina ANTHROPIC_API_KEY no arquivo .env para naturalizar com IA.",
         )
+    cache_payload = payload.model_dump()
+    cached = _ai_cache_get("scripts.naturalize", cache_payload)
+    if cached:
+        return cached
     import anthropic
 
     source = (
@@ -1341,8 +1486,9 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
     )
     try:
         client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            model=model,
             max_tokens=1200,
             system=_NATURAL_SCRIPT_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _NATURAL_SCRIPT_SCHEMA}},
@@ -1369,7 +1515,10 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
         flags=re.IGNORECASE,
     ).strip()
     natural_text = f"{natural_text.rstrip(' .')}. {MANDATORY_VIDEO_OUTRO}"
-    return {"ok": True, "text": natural_text}
+    response = {"ok": True, "text": natural_text}
+    _record_anthropic_usage("scripts.naturalize", model, message)
+    _ai_cache_put("scripts.naturalize", cache_payload, response)
+    return response
 
 
 def _find_script(script_id: str) -> dict[str, Any]:
@@ -1429,9 +1578,25 @@ def ai_costs() -> dict:
         heygen["status"] = "indisponivel"
         heygen["note"] = "Nao foi possivel consultar o saldo agora."
 
+    anthropic_usage = _anthropic_usage_summary()
+    claude: dict[str, Any] = {
+        "id": "anthropic",
+        "name": "Claude",
+        "description": "Ideias, artigos, naturalizacao e packs de conteudo",
+        "status": "conectado" if os.getenv("ANTHROPIC_API_KEY") else "nao_conectado",
+        "currency": "USD",
+        "remainingBalance": None,
+        "trackedSpend": anthropic_usage["estimatedCostUsd"],
+        "calls": anthropic_usage["calls"],
+        "inputTokens": anthropic_usage["inputTokens"],
+        "outputTokens": anthropic_usage["outputTokens"],
+        "cacheReadTokens": anthropic_usage["cacheReadTokens"],
+        "cacheWriteTokens": anthropic_usage["cacheWriteTokens"],
+        "note": "Estimativa calculada pelos tokens retornados pela API. O saldo pre-pago fica no Console Anthropic.",
+    }
     return {
         "updatedAt": _now(),
-        "providers": [heygen],
+        "providers": [heygen, claude],
     }
 
 
@@ -1755,6 +1920,9 @@ def _launch_cut_worker(
             "youtube_url": youtube_url,
             "source_path": source_path,
             "compliance": _pack_compliance,
+            "cache_get": _ai_cache_get,
+            "cache_put": _ai_cache_put,
+            "record_usage": _record_anthropic_usage,
         },
         daemon=True,
         name=f"cuts-{project['id']}",
@@ -3236,6 +3404,11 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
     if not os.getenv("ANTHROPIC_API_KEY"):
         return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
 
+    cache_payload = {**payload.model_dump(), "researchContext": research_context}
+    cached = _ai_cache_get("ideas.expand", cache_payload)
+    if cached:
+        return cached
+
     import anthropic
 
     prompt = (
@@ -3248,8 +3421,9 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
     )
     try:
         client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            model=model,
             max_tokens=1800,
             system=_EXPAND_IDEAS_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _EXPAND_IDEAS_SCHEMA}},
@@ -3262,11 +3436,14 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
     except Exception:
         return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
 
-    return {
+    response = {
         "ok": True,
         "provider": "claude",
         "ideas": _normalize_expanded_ideas(payload, parsed.get("ideas")),
     }
+    _record_anthropic_usage("ideas.expand", model, message)
+    _ai_cache_put("ideas.expand", cache_payload, response)
+    return response
 
 
 @app.post("/api/articles/analyze")
@@ -3277,6 +3454,11 @@ def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
     if not os.getenv("ANTHROPIC_API_KEY"):
         result = _manual_article_analysis(clean_payload)
         return {"ok": True, "provider": "fallback", **result}
+
+    cache_payload = clean_payload.model_dump()
+    cached = _ai_cache_get("articles.analyze", cache_payload)
+    if cached:
+        return cached
 
     import anthropic
 
@@ -3290,8 +3472,9 @@ def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
     )
     try:
         client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            model=model,
             max_tokens=2600,
             system=_ARTICLE_ANALYSIS_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _ARTICLE_ANALYSIS_SCHEMA}},
@@ -3318,7 +3501,10 @@ def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
 
     for idea in ideas:
         idea["linkOrigem"] = payload.sourceUrl
-    return {"ok": True, "provider": "claude", "analysis": analysis, "ideas": ideas}
+    response = {"ok": True, "provider": "claude", "analysis": analysis, "ideas": ideas}
+    _record_anthropic_usage("articles.analyze", model, message)
+    _ai_cache_put("articles.analyze", cache_payload, response)
+    return response
 
 
 def _append(tab: str, row: list) -> None:
@@ -3639,6 +3825,10 @@ def generate_pack(payload: PackIn) -> dict:
             status_code=503,
             detail="Defina ANTHROPIC_API_KEY no arquivo .env para gerar com o Claude.",
         )
+    cache_payload = payload.model_dump()
+    cached = _ai_cache_get("packs.generate", cache_payload)
+    if cached:
+        return cached
     import anthropic
 
     roteiro = (
@@ -3655,8 +3845,9 @@ def generate_pack(payload: PackIn) -> dict:
     )
     try:
         client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            model=model,
             max_tokens=2000,
             system=_PACK_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _PACK_SCHEMA}},
@@ -3672,7 +3863,10 @@ def generate_pack(payload: PackIn) -> dict:
         pack = json.loads(texto)
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="Resposta do Claude nao veio em JSON valido.")
-    return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
+    response = {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
+    _record_anthropic_usage("packs.generate", model, message)
+    _ai_cache_put("packs.generate", cache_payload, response)
+    return response
 
 
 # --------------------------------------------------------------------------- #

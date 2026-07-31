@@ -489,6 +489,9 @@ def _suggest_clips(
     min_duration: int,
     max_duration: int,
     auto_duration: bool = False,
+    cache_get: Callable[[str, Any], dict[str, Any] | None] | None = None,
+    cache_put: Callable[[str, Any, dict[str, Any]], None] | None = None,
+    record_usage: Callable[[str, str, Any], None] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")):
         return (
@@ -532,10 +535,22 @@ Regras:
 
 TRANSCRICAO:
 {timeline}"""
+    cache_payload = {
+        "timeline": timeline,
+        "count": count,
+        "minDuration": min_duration,
+        "maxDuration": max_duration,
+        "autoDuration": auto_duration,
+    }
+    if cache_get:
+        cached = cache_get("cuts.suggest", cache_payload)
+        if cached and isinstance(cached.get("clips"), list):
+            return cached["clips"], "anthropic-cache"
     client = anthropic.Anthropic()
+    model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
     try:
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            model=model,
             max_tokens=4000,
             system="Voce e editor senior de videos curtos e conteudo medico responsavel.",
             output_config={"format": {"type": "json_schema", "schema": _clip_schema(count)}},
@@ -574,6 +589,10 @@ TRANSCRICAO:
         valid.append(clip)
     if count is not None and len(valid) != count:
         raise RuntimeError("A analise nao retornou a quantidade esperada de cortes validos.")
+    if record_usage:
+        record_usage("cuts.suggest", model, message)
+    if cache_put:
+        cache_put("cuts.suggest", cache_payload, {"clips": valid})
     return valid, "anthropic"
 
 
@@ -587,6 +606,9 @@ def process_cut_project(
     youtube_url: str | None,
     source_path: Path | None,
     compliance: Callable[[dict[str, Any]], dict[str, Any]],
+    cache_get: Callable[[str, Any], dict[str, Any] | None] | None = None,
+    cache_put: Callable[[str, Any, dict[str, Any]], None] | None = None,
+    record_usage: Callable[[str, str, Any], None] | None = None,
 ) -> None:
     job = store.get("cut", job_id)
     if not job:
@@ -640,6 +662,9 @@ def process_cut_project(
             min_duration=int(settings["minDuration"]),
             max_duration=int(settings["maxDuration"]),
             auto_duration=settings.get("durationMode") == "auto",
+            cache_get=cache_get,
+            cache_put=cache_put,
+            record_usage=record_usage,
         )
         update(
             progresso=58,

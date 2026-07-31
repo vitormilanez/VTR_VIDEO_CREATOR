@@ -110,6 +110,7 @@ function Dashboard() {
   ].filter((item) => item.count > 0);
 
   const provider = aiCosts?.providers.find((item) => item.id === "heygen");
+  const claudeProvider = aiCosts?.providers.find((item) => item.id === "anthropic");
   const videos = useMemo(
     () => [...jobs].sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime()),
     [jobs],
@@ -177,6 +178,7 @@ function Dashboard() {
           averageCost={custoMedio}
           currency={currency}
           balance={provider?.remainingBalance ?? null}
+          claudeProvider={claudeProvider}
         />
       </section>
 
@@ -261,6 +263,7 @@ function VideoCostPanel({
   averageCost,
   currency,
   balance,
+  claudeProvider,
 }: {
   aiCosts: AiCosts | null;
   error: string;
@@ -274,6 +277,7 @@ function VideoCostPanel({
   averageCost: number;
   currency: string;
   balance: number | null;
+  claudeProvider?: AiCosts["providers"][number];
 }) {
   return (
     <div className="rounded-lg border bg-card p-4 shadow-sm">
@@ -281,7 +285,7 @@ function VideoCostPanel({
         <div>
           <h2 className="font-display text-base font-semibold">Vídeos e custos</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Resumo do HeyGen e gasto rastreado pelo saldo.
+            HeyGen, Claude e gastos rastreados no projeto.
           </p>
         </div>
         <Button size="sm" variant="secondary" onClick={() => void onRefresh()} disabled={loading}>
@@ -319,6 +323,29 @@ function VideoCostPanel({
             Saldo: {balance == null ? "indisponível" : formatCurrency(balance, currency)}
           </span>
         </div>
+      </div>
+
+      <div className="mt-3 rounded-md border bg-muted/30 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-medium">Claude</p>
+            <p className="text-[11px] text-muted-foreground">
+              {claudeProvider?.status === "conectado" ? "Uso registrado pela API" : "API não conectada"}
+            </p>
+          </div>
+          <span className="font-display text-lg font-semibold tabular-nums">
+            {formatCurrency(claudeProvider?.trackedSpend ?? 0, claudeProvider?.currency || "USD")}
+          </span>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
+          <span>Chamadas: {claudeProvider?.calls ?? 0}</span>
+          <span className="text-right">
+            Tokens: {((claudeProvider?.inputTokens ?? 0) + (claudeProvider?.outputTokens ?? 0)).toLocaleString("pt-BR")}
+          </span>
+        </div>
+        <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+          Estimativa por tokens retornados. Respostas repetidas são reaproveitadas pelo cache e não geram nova chamada.
+        </p>
       </div>
 
       {aiCosts?.updatedAt ? (

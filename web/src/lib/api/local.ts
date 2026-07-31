@@ -555,6 +555,11 @@ export interface AiCostProvider {
   currency: string | null;
   remainingBalance: number | null;
   trackedSpend: number | null;
+  calls?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   note: string;
 }
 
