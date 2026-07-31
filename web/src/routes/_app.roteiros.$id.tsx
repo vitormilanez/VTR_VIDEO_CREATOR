@@ -7,7 +7,11 @@ import { StatusTimeline, type TimelineStep } from "@/components/status-timeline"
 import { NextStepBanner } from "@/components/next-step-banner";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
-import { narrationQualityIssues } from "@/lib/script-quality";
+import {
+  MANDATORY_OUTRO,
+  narrationQualityIssues,
+  normalizeNarrationOutro,
+} from "@/lib/script-quality";
 import { prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import {
@@ -267,13 +271,12 @@ function RoteiroDetalhe() {
     if (!draft || !narrationText.trim()) return;
     setNaturalizing(true);
     try {
-      setNarrationText(
-        await naturalizeScript({
-          text: narrationText,
-          medicalCautions: draft.cuidadosMedicos,
-          durationSeconds,
-        }),
-      );
+      const naturalized = await naturalizeScript({
+        text: narrationText,
+        medicalCautions: draft.cuidadosMedicos,
+        durationSeconds,
+      });
+      setNarrationText(normalizeNarrationOutro(naturalized));
       toast.success("Texto naturalizado. Revise a fala antes de enviar.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Não foi possível naturalizar o texto.");
@@ -719,9 +722,22 @@ function RoteiroDetalhe() {
               />
               {qualityIssues.length > 0 ? (
                 <div className="mt-2 rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-[11px] leading-4 text-status-danger">
-                  <div className="mb-1 flex items-center gap-1.5 font-semibold">
-                    <TriangleAlert className="h-3.5 w-3.5" />
-                    Revise antes de enviar ao HeyGen
+                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 font-semibold">
+                      <TriangleAlert className="h-3.5 w-3.5" />
+                      Revise antes de enviar ao HeyGen
+                    </div>
+                    {qualityIssues.some((issue) => issue.includes("Encerramento")) ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        className="h-7 px-2 text-[11px]"
+                        onClick={() => setNarrationText(normalizeNarrationOutro(narrationText))}
+                      >
+                        Corrigir encerramento
+                      </Button>
+                    ) : null}
                   </div>
                   <ul className="space-y-0.5 pl-5">
                     {qualityIssues.map((issue) => (
@@ -977,7 +993,6 @@ function ProductionReadinessCard({
 }
 
 function buildNarrationText(script: Script): string {
-  const outro = "Me siga para mais dicas, e obrigado.";
   const body = [
     script.hook,
     script.dorConflito,
@@ -988,9 +1003,7 @@ function buildNarrationText(script: Script): string {
     .map((part) => part.trim())
     .filter(Boolean)
     .join("\n\n");
-  return body.toLocaleLowerCase("pt-BR").includes(outro.toLocaleLowerCase("pt-BR"))
-    ? body
-    : `${body}\n\n${outro}`;
+  return normalizeNarrationOutro(body || MANDATORY_OUTRO);
 }
 
 function Preview({ label, text, palavras }: { label: string; text: string; palavras: string[] }) {

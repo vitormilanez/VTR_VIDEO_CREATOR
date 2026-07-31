@@ -1,4 +1,4 @@
-const OUTRO = "Me siga para mais dicas, e obrigado.";
+export const MANDATORY_OUTRO = "Me siga para mais dicas, e obrigado.";
 
 const PLACEHOLDER_PATTERNS: Array<{ regex: RegExp; message: string }> = [
   {
@@ -29,10 +29,11 @@ export function narrationQualityIssues(text: string, durationSeconds: number): s
     if (pattern.regex.test(normalized)) issues.push(pattern.message);
   }
 
-  const outroMatches = normalized.match(new RegExp(escapeRegExp(OUTRO), "gi")) ?? [];
+  const outroMatches =
+    normalized.match(new RegExp(escapeRegExp(MANDATORY_OUTRO), "gi")) ?? [];
   if (outroMatches.length !== 1) {
     issues.push("Encerramento padrao deve aparecer exatamente uma vez.");
-  } else if (!normalized.toLowerCase().endsWith(OUTRO.toLowerCase())) {
+  } else if (!normalized.toLowerCase().endsWith(MANDATORY_OUTRO.toLowerCase())) {
     issues.push("Encerramento padrao precisa ser a ultima frase.");
   }
 
@@ -43,6 +44,18 @@ export function narrationQualityIssues(text: string, durationSeconds: number): s
   }
 
   return Array.from(new Set(issues));
+}
+
+/** Remove versões antigas do CTA e recoloca o encerramento obrigatório uma única vez no fim. */
+export function normalizeNarrationOutro(text: string): string {
+  const withoutOutro = text
+    .replace(new RegExp(`\\s*${escapeRegExp(MANDATORY_OUTRO)}\\s*`, "gi"), " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .replace(/[.!?…]+$/, "");
+
+  return withoutOutro ? `${withoutOutro}.\n\n${MANDATORY_OUTRO}` : MANDATORY_OUTRO;
 }
 
 function minWordsForDuration(durationSeconds: number): number {
