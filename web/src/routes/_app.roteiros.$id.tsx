@@ -35,6 +35,8 @@ import {
 import {
   ArrowLeft,
   Captions,
+  CheckCircle2,
+  Circle,
   Film,
   History,
   RotateCcw,
@@ -103,6 +105,8 @@ function RoteiroDetalhe() {
     [durationSeconds, narrationText],
   );
   const canSendToProduction = qualityIssues.length === 0;
+  const narrationWords = narrationText.trim().split(/\s+/).filter(Boolean).length;
+  const estimatedSpeechSeconds = Math.max(1, Math.round(narrationWords / 2.4));
 
   useEffect(() => {
     if (script) {
@@ -400,15 +404,10 @@ function RoteiroDetalhe() {
             meta={
               <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                 <span className="rounded-full bg-background px-2.5 py-1">
-                  {narrationText.trim().split(/\s+/).filter(Boolean).length} palavras
+                  {narrationWords} palavras
                 </span>
                 <span className="rounded-full bg-background px-2.5 py-1">
-                  ~
-                  {Math.max(
-                    1,
-                    Math.round(narrationText.trim().split(/\s+/).filter(Boolean).length / 2.4),
-                  )}
-                  s de fala
+                  ~{estimatedSpeechSeconds}s de fala
                 </span>
                 <span className="rounded-full bg-background px-2.5 py-1">
                   {dirty ? "Alterações pendentes" : "Roteiro salvo"}
@@ -516,11 +515,27 @@ function RoteiroDetalhe() {
             id="roteiro-produzir"
             className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
           >
-            <div className="mb-4">
-              <h3 className="font-display text-sm font-semibold">2. Fala final e vídeo</h3>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Edite exatamente o que o avatar vai falar e escolha visual, duração e ritmo.
-              </p>
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="font-display text-sm font-semibold">2. Fala final e vídeo</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Edite exatamente o que o avatar vai falar e escolha visual, duração e ritmo.
+                </p>
+              </div>
+              <div
+                className={`rounded-md border px-2.5 py-1.5 text-right text-[11px] ${
+                  qualityIssues.length
+                    ? "border-status-warn/40 bg-status-warn/10 text-status-warn-foreground"
+                    : "border-status-success/30 bg-status-success/10 text-status-success-foreground"
+                }`}
+              >
+                <div className="font-semibold">
+                  {qualityIssues.length ? "Revisão necessária" : "Fala pronta"}
+                </div>
+                <div className="mt-0.5 opacity-80">
+                  {narrationWords} palavras · ~{estimatedSpeechSeconds}s
+                </div>
+              </div>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-1">
@@ -718,15 +733,8 @@ function RoteiroDetalhe() {
                 </div>
               ) : null}
               <div className="mt-2 flex justify-between text-[11px] text-muted-foreground">
-                <span>{narrationText.trim().split(/\s+/).filter(Boolean).length} palavras</span>
-                <span>
-                  Aproximadamente{" "}
-                  {Math.max(
-                    1,
-                    Math.round(narrationText.trim().split(/\s+/).filter(Boolean).length / 2.4),
-                  )}
-                  s de fala
-                </span>
+                <span>{narrationWords} palavras</span>
+                <span>Aproximadamente {estimatedSpeechSeconds}s de fala</span>
               </div>
               <div className="mt-2 flex items-start gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />A fala
@@ -757,6 +765,15 @@ function RoteiroDetalhe() {
             <h3 className="mb-3 font-display text-sm font-semibold">Timeline</h3>
             <StatusTimeline steps={timeline} />
           </div>
+          <ProductionReadinessCard
+            catalogLoading={catalogLoading}
+            catalogError={catalogError}
+            avatarReady={Boolean(avatarId)}
+            voiceReady={Boolean(voiceId)}
+            speechReady={canSendToProduction}
+            speechIssue={qualityIssues[0]}
+            saved={!dirty}
+          />
           <CompliancePanel
             fields={complianceFields}
             palavrasProibidas={palavras}
@@ -868,6 +885,93 @@ function FriendlySwitch({
         <p className="text-[11px] leading-4 text-muted-foreground">{description}</p>
       </div>
       <Switch checked={checked} onCheckedChange={onCheckedChange} aria-label={label} />
+    </div>
+  );
+}
+
+function ProductionReadinessCard({
+  catalogLoading,
+  catalogError,
+  avatarReady,
+  voiceReady,
+  speechReady,
+  speechIssue,
+  saved,
+}: {
+  catalogLoading: boolean;
+  catalogError: string | null;
+  avatarReady: boolean;
+  voiceReady: boolean;
+  speechReady: boolean;
+  speechIssue?: string;
+  saved: boolean;
+}) {
+  const blockingReady = !catalogLoading && avatarReady && voiceReady && speechReady;
+  const checks = [
+    {
+      label: "Avatar",
+      ready: avatarReady,
+      pending: catalogLoading,
+      detail: catalogError ? "Atualize a lista da HeyGen" : "Identidade pronta",
+    },
+    {
+      label: "Voz",
+      ready: voiceReady,
+      pending: catalogLoading,
+      detail: "Voz selecionada para a fala",
+    },
+    {
+      label: "Fala",
+      ready: speechReady,
+      pending: false,
+      detail: speechIssue || "Sem alertas de duração ou encerramento",
+    },
+    {
+      label: "Sheets",
+      ready: saved,
+      pending: false,
+      detail: saved ? "Roteiro sincronizado" : "Será salvo automaticamente ao enviar",
+    },
+  ];
+
+  return (
+    <div className="rounded-xl border bg-card p-4 shadow-sm">
+      <div className="flex items-start gap-2">
+        {blockingReady ? (
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-status-success" />
+        ) : (
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-status-warn-foreground" />
+        )}
+        <div>
+          <h3 className="font-display text-sm font-semibold">
+            {blockingReady ? "Pronto para o HeyGen" : "Checklist de produção"}
+          </h3>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            {blockingReady
+              ? "Tudo que impede o envio está resolvido."
+              : "Resolva os itens pendentes para liberar o envio."}
+          </p>
+        </div>
+      </div>
+      <ul className="mt-3 space-y-2 border-t pt-3">
+        {checks.map((check) => (
+          <li key={check.label} className="flex items-start gap-2 text-xs">
+            {check.pending ? (
+              <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-pulse text-muted-foreground" />
+            ) : check.ready ? (
+              <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />
+            ) : (
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-warn-foreground" />
+            )}
+            <span className="min-w-0">
+              <span className="font-medium">{check.label}</span>
+              <span className="block text-[11px] leading-4 text-muted-foreground">
+                {check.pending ? "Carregando catálogo..." : check.detail}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
