@@ -8,6 +8,7 @@ import { NextStepBanner } from "@/components/next-step-banner";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
+import { evaluateIdeaQuality } from "@/lib/idea-quality";
 import { buildScriptFromIdea } from "@/lib/script-builder";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
@@ -163,6 +164,12 @@ export function IdeiasPage() {
   const previewVideo = previewScript ? videoForScript(previewScript.id) : undefined;
 
   async function gerarRoteiro(i: Idea) {
+    const quality = evaluateIdeaQuality(i);
+    if (!quality.ready) {
+      toast.error(`Ideia ainda precisa de contexto (${quality.score}/100): ${quality.issues[0]}`);
+      setPreview(i);
+      return;
+    }
     const script = buildScriptFromIdea(i, genId("s"));
     try {
       const saved = await appendScript(script);
@@ -229,6 +236,11 @@ export function IdeiasPage() {
   }
 
   async function salvarIdeiaERoteiro(idea: Idea) {
+    const quality = evaluateIdeaQuality(idea);
+    if (!quality.ready) {
+      toast.error(`Ideia ainda precisa de contexto (${quality.score}/100): ${quality.issues[0]}`);
+      return;
+    }
     setSavingIdeaId(idea.id);
     try {
       const savedIdea = await appendIdea(idea);
@@ -496,7 +508,7 @@ export function IdeiasPage() {
                             <Button
                               size="sm"
                               variant="secondary"
-                              disabled={i.status === "descartado"}
+                              disabled={i.status === "descartado" || !evaluateIdeaQuality(i).ready}
                               onClick={() => gerarRoteiro(i)}
                             >
                               <Sparkles className="mr-1 h-3.5 w-3.5" /> Criar roteiro
@@ -541,6 +553,7 @@ export function IdeiasPage() {
                 <span className="text-xs text-muted-foreground">
                   {familiaLabel[preview.familia]}
                 </span>
+                <IdeaQualityBadge idea={preview} />
               </div>
               <Block label="Hook" text={preview.hook} />
               {preview.publicoDor ? (
@@ -548,6 +561,16 @@ export function IdeiasPage() {
               ) : null}
               <Block label="Angulo" text={preview.angulo} />
               <Block label="CTA" text={preview.cta} />
+              {!evaluateIdeaQuality(preview).ready ? (
+                <div className="mt-4 rounded-md border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-xs leading-5 text-status-warn-foreground">
+                  <div className="font-semibold">Revise antes de criar o roteiro</div>
+                  <ul className="mt-1 list-disc pl-4">
+                    {evaluateIdeaQuality(preview).issues.map((issue) => (
+                      <li key={issue}>{issue}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               {preview.observacaoCompliance ? (
                 <Block label="Compliance" text={preview.observacaoCompliance} />
               ) : null}
@@ -578,7 +601,7 @@ export function IdeiasPage() {
                 ) : (
                   <Button
                     size="sm"
-                    disabled={preview.status === "descartado"}
+                    disabled={preview.status === "descartado" || !evaluateIdeaQuality(preview).ready}
                     onClick={() => {
                       gerarRoteiro(preview);
                       setPreview(null);
@@ -853,10 +876,11 @@ function IdeaSuggestionCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="font-semibold leading-6">{idea.titulo}</div>
+          <div className="font-semibold leading-6">{idea.titulo}</div>
             {recommended ? (
               <Badge className="bg-status-info text-status-info-foreground">Recomendada</Badge>
             ) : null}
+            <IdeaQualityBadge idea={idea} />
           </div>
           <div className="mt-1 flex flex-wrap gap-1">
             <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
@@ -865,7 +889,11 @@ function IdeaSuggestionCard({
             <StatusBadge {...prioridadeLabel[idea.prioridade]} />
           </div>
         </div>
-        <Button size="sm" onClick={onCreateScript} disabled={disabled}>
+        <Button
+          size="sm"
+          onClick={onCreateScript}
+          disabled={disabled || !evaluateIdeaQuality(idea).ready}
+        >
           {isSaving ? (
             <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
           ) : (
@@ -899,7 +927,28 @@ function IdeaSuggestionCard({
           </AccordionItem>
         </Accordion>
       )}
+      {!evaluateIdeaQuality(idea).ready ? (
+        <p className="mt-3 rounded-md border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-xs leading-5 text-status-warn-foreground">
+          Roteiro bloqueado até completar o contexto desta ideia.
+        </p>
+      ) : null}
     </div>
+  );
+}
+
+function IdeaQualityBadge({ idea }: { idea: Idea }) {
+  const quality = evaluateIdeaQuality(idea);
+  return (
+    <Badge
+      variant="outline"
+      className={
+        quality.ready
+          ? "border-status-success/40 bg-status-success/5 text-status-success-foreground"
+          : "border-status-warn/40 bg-status-warn/10 text-status-warn-foreground"
+      }
+    >
+      {quality.ready ? `Pronta ${quality.score}/100` : `Revisar ${quality.score}/100`}
+    </Badge>
   );
 }
 

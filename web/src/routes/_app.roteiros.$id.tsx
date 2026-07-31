@@ -8,7 +8,7 @@ import { NextStepBanner } from "@/components/next-step-banner";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import {
-  MANDATORY_OUTRO,
+  DEFAULT_OUTRO,
   narrationQualityIssues,
   normalizeNarrationOutro,
 } from "@/lib/script-quality";
@@ -90,6 +90,7 @@ function RoteiroDetalhe() {
   const [captions, setCaptions] = useState(true);
   const [optimizePronunciation, setOptimizePronunciation] = useState(true);
   const [styleId, setStyleId] = useState("");
+  const [outroText, setOutroText] = useState(DEFAULT_OUTRO);
   const [narrationText, setNarrationText] = useState(() =>
     script ? buildNarrationText(script) : "",
   );
@@ -105,8 +106,8 @@ function RoteiroDetalhe() {
   );
   const latestJob = existingJobs[0];
   const qualityIssues = useMemo(
-    () => narrationQualityIssues(narrationText, durationSeconds),
-    [durationSeconds, narrationText],
+    () => narrationQualityIssues(narrationText, durationSeconds, outroText),
+    [durationSeconds, narrationText, outroText],
   );
   const canSendToProduction = qualityIssues.length === 0;
   const narrationWords = narrationText.trim().split(/\s+/).filter(Boolean).length;
@@ -115,7 +116,7 @@ function RoteiroDetalhe() {
   useEffect(() => {
     if (script) {
       setDraft(script);
-      setNarrationText(buildNarrationText(script));
+      setNarrationText(buildNarrationText(script, outroText));
     }
   }, [script]);
 
@@ -276,7 +277,7 @@ function RoteiroDetalhe() {
         medicalCautions: draft.cuidadosMedicos,
         durationSeconds,
       });
-      setNarrationText(normalizeNarrationOutro(naturalized));
+      setNarrationText(normalizeNarrationOutro(naturalized, outroText));
       toast.success("Texto naturalizado. Revise a fala antes de enviar.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Não foi possível naturalizar o texto.");
@@ -677,10 +678,29 @@ function RoteiroDetalhe() {
                 onCheckedChange={setOptimizePronunciation}
               />
             </div>
-            <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2">
-              <div className="text-xs font-medium">Encerramento padrão</div>
-              <div className="mt-0.5 text-[11px] text-muted-foreground">
-                “Me siga para mais dicas, e obrigado.”
+            <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
+              <Label htmlFor="outro-text" className="text-xs font-medium">
+                Escolha a frase final do vídeo
+              </Label>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                A frase será colocada uma única vez no fim da fala. Você pode editar livremente.
+              </p>
+              <div className="mt-2 flex gap-2">
+                <Input
+                  id="outro-text"
+                  value={outroText}
+                  onChange={(event) => setOutroText(event.target.value)}
+                  onBlur={() => setNarrationText((current) => normalizeNarrationOutro(current, outroText))}
+                  placeholder="Ex.: Me siga para mais dicas."
+                  maxLength={180}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setNarrationText((current) => normalizeNarrationOutro(current, outroText))}
+                >
+                  Aplicar
+                </Button>
               </div>
             </div>
             <div className="mt-4 border-t pt-4">
@@ -727,13 +747,13 @@ function RoteiroDetalhe() {
                       <TriangleAlert className="h-3.5 w-3.5" />
                       Revise antes de enviar ao HeyGen
                     </div>
-                    {qualityIssues.some((issue) => issue.includes("Encerramento")) ? (
+                    {qualityIssues.some((issue) => issue.includes("frase final")) ? (
                       <Button
                         type="button"
                         size="sm"
                         variant="secondary"
                         className="h-7 px-2 text-[11px]"
-                        onClick={() => setNarrationText(normalizeNarrationOutro(narrationText))}
+                        onClick={() => setNarrationText(normalizeNarrationOutro(narrationText, outroText))}
                       >
                         Corrigir encerramento
                       </Button>
@@ -992,7 +1012,7 @@ function ProductionReadinessCard({
   );
 }
 
-function buildNarrationText(script: Script): string {
+function buildNarrationText(script: Script, outro = DEFAULT_OUTRO): string {
   const body = [
     script.hook,
     script.dorConflito,
@@ -1003,7 +1023,7 @@ function buildNarrationText(script: Script): string {
     .map((part) => part.trim())
     .filter(Boolean)
     .join("\n\n");
-  return normalizeNarrationOutro(body || MANDATORY_OUTRO);
+  return normalizeNarrationOutro(body || outro, outro);
 }
 
 function Preview({ label, text, palavras }: { label: string; text: string; palavras: string[] }) {
