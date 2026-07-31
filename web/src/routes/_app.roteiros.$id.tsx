@@ -30,6 +30,15 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -48,8 +57,10 @@ import {
   ShieldCheck,
   Sparkles,
   TriangleAlert,
+  UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_app/roteiros/$id")({
   head: ({ params }) => ({
@@ -564,30 +575,13 @@ function RoteiroDetalhe() {
                     </Button>
                   )}
                 </div>
-                <Select
+                <AvatarPicker
                   value={avatarId}
-                  onValueChange={setAvatarId}
-                  disabled={catalogLoading || !catalog?.avatars.length}
-                >
-                  <SelectTrigger>
-                    <SelectValue
-                      placeholder={
-                        catalogLoading
-                          ? "Carregando avatares..."
-                          : catalogError
-                            ? "Nao foi possivel carregar avatares"
-                            : "Nenhum avatar pronto encontrado"
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {catalog?.avatars.map((avatar) => (
-                      <SelectItem key={avatar.id} value={avatar.id}>
-                        {avatar.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  avatars={catalog?.avatars || []}
+                  loading={catalogLoading}
+                  error={catalogError}
+                  onChange={setAvatarId}
+                />
                 {catalogError ? (
                   <p className="text-[11px] leading-4 text-status-danger">
                     HeyGen demorou para responder. Tente atualizar; se houver cache, o app usa a
@@ -825,6 +819,139 @@ function RoteiroDetalhe() {
       </div>
     </AppShell>
   );
+}
+
+function AvatarPicker({
+  value,
+  avatars,
+  loading,
+  error,
+  onChange,
+}: {
+  value: string;
+  avatars: HeyGenCatalog["avatars"];
+  loading: boolean;
+  error: string | null;
+  onChange: (value: string) => void;
+}) {
+  const selected = avatars.find((avatar) => avatar.id === value);
+  const placeholder = loading
+    ? "Carregando avatares..."
+    : error
+      ? "Nao foi possivel carregar avatares"
+      : "Nenhum avatar pronto encontrado";
+
+  if (!selected) {
+    return (
+      <div className="flex min-h-16 items-center gap-3 rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
+        <UserRound className="h-7 w-7 shrink-0" />
+        <span>{placeholder}</span>
+      </div>
+    );
+  }
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <button
+          type="button"
+          data-avatar-id={selected.id}
+          className="flex min-h-16 w-full items-center gap-3 rounded-md border bg-background p-2 text-left shadow-sm transition-colors hover:border-primary/40 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <AvatarThumbnail avatar={selected} className="h-14 w-14" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-semibold">{selected.name}</span>
+            <span className="block truncate text-xs text-muted-foreground">
+              {selected.groupName || "Identidade HeyGen"} · {orientationLabel(selected.orientation)}
+            </span>
+          </span>
+          <span className="shrink-0 px-1 text-xs font-medium text-primary">Trocar avatar</span>
+        </button>
+      </DialogTrigger>
+      <DialogContent className="max-h-[86vh] max-w-4xl overflow-hidden p-0">
+        <DialogHeader className="border-b px-5 py-4 pr-12">
+          <DialogTitle>Escolha o avatar do vídeo</DialogTitle>
+          <DialogDescription>
+            A miniatura escolhida corresponde ao avatar enviado para o HeyGen.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid max-h-[68vh] auto-rows-max content-start grid-cols-2 gap-3 overflow-y-auto p-4 sm:grid-cols-3 md:grid-cols-4">
+          {avatars.map((avatar) => {
+            const active = avatar.id === value;
+            return (
+              <DialogClose asChild key={avatar.id}>
+                <button
+                  type="button"
+                  data-avatar-id={avatar.id}
+                  onClick={() => onChange(avatar.id)}
+                  aria-pressed={active}
+                  className={cn(
+                    "overflow-hidden rounded-md border bg-background text-left transition-all hover:border-primary/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    active && "border-primary ring-2 ring-primary/20",
+                  )}
+                >
+                  <div className="relative h-28 bg-muted">
+                    <AvatarThumbnail
+                      avatar={avatar}
+                      className="h-full w-full rounded-none border-0"
+                      fit="contain"
+                    />
+                    {active ? (
+                      <span className="absolute right-2 top-2 rounded bg-primary px-2 py-1 text-[10px] font-semibold text-primary-foreground">
+                        Selecionado
+                      </span>
+                    ) : null}
+                  </div>
+                  <span className="block p-2.5">
+                    <span className="block truncate text-xs font-semibold">{avatar.name}</span>
+                    <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                      {avatar.groupName || "Identidade HeyGen"}
+                    </span>
+                    <span className="mt-1 block text-[10px] uppercase text-muted-foreground">
+                      {orientationLabel(avatar.orientation)}
+                    </span>
+                  </span>
+                </button>
+              </DialogClose>
+            );
+          })}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AvatarThumbnail({
+  avatar,
+  className,
+  fit = "cover",
+}: {
+  avatar: HeyGenCatalog["avatars"][number];
+  className?: string;
+  fit?: "cover" | "contain";
+}) {
+  return (
+    <span
+      className={cn(
+        "block shrink-0 overflow-hidden rounded-md border bg-muted",
+        className,
+      )}
+    >
+      {avatar.previewImageUrl ? (
+        <img
+          src={avatar.previewImageUrl}
+          alt={`Miniatura de ${avatar.name}`}
+          className={cn("h-full w-full", fit === "contain" ? "object-contain" : "object-cover")}
+        />
+      ) : (
+        <UserRound className="m-auto h-full w-1/2 text-muted-foreground" />
+      )}
+    </span>
+  );
+}
+
+function orientationLabel(orientation: "portrait" | "landscape") {
+  return orientation === "portrait" ? "Vertical" : "Horizontal";
 }
 
 function WorkflowJump() {
