@@ -460,7 +460,7 @@ export interface CutClip {
 
 export interface CutProject {
   id: string;
-  status: "fila" | "processando" | "pronto" | "erro";
+  status: "fila" | "processando" | "pronto" | "erro" | "cancelado";
   progresso: number;
   etapa: string;
   sourceName: string;
@@ -473,6 +473,8 @@ export interface CutProject {
     minDuration: number;
     maxDuration: number;
     durationMode?: "preset" | "auto";
+    analysisStartSeconds?: number;
+    analysisEndSeconds?: number | null;
     captions: boolean;
     layout: "fit" | "fill";
   };
@@ -507,6 +509,8 @@ export async function createCutProject(input: {
   minDuration: number;
   maxDuration: number;
   durationMode: "preset" | "auto";
+  analysisStartSeconds: number;
+  analysisEndSeconds: number | null;
   captions: boolean;
   layout: "fit" | "fill";
 }): Promise<CutProject> {
@@ -530,6 +534,14 @@ export async function fetchCutProject(projectId: string): Promise<CutProject> {
 export async function retryCutProject(projectId: string): Promise<CutProject> {
   const response = await postJson<{ ok: boolean; project: CutProject }>(
     `/api/cuts/${encodeURIComponent(projectId)}/retry`,
+    {},
+  );
+  return response.project;
+}
+
+export async function cancelCutProject(projectId: string): Promise<CutProject> {
+  const response = await postJson<{ ok: boolean; project: CutProject }>(
+    `/api/cuts/${encodeURIComponent(projectId)}/cancel`,
     {},
   );
   return response.project;

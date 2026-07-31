@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +14,82 @@ from typing import Any, Callable
 import requests
 
 from api.job_store import JobStore
+
+
+class CutCancelled(RuntimeError):
+    pass
+
+
+_PROCESS_LOCK = threading.Lock()
+_ACTIVE_PROCESSES: dict[str, subprocess.Popen[str]] = {}
+_CANCEL_EVENTS: dict[str, threading.Event] = {}
+
+
+def prepare_cut_job(job_id: str) -> None:
+    with _PROCESS_LOCK:
+        _CANCEL_EVENTS[job_id] = threading.Event()
+
+
+def _cancel_event(job_id: str) -> threading.Event:
+    with _PROCESS_LOCK:
+        return _CANCEL_EVENTS.setdefault(job_id, threading.Event())
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        process.terminate()
+
+
+def cancel_cut_job(job_id: str) -> bool:
+    """Sinaliza cancelamento e encerra o subprocesso pesado do projeto."""
+    with _PROCESS_LOCK:
+        event = _CANCEL_EVENTS.setdefault(job_id, threading.Event())
+        event.set()
+        process = _ACTIVE_PROCESSES.get(job_id)
+    if process:
+        _terminate_process(process)
+    return process is not None
+
+
+def _finish_cut_job(job_id: str) -> None:
+    with _PROCESS_LOCK:
+        _ACTIVE_PROCESSES.pop(job_id, None)
+        _CANCEL_EVENTS.pop(job_id, None)
+
+
+def _check_cancelled(job_id: str) -> None:
+    if _cancel_event(job_id).is_set():
+        raise CutCancelled("Processamento interrompido pelo usuario.")
+
+
+def _run_process(job_id: str, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    _check_cancelled(job_id)
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    with _PROCESS_LOCK:
+        _ACTIVE_PROCESSES[job_id] = process
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_process(process)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+    finally:
+        with _PROCESS_LOCK:
+            if _ACTIVE_PROCESSES.get(job_id) is process:
+                _ACTIVE_PROCESSES.pop(job_id, None)
+    _check_cancelled(job_id)
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 def _slug(value: str) -> str:
@@ -33,20 +111,27 @@ def _caption_python(root: Path) -> Path:
     )
 
 
-def _download_source(url: str, destination: Path) -> None:
+def _download_source(job_id: str, url: str, destination: Path) -> None:
     temporary = destination.with_suffix(".part")
     with requests.get(url, stream=True, timeout=(20, 600)) as response:
         response.raise_for_status()
         with temporary.open("wb") as output:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
+                _check_cancelled(job_id)
                 if chunk:
                     output.write(chunk)
     temporary.replace(destination)
 
 
-def _download_youtube(url: str, destination: Path) -> None:
-    process = subprocess.run(
-        [
+def _download_youtube(
+    job_id: str,
+    url: str,
+    destination: Path,
+    *,
+    analysis_start: float = 0,
+    analysis_end: float | None = None,
+) -> None:
+    args = [
             "yt-dlp",
             "--no-playlist",
             "--match-filter",
@@ -61,19 +146,19 @@ def _download_youtube(url: str, destination: Path) -> None:
             "bv*[height<=1080]+ba/b[height<=1080]",
             "-o",
             str(destination),
-            url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=1800,
-    )
+        ]
+    if analysis_end is not None:
+        args.extend(["--download-sections", f"*{analysis_start:.3f}-{analysis_end:.3f}"])
+    args.append(url)
+    process = _run_process(job_id, args, timeout=1800)
     if process.returncode != 0 or not destination.is_file():
         detail = process.stderr or process.stdout or "Nao foi possivel baixar o video do YouTube."
         raise RuntimeError(detail[-1200:])
 
 
-def _probe_duration(video: Path) -> float:
-    process = subprocess.run(
+def _probe_duration(job_id: str, video: Path) -> float:
+    process = _run_process(
+        job_id,
         [
             "ffprobe",
             "-v",
@@ -84,13 +169,38 @@ def _probe_duration(video: Path) -> float:
             "default=noprint_wrappers=1:nokey=1",
             str(video),
         ],
-        capture_output=True,
-        text=True,
         timeout=60,
     )
     if process.returncode != 0:
         raise RuntimeError((process.stderr or "Nao foi possivel ler o video.")[-500:])
     return float(process.stdout.strip())
+
+
+def _trim_source(job_id: str, source: Path, destination: Path, start: float, end: float) -> None:
+    duration = end - start
+    process = _run_process(
+        job_id,
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-i",
+            str(source),
+            "-t",
+            f"{duration:.3f}",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c",
+            "copy",
+            str(destination),
+        ],
+        timeout=600,
+    )
+    if process.returncode != 0 or not destination.is_file():
+        raise RuntimeError((process.stderr or "Nao foi possivel preparar o trecho.")[-1000:])
 
 
 def _clip_schema(count: int | None) -> dict[str, Any]:
@@ -616,6 +726,10 @@ def process_cut_project(
     project_dir = output_root / job_id
     project_dir.mkdir(parents=True, exist_ok=True)
     source = project_dir / "source.mp4"
+    settings = job["settings"]
+    analysis_start = float(settings.get("analysisStartSeconds") or 0)
+    analysis_end_raw = settings.get("analysisEndSeconds")
+    analysis_end = float(analysis_end_raw) if analysis_end_raw is not None else None
 
     def update(**patch: Any) -> None:
         current = store.get("cut", job_id) or job
@@ -624,29 +738,48 @@ def process_cut_project(
         store.upsert("cut", current)
 
     try:
+        _check_cancelled(job_id)
         update(status="processando", progresso=5, etapa="Preparando video")
-        if source_path:
-            shutil.copy2(source_path, source)
+        if analysis_end is not None and analysis_end <= analysis_start:
+            raise RuntimeError("O fim do trecho deve ser posterior ao inicio.")
+
+        if source_path or source_url:
+            raw_source = project_dir / "source_full.mp4" if analysis_end is not None else source
+            if source_path:
+                shutil.copy2(source_path, raw_source)
+            else:
+                _download_source(job_id, str(source_url), raw_source)
+            original_duration = _probe_duration(job_id, raw_source)
+            if analysis_start >= original_duration:
+                raise RuntimeError("O inicio escolhido fica depois do final do video.")
+            if analysis_end is not None:
+                effective_end = min(analysis_end, original_duration)
+                update(progresso=12, etapa="Preparando trecho selecionado")
+                _trim_source(job_id, raw_source, source, analysis_start, effective_end)
+                update(duracaoOriginal=original_duration, analysisEndEffective=effective_end)
         elif youtube_url:
             update(progresso=8, etapa="Baixando video do YouTube")
-            _download_youtube(youtube_url, source)
-        elif source_url:
-            _download_source(source_url, source)
+            _download_youtube(
+                job_id,
+                youtube_url,
+                source,
+                analysis_start=analysis_start,
+                analysis_end=analysis_end,
+            )
         else:
             raise RuntimeError("Fonte do video nao encontrada.")
-        duration = _probe_duration(source)
+        duration = _probe_duration(job_id, source)
         update(progresso=18, etapa="Transcrevendo", duracaoFonte=duration)
 
         transcript_path = project_dir / "transcript.json"
-        process = subprocess.run(
+        process = _run_process(
+            job_id,
             [
                 str(_caption_python(root)),
                 str(root / "tools" / "transcribe_for_cuts.py"),
                 str(source),
                 str(transcript_path),
             ],
-            capture_output=True,
-            text=True,
             timeout=3600,
         )
         if process.returncode != 0:
@@ -654,8 +787,8 @@ def process_cut_project(
         transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
         update(progresso=45, etapa="Escolhendo melhores trechos")
 
-        settings = job["settings"]
         clip_count = settings.get("clipCount")
+        _check_cancelled(job_id)
         clips, selection_mode = _suggest_clips(
             transcript,
             count=int(clip_count) if clip_count is not None else None,
@@ -666,6 +799,7 @@ def process_cut_project(
             cache_put=cache_put,
             record_usage=record_usage,
         )
+        _check_cancelled(job_id)
         update(
             progresso=58,
             etapa="Renderizando cortes",
@@ -699,10 +833,9 @@ def process_cut_project(
             config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
             reusable = output.is_file() and output.stat().st_size > 100_000
             if not reusable:
-                render = subprocess.run(
+                render = _run_process(
+                    job_id,
                     [str(caption_python), str(root / "tools" / "render_cut.py"), str(config_path)],
-                    capture_output=True,
-                    text=True,
                     timeout=1800,
                 )
                 if render.returncode != 0:
@@ -722,5 +855,14 @@ def process_cut_project(
                 clips=rendered,
             )
         update(status="pronto", progresso=100, etapa="Cortes prontos", clips=rendered)
+    except CutCancelled:
+        update(
+            status="cancelado",
+            progresso=0,
+            etapa="Processamento interrompido",
+            erro=None,
+        )
     except Exception as exc:
         update(status="erro", progresso=0, etapa="Falha no processamento", erro=str(exc))
+    finally:
+        _finish_cut_job(job_id)

@@ -609,15 +609,20 @@ class StableIdTests(unittest.TestCase):
             destination = Path(temporary) / "source.mp4"
             destination.write_bytes(b"video")
             completed = subprocess.CompletedProcess([], 0, "", "")
-            with patch.object(cut_service.subprocess, "run", return_value=completed) as run:
+            with patch.object(cut_service, "_run_process", return_value=completed) as run:
                 cut_service._download_youtube(
+                    "job-test",
                     "https://www.youtube.com/watch?v=abc123",
                     destination,
+                    analysis_start=600,
+                    analysis_end=1200,
                 )
-            command = run.call_args.args[0]
+            command = run.call_args.args[1]
             self.assertIn("--no-playlist", command)
             self.assertIn("duration <= 7200", command)
             self.assertIn("2G", command)
+            self.assertIn("--download-sections", command)
+            self.assertIn("*600.000-1200.000", command)
 
     def test_cut_selection_works_without_anthropic_credentials(self) -> None:
         transcript = {

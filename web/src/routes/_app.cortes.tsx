@@ -9,6 +9,7 @@ import {
   RotateCcw,
   Scissors,
   ShieldAlert,
+  Square,
   Upload,
   Youtube,
 } from "lucide-react";
@@ -28,6 +29,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
+  cancelCutProject,
   createCutProject,
   cutFileUrl,
   fetchCutProjects,
@@ -62,6 +64,9 @@ function CortesPage() {
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [clipCount, setClipCount] = useState<"auto" | number>("auto");
   const [durationPreset, setDurationPreset] = useState("auto");
+  const [analysisMode, setAnalysisMode] = useState<"full" | "range">("range");
+  const [analysisStart, setAnalysisStart] = useState("00:00");
+  const [analysisEnd, setAnalysisEnd] = useState("20:00");
   const [captions, setCaptions] = useState(true);
   const [layout, setLayout] = useState<"fit" | "fill">("fit");
   const [submitting, setSubmitting] = useState(false);
@@ -118,6 +123,16 @@ function CortesPage() {
   async function generate() {
     const [minDuration, maxDuration] =
       durationPreset === "auto" ? [18, 75] : durationPreset.split("-").map(Number);
+    const analysisStartSeconds = analysisMode === "range" ? parseTimestamp(analysisStart) : 0;
+    const analysisEndSeconds = analysisMode === "range" ? parseTimestamp(analysisEnd) : null;
+    if (
+      analysisStartSeconds == null ||
+      (analysisMode === "range" &&
+        (analysisEndSeconds == null || analysisEndSeconds <= analysisStartSeconds))
+    ) {
+      toast.error("Informe um intervalo válido. Exemplo: 10:00 até 20:00.");
+      return;
+    }
     if (!requestId.current) requestId.current = globalThis.crypto.randomUUID();
     setSubmitting(true);
     try {
@@ -136,6 +151,8 @@ function CortesPage() {
         minDuration,
         maxDuration,
         durationMode: durationPreset === "auto" ? "auto" : "preset",
+        analysisStartSeconds,
+        analysisEndSeconds,
         captions,
         layout,
       });
@@ -155,6 +172,13 @@ function CortesPage() {
       : sourceMode === "youtube"
         ? /^https:\/\/(www\.|m\.|music\.)?(youtube\.com|youtu\.be)\//i.test(youtubeUrl.trim())
         : Boolean(uploadId);
+  const rangeReady =
+    analysisMode === "full" ||
+    (() => {
+      const start = parseTimestamp(analysisStart);
+      const end = parseTimestamp(analysisEnd);
+      return start != null && end != null && end > start;
+    })();
 
   return (
     <AppShell
@@ -277,6 +301,69 @@ function CortesPage() {
               </div>
             )}
 
+            <div className="rounded-md border p-3">
+              <Label className="text-xs">Parte do vídeo a analisar</Label>
+              <div className="mt-2 grid grid-cols-2 rounded-md bg-muted p-1">
+                <button
+                  type="button"
+                  onClick={() => setAnalysisMode("range")}
+                  className={cn(
+                    "h-9 rounded text-xs font-medium transition-colors",
+                    analysisMode === "range" && "bg-card shadow-sm",
+                  )}
+                >
+                  Escolher trecho
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAnalysisMode("full")}
+                  className={cn(
+                    "h-9 rounded text-xs font-medium transition-colors",
+                    analysisMode === "full" && "bg-card shadow-sm",
+                  )}
+                >
+                  Vídeo inteiro
+                </button>
+              </div>
+              {analysisMode === "range" ? (
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div>
+                    <Label htmlFor="analysis-start" className="text-[11px] text-muted-foreground">
+                      Início
+                    </Label>
+                    <Input
+                      id="analysis-start"
+                      value={analysisStart}
+                      onChange={(event) => setAnalysisStart(event.target.value)}
+                      placeholder="00:00"
+                      inputMode="numeric"
+                      className="mt-1 h-9 tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="analysis-end" className="text-[11px] text-muted-foreground">
+                      Fim
+                    </Label>
+                    <Input
+                      id="analysis-end"
+                      value={analysisEnd}
+                      onChange={(event) => setAnalysisEnd(event.target.value)}
+                      placeholder="20:00"
+                      inputMode="numeric"
+                      className="mt-1 h-9 tabular-nums"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 text-[11px] leading-4 text-status-warn-foreground">
+                  Vídeos longos podem exigir bastante processamento. Prefira escolher um trecho.
+                </p>
+              )}
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                Use MM:SS ou HH:MM:SS. Somente esse intervalo será transcrito.
+              </p>
+            </div>
+
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label className="text-xs">Quantidade</Label>
@@ -357,7 +444,7 @@ function CortesPage() {
 
             <Button
               className="w-full"
-              disabled={!sourceReady || submitting}
+              disabled={!sourceReady || !rangeReady || submitting}
               onClick={() => void generate()}
             >
               {submitting ? (
@@ -421,6 +508,7 @@ function ProjectResult({
 }) {
   const active = project.status === "fila" || project.status === "processando";
   const [retrying, setRetrying] = useState(false);
+  const [stopping, setStopping] = useState(false);
   return (
     <section className="border-b pb-6">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
@@ -432,13 +520,44 @@ function ProjectResult({
           <p className="mt-1 text-xs text-muted-foreground">
             {project.etapa} · {new Date(project.criadoEm).toLocaleString("pt-BR")}
           </p>
+          {project.settings.analysisEndSeconds != null ? (
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Analisando {formatTimestamp(project.settings.analysisStartSeconds || 0)} até{" "}
+              {formatTimestamp(project.settings.analysisEndSeconds)}
+            </p>
+          ) : null}
         </div>
         {active ? (
-          <div className="flex w-44 items-center gap-2">
-            <Progress value={project.progresso} className="h-1.5" />
-            <span className="text-[11px] tabular-nums text-muted-foreground">
-              {project.progresso}%
-            </span>
+          <div className="flex items-center gap-3">
+            <div className="flex w-44 items-center gap-2">
+              <Progress value={project.progresso} className="h-1.5" />
+              <span className="text-[11px] tabular-nums text-muted-foreground">
+                {project.progresso}%
+              </span>
+            </div>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={stopping}
+              onClick={async () => {
+                setStopping(true);
+                try {
+                  onChange(await cancelCutProject(project.id));
+                  toast.success("Processamento interrompido.");
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : "Não foi possível parar.");
+                } finally {
+                  setStopping(false);
+                }
+              }}
+            >
+              {stopping ? (
+                <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Square className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              Parar
+            </Button>
           </div>
         ) : null}
       </div>
@@ -446,6 +565,31 @@ function ProjectResult({
       {project.erro ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
           <span>{project.erro}</span>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={retrying}
+            onClick={async () => {
+              setRetrying(true);
+              try {
+                onChange(await retryCutProject(project.id));
+                toast.success("Novo processamento iniciado.");
+              } catch (error) {
+                toast.error(error instanceof Error ? error.message : "Falha ao tentar novamente.");
+              } finally {
+                setRetrying(false);
+              }
+            }}
+          >
+            <RotateCcw className={cn("mr-1.5 h-3.5 w-3.5", retrying && "animate-spin")} />
+            Tentar novamente
+          </Button>
+        </div>
+      ) : null}
+
+      {project.status === "cancelado" ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+          <span>Processamento interrompido. Você pode iniciar novamente quando quiser.</span>
           <Button
             size="sm"
             variant="secondary"
@@ -560,6 +704,7 @@ function ProjectStatus({ status }: { status: CutProject["status"] }) {
     processando: "Processando",
     pronto: "Pronto",
     erro: "Erro",
+    cancelado: "Interrompido",
   };
   return (
     <span
@@ -567,6 +712,7 @@ function ProjectStatus({ status }: { status: CutProject["status"] }) {
         "rounded px-2 py-0.5 text-[11px] font-medium",
         status === "pronto" && "bg-status-success/15 text-status-success-foreground",
         status === "erro" && "bg-status-danger/10 text-status-danger",
+        status === "cancelado" && "bg-muted text-muted-foreground",
         activeStatus(status) && "bg-status-info/10 text-status-info",
       )}
     >
@@ -580,7 +726,29 @@ function activeStatus(status: CutProject["status"]) {
 }
 
 function formatTimestamp(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
   const remainder = Math.floor(seconds % 60);
-  return `${minutes}:${String(remainder).padStart(2, "0")}`;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+function parseTimestamp(value: string): number | null {
+  const parts = value
+    .trim()
+    .split(":")
+    .map((part) => Number(part));
+  if (
+    (parts.length !== 2 && parts.length !== 3) ||
+    parts.some((part) => !Number.isInteger(part) || part < 0)
+  ) {
+    return null;
+  }
+  if (parts.length === 2) {
+    const [minutes, seconds] = parts;
+    return seconds < 60 ? minutes * 60 + seconds : null;
+  }
+  const [hours, minutes, seconds] = parts;
+  return minutes < 60 && seconds < 60 ? hours * 3600 + minutes * 60 + seconds : null;
 }

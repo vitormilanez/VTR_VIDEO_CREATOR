@@ -34,7 +34,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from api.cut_service import process_cut_project
+from api.cut_service import cancel_cut_job as cancel_cut_worker
+from api.cut_service import prepare_cut_job, process_cut_project
 from api.job_store import JobStore
 from integrations.heygen_client import load_dotenv
 from integrations.portuguese_br import prepare_script_for_heygen_voice
@@ -1848,6 +1849,8 @@ class CutCreateIn(BaseModel):
     minDuration: int = Field(default=15, ge=8, le=90)
     maxDuration: int = Field(default=45, ge=10, le=120)
     durationMode: Literal["preset", "auto"] = "preset"
+    analysisStartSeconds: float = Field(default=0, ge=0, le=7200)
+    analysisEndSeconds: float | None = Field(default=None, gt=0, le=7200)
     captions: bool = True
     layout: Literal["fit", "fill"] = "fit"
 
@@ -1909,6 +1912,7 @@ def _launch_cut_worker(
     youtube_url: str | None,
     source_path: Path | None,
 ) -> None:
+    prepare_cut_job(str(project["id"]))
     worker = threading.Thread(
         target=process_cut_project,
         kwargs={
@@ -1993,6 +1997,11 @@ def create_cut_project(payload: CutCreateIn) -> dict:
         raise HTTPException(status_code=422, detail="A duracao maxima deve superar a minima.")
     if payload.clipCount is not None and not 1 <= payload.clipCount <= 8:
         raise HTTPException(status_code=422, detail="A quantidade deve ficar entre 1 e 8 cortes.")
+    if (
+        payload.analysisEndSeconds is not None
+        and payload.analysisEndSeconds <= payload.analysisStartSeconds
+    ):
+        raise HTTPException(status_code=422, detail="O fim do trecho deve ser posterior ao inicio.")
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise HTTPException(status_code=503, detail="FFmpeg nao esta instalado.")
 
@@ -2078,8 +2087,8 @@ def retry_cut_project(project_id: str) -> dict:
     project = store.get("cut", project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Projeto de cortes nao encontrado.")
-    if project.get("status") != "erro":
-        raise HTTPException(status_code=409, detail="Somente projetos com erro podem ser repetidos.")
+    if project.get("status") not in {"erro", "cancelado"}:
+        raise HTTPException(status_code=409, detail="Somente projetos parados ou com erro podem ser repetidos.")
 
     try:
         source_url, youtube_url, source_path = _cut_project_sources(project, store)
@@ -2102,6 +2111,27 @@ def retry_cut_project(project_id: str) -> dict:
         youtube_url=youtube_url,
         source_path=source_path,
     )
+    return {"ok": True, "project": project}
+
+
+@app.post("/api/cuts/{project_id}/cancel")
+def cancel_cut_project(project_id: str) -> dict:
+    store = _job_store()
+    project = store.get("cut", project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto de cortes nao encontrado.")
+    if project.get("status") not in {"fila", "processando"}:
+        return {"ok": True, "project": project}
+
+    cancel_cut_worker(project_id)
+    project.update(
+        status="cancelado",
+        progresso=0,
+        etapa="Processamento interrompido",
+        erro=None,
+        atualizadoEm=_now(),
+    )
+    store.upsert("cut", project)
     return {"ok": True, "project": project}
 
 
