@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,12 +51,6 @@ SEARCH_QUERIES = [
     "saúde metabólica emagrecimento",
     "efeito sanfona obesidade",
     "resistência insulínica emagrecimento",
-]
-
-QUERY_CONTEXTS = [
-    "obesidade emagrecimento",
-    "saúde metabólica",
-    "medicina Brasil",
 ]
 
 KEYWORDS = {
@@ -107,15 +102,30 @@ def build_search_queries(custom_terms: list[str]) -> list[str]:
         if len(cleaned) < 3:
             continue
         candidates = [cleaned]
-        if not any(word in normalize_text(cleaned) for word in ["obesidade", "emagrec", "metabol"]):
-            candidates.extend(f"{cleaned} {context}" for context in QUERY_CONTEXTS)
+        if not any(word in normalize_text(cleaned) for word in ["obesidade", "emagrec", "metabol", "glp"]):
+            candidates = [f"{cleaned} saúde obesidade"]
         for query in candidates:
             key = normalize_text(query)
             if key in seen:
                 continue
             seen.add(key)
             queries.append(query)
-    return queries or SEARCH_QUERIES
+    return (queries or SEARCH_QUERIES)[:20]
+
+
+def parallel_collect(tasks: list[tuple], worker, max_workers: int = 8) -> list[TrendItem]:
+    """Executa consultas independentes sem deixar uma fonte lenta travar todo o radar."""
+    if not tasks:
+        return []
+    items: list[TrendItem] = []
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(tasks))) as executor:
+        futures = [executor.submit(worker, *task) for task in tasks]
+        for future in as_completed(futures):
+            try:
+                items.extend(future.result())
+            except Exception:
+                continue
+    return items
 
 SOURCE_WEIGHT = {
     "Google News RSS": 12,
@@ -234,41 +244,41 @@ def fetch_google_news(
     keywords: dict[str, int],
     per_query: int,
 ) -> list[TrendItem]:
-    items: list[TrendItem] = []
-
-    for period in periods:
+    def fetch_one(period: str, query: str) -> list[TrendItem]:
+        items: list[TrendItem] = []
         period_filter = PERIODS[period]
-        for query in queries:
-            url = google_news_rss_url(query, period_filter)
-            feed = feedparser.parse(url)
-
-            for entry in feed.entries[:per_query]:
-                title = entry.get("title", "").strip()
-                link = entry.get("link", "").strip()
-                summary = entry.get("summary", "")
-                text = f"{title} {summary}"
-                terms = found_terms(text, keywords)
-
-                if not title or not terms:
-                    continue
-
-                score = score_item(text, "Google News RSS", period, terms, keywords)
-                items.append(
-                    TrendItem(
-                        periodo=period,
-                        fonte="Google News RSS",
-                        tipo="Notícia",
-                        trend=title,
-                        score=score,
-                        termos_encontrados=", ".join(terms),
-                        angulo_de_conteudo=content_angle(title, terms),
-                        cuidado_medico_compliance=compliance_note(title),
-                        link_da_fonte=link,
-                        publicado_em=extract_date(entry),
-                    )
+        try:
+            response = requests.get(google_news_rss_url(query, period_filter), timeout=(5, 12))
+            response.raise_for_status()
+            feed = feedparser.parse(response.content)
+        except requests.RequestException:
+            return []
+        for entry in feed.entries[:per_query]:
+            title = entry.get("title", "").strip()
+            link = entry.get("link", "").strip()
+            summary = entry.get("summary", "")
+            text = f"{title} {summary}"
+            terms = found_terms(text, keywords)
+            if not title or not terms:
+                continue
+            score = score_item(text, "Google News RSS", period, terms, keywords)
+            items.append(
+                TrendItem(
+                    periodo=period,
+                    fonte="Google News RSS",
+                    tipo="Notícia",
+                    trend=title,
+                    score=score,
+                    termos_encontrados=", ".join(terms),
+                    angulo_de_conteudo=content_angle(title, terms),
+                    cuidado_medico_compliance=compliance_note(title),
+                    link_da_fonte=link,
+                    publicado_em=extract_date(entry),
                 )
+            )
+        return items
 
-    return items
+    return parallel_collect([(period, query) for period in periods for query in queries], fetch_one)
 
 
 def fetch_gdelt(
@@ -278,11 +288,11 @@ def fetch_gdelt(
     keywords: dict[str, int],
     per_query: int,
 ) -> list[TrendItem]:
-    items: list[TrendItem] = []
     endpoint = "https://api.gdeltproject.org/api/v2/doc/doc"
     timespan = f"{period_days(period)}d"
 
-    for query in queries:
+    def fetch_one(query: str) -> list[TrendItem]:
+        items: list[TrendItem] = []
         params = {
             "query": query,
             "mode": "ArtList",
@@ -292,11 +302,11 @@ def fetch_gdelt(
             "timespan": timespan,
         }
         try:
-            response = requests.get(endpoint, params=params, timeout=30)
+            response = requests.get(endpoint, params=params, timeout=(5, 12))
             response.raise_for_status()
             data = response.json()
         except (requests.RequestException, ValueError):
-            continue
+            return []
 
         for article in data.get("articles", [])[:per_query]:
             title = str(article.get("title") or "").strip()
@@ -321,7 +331,9 @@ def fetch_gdelt(
                     publicado_em=parse_gdelt_date(str(article.get("seendate") or "")),
                 )
             )
-    return items
+        return items
+
+    return parallel_collect([(query,) for query in queries], fetch_one)
 
 
 def parse_gdelt_date(value: str) -> str:
@@ -340,12 +352,12 @@ def fetch_pubmed(
     keywords: dict[str, int],
     per_query: int,
 ) -> list[TrendItem]:
-    items: list[TrendItem] = []
     search_endpoint = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     summary_endpoint = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
     days = period_days(period)
 
-    for query in queries:
+    def fetch_one(query: str) -> list[TrendItem]:
+        items: list[TrendItem] = []
         params = {
             "db": "pubmed",
             "term": query,
@@ -356,23 +368,23 @@ def fetch_pubmed(
             "datetype": "pdat",
         }
         try:
-            response = requests.get(search_endpoint, params=params, timeout=30)
+            response = requests.get(search_endpoint, params=params, timeout=(5, 12))
             response.raise_for_status()
             ids = response.json().get("esearchresult", {}).get("idlist", [])
         except (requests.RequestException, ValueError):
-            continue
+            return []
         if not ids:
-            continue
+            return []
         try:
             summary_response = requests.get(
                 summary_endpoint,
                 params={"db": "pubmed", "id": ",".join(ids), "retmode": "json"},
-                timeout=30,
+                timeout=(5, 12),
             )
             summary_response.raise_for_status()
             result = summary_response.json().get("result", {})
         except (requests.RequestException, ValueError):
-            continue
+            return []
         for pubmed_id in ids:
             row = result.get(pubmed_id) or {}
             title = str(row.get("title") or "").strip().rstrip(".")
@@ -394,7 +406,9 @@ def fetch_pubmed(
                     publicado_em=str(row.get("pubdate") or ""),
                 )
             )
-    return items
+        return items
+
+    return parallel_collect([(query,) for query in queries], fetch_one)
 
 
 def fetch_reddit(
@@ -404,14 +418,14 @@ def fetch_reddit(
     keywords: dict[str, int],
     per_query: int,
 ) -> list[TrendItem]:
-    items: list[TrendItem] = []
     endpoint = "https://www.reddit.com/search.json"
     reddit_period = {"dia": "day", "semana": "week", "quinzena": "month", "mes": "month"}.get(
         period,
         "week",
     )
     headers = {"User-Agent": "VTRVideoCreatorTrendHunter/1.0"}
-    for query in queries:
+    def fetch_one(query: str) -> list[TrendItem]:
+        items: list[TrendItem] = []
         params = {
             "q": query,
             "sort": "hot",
@@ -419,11 +433,11 @@ def fetch_reddit(
             "limit": max(3, min(per_query, 10)),
         }
         try:
-            response = requests.get(endpoint, params=params, headers=headers, timeout=30)
+            response = requests.get(endpoint, params=params, headers=headers, timeout=(5, 12))
             response.raise_for_status()
             children = response.json().get("data", {}).get("children", [])
         except (requests.RequestException, ValueError):
-            continue
+            return []
         for child in children:
             data = child.get("data") or {}
             title = str(data.get("title") or "").strip()
@@ -455,7 +469,9 @@ def fetch_reddit(
                     else TODAY,
                 )
             )
-    return items
+        return items
+
+    return parallel_collect([(query,) for query in queries], fetch_one)
 
 
 def fetch_serpapi_trends(*, queries: list[str], keywords: dict[str, int]) -> list[TrendItem]:
