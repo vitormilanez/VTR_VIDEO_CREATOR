@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -14,24 +15,7 @@ from api import cut_service, server
 from api.job_store import JobStore
 
 
-SCRIPT_HEADERS = [
-    "Categoria",
-    "Tema",
-    "Título",
-    "Hook",
-    "Dor/Conflito",
-    "Explicação simples",
-    "Virada/Provocação",
-    "CTA",
-    "Cuidados médicos",
-    "Risco",
-    "Formato sugerido",
-    "Status",
-    "Aprovador",
-    "Data aprovação",
-    "Link doc/video",
-    "ID",
-]
+SCRIPT_HEADERS = server.SCRIPT_HEADERS.copy()
 
 
 class FakeSheetsClient:
@@ -193,6 +177,55 @@ class StableIdTests(unittest.TestCase):
         self.assertIn("Texto falado revisado.", prompt)
         self.assertNotIn("Texto original", prompt)
         self.assertIn(server.MANDATORY_VIDEO_OUTRO, prompt)
+
+    def test_video_prompt_respects_custom_outro(self) -> None:
+        custom_outro = "Continue acompanhando para entender os próximos estudos."
+        prompt = server._video_prompt(
+            {"hook": "Texto original"},
+            narration_text=f"Texto falado revisado. {custom_outro}",
+            outro_text=custom_outro,
+            optimize_pronunciation=False,
+        )
+        self.assertIn(custom_outro, prompt)
+        self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, prompt)
+
+    def test_script_generation_fallback_preserves_tone_and_custom_outro(self) -> None:
+        custom_outro = "Salve para rever este estudo com calma."
+        payload = server.GenerateScriptIn(
+            idea=server.IdeaForScriptIn(
+                titulo="O que este estudo realmente encontrou",
+                hook="A manchete parece definitiva, mas o estudo não diz isso.",
+                angulo="Explicar associação e limites.",
+                familia="educativo",
+            ),
+            editorialTone="apreensivo",
+            outro=custom_outro,
+        )
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False):
+            result = server.generate_script(payload)
+        self.assertEqual(result["provider"], "fallback")
+        self.assertTrue(result["script"]["textoFalado"].endswith(custom_outro))
+        self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, result["script"]["textoFalado"])
+        self.assertIn("cuidado", result["script"]["virada"].lower())
+
+    def test_script_generation_cache_avoids_new_paid_call(self) -> None:
+        payload = server.GenerateScriptIn(
+            idea=server.IdeaForScriptIn(titulo="Ideia em cache"),
+            editorialTone="neutro",
+        )
+        cached = {
+            "ok": True,
+            "provider": "claude",
+            "script": {"titulo": "Cache", "textoFalado": "Texto em cache."},
+        }
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False), patch.object(
+            server, "_ai_cache_get", return_value=cached
+        ) as cache_get, patch.object(server, "_record_anthropic_usage") as record_usage:
+            result = server.generate_script(payload)
+        self.assertEqual(result, cached)
+        cache_payload = cache_get.call_args.args[1]
+        self.assertEqual(cache_payload["promptVersion"], server.SCRIPT_GENERATION_PROMPT_VERSION)
+        record_usage.assert_not_called()
 
     def test_removed_avatar_cannot_remain_the_default(self) -> None:
         avatars = [{"id": "avatar-atual"}]
@@ -783,22 +816,36 @@ class StableIdTests(unittest.TestCase):
                     created = server.append_script(
                         server.ScriptIn(
                             id="s-estavel",
+                            ideaId="i-origem",
                             titulo="Roteiro inicial",
                             hook="Um hook",
+                            editorialTone="positivo",
+                            textoFalado="Texto falado inicial. Continue acompanhando.",
+                            outroText="Continue acompanhando.",
                         )
                     )["script"]
                     self.assertEqual(created["id"], "s-estavel")
+                    self.assertEqual(created["ideaId"], "i-origem")
+                    self.assertEqual(created["editorialTone"], "positivo")
+                    self.assertEqual(created["outroText"], "Continue acompanhando.")
                     self.assertEqual(server._find_script("s-estavel")["titulo"], "Roteiro inicial")
 
                     updated = server.update_script(
                         "s-estavel",
                         server.ScriptIn(
                             id="s-estavel",
+                            ideaId="i-origem",
                             titulo="Roteiro revisado",
                             hook="Hook revisado",
+                            editorialTone="neutro",
+                            textoFalado="Texto falado revisado. Salve para rever.",
+                            outroText="Salve para rever.",
                         ),
                     )["script"]
                     self.assertEqual(updated["titulo"], "Roteiro revisado")
+                    self.assertEqual(updated["ideaId"], "i-origem")
+                    self.assertEqual(updated["editorialTone"], "neutro")
+                    self.assertEqual(updated["textoFalado"], "Texto falado revisado. Salve para rever.")
                     self.assertEqual(server._find_script("s-estavel")["hook"], "Hook revisado")
             finally:
                 server.SNAPSHOT = original_snapshot

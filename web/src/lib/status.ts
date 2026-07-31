@@ -1,4 +1,5 @@
 import type {
+  EditorialTone,
   IdeaStatus,
   PostStatus,
   Prioridade,
@@ -62,6 +63,13 @@ export const prioridadeLabel: Record<Prioridade, { label: string; tone: StatusTo
   alta: { label: "Prioridade alta", tone: "danger" },
   media: { label: "Prioridade media", tone: "warn" },
   baixa: { label: "Prioridade baixa", tone: "neutral" },
+};
+
+/** Tom editorial escolhido pelo usuario antes da geracao paga do texto falado. */
+export const editorialToneLabel: Record<EditorialTone, { label: string; tone: StatusTone }> = {
+  positivo: { label: "Tom positivo", tone: "success" },
+  neutro: { label: "Tom neutro", tone: "info" },
+  apreensivo: { label: "Tom apreensivo", tone: "warn" },
 };
 
 export const familiaLabel: Record<string, string> = {

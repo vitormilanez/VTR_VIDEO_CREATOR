@@ -11,6 +11,8 @@ export type TrendStatus = "novo" | "em_analise" | "descartado";
 export type IdeaStatus = "novo" | "em_analise" | "aprovado" | "descartado";
 export type ScriptStatus =
   "aguardando_validacao" | "aprovado_clinicamente" | "rejeitado" | "em_revisao";
+/** Tom editorial escolhido pelo usuario ANTES da geracao paga do texto falado. */
+export type EditorialTone = "positivo" | "neutro" | "apreensivo";
 export type VideoJobStatus = "fila" | "processando" | "pronto" | "erro";
 export type PostStatus = "pendente" | "agendado" | "publicado";
 export type Canal = "instagram" | "tiktok" | "youtube_shorts";
@@ -72,6 +74,12 @@ export interface Script {
   criadoEm: string;
   validadoEm?: string;
   motivoRejeicao?: string;
+  /** Tom editorial usado na geracao com IA (ausente em roteiros criados por template). */
+  editorialTone?: EditorialTone;
+  /** Texto falado completo gerado pela IA, pronto para revisao na tela de roteiro. */
+  textoFalado?: string;
+  /** Encerramento escolhido pelo usuario para este roteiro. */
+  outroText?: string;
 }
 
 export interface VideoJob {

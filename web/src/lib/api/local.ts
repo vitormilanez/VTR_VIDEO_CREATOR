@@ -1,7 +1,7 @@
 // Cliente da API local (FastAPI em api/server.py) que serve os dados reais
 // do Google Sheets. Base configuravel via VITE_API_URL.
 import type { HydratePayload } from "../store";
-import type { AppSettings, CalendarPost, Idea, Script, Trend } from "../mock-data";
+import type { AppSettings, CalendarPost, EditorialTone, Idea, Script, Trend } from "../mock-data";
 import type { VideoJob } from "../mock-data";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
@@ -149,6 +149,52 @@ export async function analyzeArticle(input: ArticleIdeasInput): Promise<ArticleI
     analysis: response.analysis,
     ideas: response.ideas,
   };
+}
+
+export interface GenerateScriptInput {
+  idea: {
+    titulo: string;
+    hook?: string;
+    angulo?: string;
+    tipo?: string | null;
+    publicoDor?: string | null;
+    cta?: string;
+    familia?: Idea["familia"];
+    observacaoCompliance?: string;
+    prioridade?: Idea["prioridade"];
+    linkOrigem?: string | null;
+  };
+  articleAnalysis?: ArticleAnalysis | null;
+  editorialTone: EditorialTone;
+  durationSeconds?: 10 | 15 | 30 | 45 | 60;
+  outro?: string;
+}
+
+export interface GeneratedScriptText {
+  titulo: string;
+  hook: string;
+  dorConflito: string;
+  explicacaoSimples: string;
+  virada: string;
+  cta: string;
+  cuidadosMedicos: string;
+  textoFalado: string;
+}
+
+/**
+ * Chamada paga UNICA ao Claude: gera roteiro estruturado + texto falado completo
+ * a partir de uma ideia ja escolhida e do tom editorial ja definido pelo usuario.
+ * Nunca chame esta funcao tres vezes (uma por tom) para a mesma ideia.
+ */
+export async function generateScript(
+  input: GenerateScriptInput,
+): Promise<{ provider: "claude" | "fallback"; script: GeneratedScriptText }> {
+  const response = await postJson<{
+    ok: boolean;
+    provider: "claude" | "fallback";
+    script: GeneratedScriptText;
+  }>("/api/scripts/generate", input);
+  return { provider: response.provider, script: response.script };
 }
 
 /** Persiste um roteiro gerado na aba Roteiros do Sheets. */
@@ -411,6 +457,7 @@ export async function createHeyGenVideo(
     styleId?: string;
     forceNewVersion?: boolean;
     narrationText?: string;
+    outroText?: string;
     idempotencyKey?: string;
   },
 ): Promise<VideoJob> {

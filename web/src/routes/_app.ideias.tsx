@@ -8,19 +8,20 @@ import { NextStepBanner } from "@/components/next-step-banner";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
+import { ToneSelectDialog } from "@/components/tone-select-dialog";
 import { evaluateIdeaQuality } from "@/lib/idea-quality";
-import { buildScriptFromIdea } from "@/lib/script-builder";
+import { generateAndPersistScript } from "@/lib/script-generation";
+import { DEFAULT_OUTRO } from "@/lib/script-quality";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
-import { genId, useStore } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import {
   analyzeArticle,
-  appendIdea,
-  appendScript,
   expandIdeas,
   setSheetStatus,
+  type ArticleAnalysis,
   type ArticleIdeasResult,
 } from "@/lib/api/local";
-import type { Idea, IdeaStatus, ThemeFamily } from "@/lib/mock-data";
+import type { EditorialTone, Idea, IdeaStatus, ThemeFamily } from "@/lib/mock-data";
 import {
   Table,
   TableBody,
@@ -126,7 +127,18 @@ export function IdeiasPage() {
   const [articlePrioridade, setArticlePrioridade] = useState<Idea["prioridade"]>("alta");
   const [articleResult, setArticleResult] = useState<ArticleIdeasResult | null>(null);
   const [isAnalyzingArticle, setIsAnalyzingArticle] = useState(false);
-  const [savingIdeaId, setSavingIdeaId] = useState<string | null>(null);
+
+  // Escolha do tom editorial: abre depois que o usuario define a ideia e
+  // ANTES da chamada paga que gera o roteiro final com a IA.
+  const [tonePending, setTonePending] = useState<{
+    idea: Idea;
+    analysis?: ArticleAnalysis | null;
+    persistIdea: boolean;
+  } | null>(null);
+  const [editorialTone, setEditorialTone] = useState<EditorialTone>("neutro");
+  const [scriptDuration, setScriptDuration] = useState<10 | 15 | 30 | 45 | 60>(45);
+  const [scriptOutro, setScriptOutro] = useState(DEFAULT_OUTRO);
+  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
 
   const filtered = ideas.filter((i) => {
     if (familia !== "todas" && i.familia !== familia) return false;
@@ -160,30 +172,70 @@ export function IdeiasPage() {
   const usedIdeas = ideas.filter((idea) => Boolean(scriptForIdea(idea)));
   const pendingIdeas = ordered.filter((idea) => !scriptForIdea(idea) && idea.status !== "descartado");
   const nextIdea = pendingIdeas[0];
+  const savingIdeaId = isGeneratingScript ? tonePending?.idea.id ?? null : null;
   const previewScript = preview ? scriptForIdea(preview) : undefined;
   const previewVideo = previewScript ? videoForScript(previewScript.id) : undefined;
 
-  async function gerarRoteiro(i: Idea) {
+  /** Ideia ja salva no Sheets: so falta escolher o tom e gerar o roteiro. */
+  function gerarRoteiro(i: Idea) {
     const quality = evaluateIdeaQuality(i);
     if (!quality.ready) {
       toast.error(`Ideia ainda precisa de contexto (${quality.score}/100): ${quality.issues[0]}`);
       setPreview(i);
       return;
     }
-    const script = buildScriptFromIdea(i, genId("s"));
+    abrirEscolhaDeTom(i, { persistIdea: false });
+  }
+
+  /** Abre o dialogo de tom editorial antes de qualquer geracao paga. */
+  function abrirEscolhaDeTom(
+    idea: Idea,
+    options: { persistIdea: boolean; analysis?: ArticleAnalysis | null } = { persistIdea: false },
+  ) {
+    setEditorialTone("neutro");
+    setScriptDuration(45);
+    setScriptOutro(DEFAULT_OUTRO);
+    setTonePending({ idea, analysis: options.analysis ?? null, persistIdea: options.persistIdea });
+  }
+
+  /** Chamada apos o usuario confirmar o tom: unica chamada paga ao Claude. */
+  async function confirmarTomEGerarRoteiro() {
+    if (!tonePending) return;
+    setIsGeneratingScript(true);
     try {
-      const saved = await appendScript(script);
-      addScript(saved);
-      updateIdea(i.id, { status: "aprovado" });
+      const { idea: savedIdea, script, provider } = await generateAndPersistScript({
+        idea: tonePending.idea,
+        articleAnalysis: tonePending.analysis,
+        editorialTone,
+        durationSeconds: scriptDuration,
+        outro: scriptOutro.trim() || DEFAULT_OUTRO,
+        persistIdea: tonePending.persistIdea,
+      });
+      if (tonePending.persistIdea) {
+        addIdea(savedIdea);
+      }
+      addScript(script);
+      updateIdea(savedIdea.id, { status: "aprovado" });
       try {
-        await setSheetStatus("ideias", i.id, "aprovado");
+        await setSheetStatus("ideias", savedIdea.id, "aprovado");
       } catch {
         toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
       }
-      toast.success("Roteiro criado e salvo no Sheets.");
-      navigate({ to: "/roteiros/$id", params: { id: saved.id } });
+      setTonePending(null);
+      setManualOpen(false);
+      setArticleOpen(false);
+      setManualSeed("");
+      setManualIdeas([]);
+      if (provider === "fallback") {
+        toast.warning("Claude indisponível. Roteiro local criado sem consumo de tokens.");
+      } else {
+        toast.success("Roteiro gerado com IA e salvo no Sheets.");
+      }
+      navigate({ to: "/roteiros/$id", params: { id: script.id } });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Nao foi possivel criar o roteiro.");
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar o roteiro.");
+    } finally {
+      setIsGeneratingScript(false);
     }
   }
 
@@ -235,36 +287,21 @@ export function IdeiasPage() {
     }
   }
 
-  async function salvarIdeiaERoteiro(idea: Idea) {
+  /**
+   * Ideia ainda nao salva (sugestao vinda de artigo ou de ideia manual): abre
+   * a escolha de tom primeiro. A ideia so e persistida quando o tom for
+   * confirmado, junto com o roteiro, em uma unica chamada paga.
+   */
+  function salvarIdeiaERoteiro(idea: Idea) {
     const quality = evaluateIdeaQuality(idea);
     if (!quality.ready) {
       toast.error(`Ideia ainda precisa de contexto (${quality.score}/100): ${quality.issues[0]}`);
       return;
     }
-    setSavingIdeaId(idea.id);
-    try {
-      const savedIdea = await appendIdea(idea);
-      addIdea(savedIdea);
-      const script = buildScriptFromIdea(savedIdea, genId("s"));
-      const savedScript = await appendScript(script);
-      addScript(savedScript);
-      updateIdea(savedIdea.id, { status: "aprovado" });
-      try {
-        await setSheetStatus("ideias", savedIdea.id, "aprovado");
-      } catch {
-        toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
-      }
-      setManualOpen(false);
-      setArticleOpen(false);
-      setManualSeed("");
-      setManualIdeas([]);
-      toast.success("Ideia contextualizada e roteiro criado.");
-      navigate({ to: "/roteiros/$id", params: { id: savedScript.id } });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Nao foi possivel criar o roteiro.");
-    } finally {
-      setSavingIdeaId(null);
-    }
+    abrirEscolhaDeTom(idea, {
+      persistIdea: true,
+      analysis: articleOpen ? articleResult?.analysis : null,
+    });
   }
 
   async function descartarIdeia(i: Idea) {
@@ -620,6 +657,20 @@ export function IdeiasPage() {
           )}
         </SheetContent>
       </Sheet>
+
+      <ToneSelectDialog
+        open={Boolean(tonePending)}
+        onOpenChange={(open) => !open && setTonePending(null)}
+        ideaTitle={tonePending?.idea.titulo ?? ""}
+        tone={editorialTone}
+        onToneChange={setEditorialTone}
+        durationSeconds={scriptDuration}
+        onDurationChange={setScriptDuration}
+        outro={scriptOutro}
+        onOutroChange={setScriptOutro}
+        isGenerating={isGeneratingScript}
+        onConfirm={() => void confirmarTomEGerarRoteiro()}
+      />
     </AppShell>
   );
 }

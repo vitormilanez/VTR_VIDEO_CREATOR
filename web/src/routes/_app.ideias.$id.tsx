@@ -3,16 +3,18 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel } from "@/components/compliance-panel";
-import { buildScriptFromIdea } from "@/lib/script-builder";
-import { genId, useStore } from "@/lib/store";
-import { appendScript, setSheetStatus } from "@/lib/api/local";
+import { ToneSelectDialog } from "@/components/tone-select-dialog";
+import { generateAndPersistScript } from "@/lib/script-generation";
+import { DEFAULT_OUTRO } from "@/lib/script-quality";
+import { useStore } from "@/lib/store";
+import { setSheetStatus } from "@/lib/api/local";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { ArrowLeft, Save, Sparkles } from "lucide-react";
-import type { Idea } from "@/lib/mock-data";
+import type { EditorialTone, Idea } from "@/lib/mock-data";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/ideias/$id")({
@@ -31,6 +33,11 @@ function IdeiaDetalhe() {
   const navigate = useNavigate();
 
   const [draft, setDraft] = useState(idea);
+  const [toneOpen, setToneOpen] = useState(false);
+  const [editorialTone, setEditorialTone] = useState<EditorialTone>("neutro");
+  const [scriptDuration, setScriptDuration] = useState<10 | 15 | 30 | 45 | 60>(45);
+  const [scriptOutro, setScriptOutro] = useState(DEFAULT_OUTRO);
+  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
 
   useEffect(() => {
     if (idea) setDraft(idea);
@@ -53,22 +60,43 @@ function IdeiaDetalhe() {
     setDraft((d) => (d ? { ...d, [k]: v } : d));
   }
 
-  async function gerarRoteiro() {
+  function abrirEscolhaDeTom() {
+    if (!draft) return;
+    setEditorialTone("neutro");
+    setScriptDuration(45);
+    setScriptOutro(DEFAULT_OUTRO);
+    setToneOpen(true);
+  }
+
+  async function confirmarTomEGerarRoteiro() {
     if (!idea || !draft) return;
-    const script = buildScriptFromIdea(draft, genId("s"));
+    setIsGeneratingScript(true);
     try {
-      const saved = await appendScript(script);
-      addScript(saved);
+      const { script, provider } = await generateAndPersistScript({
+        idea: draft,
+        editorialTone,
+        durationSeconds: scriptDuration,
+        outro: scriptOutro.trim() || DEFAULT_OUTRO,
+        persistIdea: false,
+      });
+      addScript(script);
       updateIdea(idea.id, { status: "aprovado" });
       try {
         await setSheetStatus("ideias", idea.id, "aprovado");
       } catch {
         toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
       }
-      toast.success("Roteiro criado e salvo no Sheets.");
-      navigate({ to: "/roteiros/$id", params: { id: saved.id } });
+      setToneOpen(false);
+      if (provider === "fallback") {
+        toast.warning("Claude indisponível. Roteiro local criado sem consumo de tokens.");
+      } else {
+        toast.success("Roteiro gerado com IA e salvo no Sheets.");
+      }
+      navigate({ to: "/roteiros/$id", params: { id: script.id } });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Nao foi possivel criar o roteiro.");
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar o roteiro.");
+    } finally {
+      setIsGeneratingScript(false);
     }
   }
 
@@ -92,7 +120,7 @@ function IdeiaDetalhe() {
           >
             <Save className="mr-1 h-4 w-4" /> Salvar
           </Button>
-          <Button size="sm" onClick={gerarRoteiro}>
+          <Button size="sm" onClick={abrirEscolhaDeTom}>
             <Sparkles className="mr-1 h-4 w-4" /> Gerar roteiro
           </Button>
         </>
@@ -154,6 +182,20 @@ function IdeiaDetalhe() {
           palavrasProibidas={palavras}
         />
       </div>
+
+      <ToneSelectDialog
+        open={toneOpen}
+        onOpenChange={setToneOpen}
+        ideaTitle={draft.titulo}
+        tone={editorialTone}
+        onToneChange={setEditorialTone}
+        durationSeconds={scriptDuration}
+        onDurationChange={setScriptDuration}
+        outro={scriptOutro}
+        onOutroChange={setScriptOutro}
+        isGenerating={isGeneratingScript}
+        onConfirm={() => void confirmarTomEGerarRoteiro()}
+      />
     </AppShell>
   );
 }

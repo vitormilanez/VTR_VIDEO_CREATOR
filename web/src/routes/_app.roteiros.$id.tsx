@@ -12,7 +12,7 @@ import {
   narrationQualityIssues,
   normalizeNarrationOutro,
 } from "@/lib/script-quality";
-import { prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
+import { editorialToneLabel, prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import {
   createHeyGenVideo,
@@ -90,7 +90,7 @@ function RoteiroDetalhe() {
   const [captions, setCaptions] = useState(true);
   const [optimizePronunciation, setOptimizePronunciation] = useState(true);
   const [styleId, setStyleId] = useState("");
-  const [outroText, setOutroText] = useState(DEFAULT_OUTRO);
+  const [outroText, setOutroText] = useState(script?.outroText || DEFAULT_OUTRO);
   const [narrationText, setNarrationText] = useState(() =>
     script ? buildNarrationText(script) : "",
   );
@@ -116,7 +116,9 @@ function RoteiroDetalhe() {
   useEffect(() => {
     if (script) {
       setDraft(script);
-      setNarrationText(buildNarrationText(script, outroText));
+      const savedOutro = script.outroText || DEFAULT_OUTRO;
+      setOutroText(savedOutro);
+      setNarrationText(buildNarrationText(script, savedOutro));
     }
   }, [script]);
 
@@ -238,6 +240,7 @@ function RoteiroDetalhe() {
         styleId: styleId || undefined,
         forceNewVersion,
         narrationText,
+        outroText,
       });
       addVideoJob(job);
       toast.success(
@@ -370,6 +373,9 @@ function RoteiroDetalhe() {
             <StatusBadge {...scriptStatusLabel[draft.status]} />
             <StatusBadge {...riskLabel[draft.risco]} />
             <StatusBadge {...prioridadeLabel[draft.prioridade]} />
+            {draft.editorialTone ? (
+              <StatusBadge {...editorialToneLabel[draft.editorialTone]} />
+            ) : null}
             {draft.link ? (
               <a
                 href={draft.link}
@@ -1013,6 +1019,11 @@ function ProductionReadinessCard({
 }
 
 function buildNarrationText(script: Script, outro = DEFAULT_OUTRO): string {
+  // Se o roteiro ja veio com o texto falado gerado pela IA (fluxo com tom
+  // editorial), usa esse texto pronto em vez de remontar as partes.
+  if (script.textoFalado?.trim()) {
+    return normalizeNarrationOutro(script.textoFalado.trim(), outro);
+  }
   const body = [
     script.hook,
     script.dorConflito,
