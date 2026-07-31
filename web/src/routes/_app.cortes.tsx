@@ -564,7 +564,7 @@ function ProjectResult({
 
       {project.erro ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
-          <span>{project.erro}</span>
+          <span>{friendlyCutError(project.erro)}</span>
           <Button
             size="sm"
             variant="secondary"
@@ -719,6 +719,24 @@ function ProjectStatus({ status }: { status: CutProject["status"] }) {
       {labels[status]}
     </span>
   );
+}
+
+function friendlyCutError(error: string) {
+  const normalized = error.toLowerCase();
+  if (
+    normalized.includes("output_config") ||
+    normalized.includes("invalid_request_error") ||
+    normalized.includes("maxitems")
+  ) {
+    return "A IA recusou o formato da análise. A compatibilidade foi corrigida; tente novamente.";
+  }
+  if (normalized.includes("timeout") || normalized.includes("tempo esgotado")) {
+    return "O processamento demorou além do limite. Tente um trecho menor do vídeo.";
+  }
+  if (error.length > 240 || normalized.startsWith("error code:")) {
+    return "Não foi possível concluir a análise. Tente novamente ou selecione um trecho menor.";
+  }
+  return error;
 }
 
 function activeStatus(status: CutProject["status"]) {

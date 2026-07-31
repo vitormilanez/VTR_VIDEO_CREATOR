@@ -72,6 +72,21 @@ class FakeRadarClient:
 
 
 class StableIdTests(unittest.TestCase):
+    def test_claude_array_schemas_do_not_use_unsupported_size_keywords(self) -> None:
+        def assert_compatible(value: object) -> None:
+            if isinstance(value, dict):
+                self.assertNotIn("minItems", value)
+                self.assertNotIn("maxItems", value)
+                for nested in value.values():
+                    assert_compatible(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    assert_compatible(nested)
+
+        assert_compatible(cut_service._clip_schema(None))
+        assert_compatible(cut_service._clip_schema(3))
+        assert_compatible(server._EXPAND_IDEAS_SCHEMA)
+
     def test_final_narration_compliance_warns_but_does_not_block_production(self) -> None:
         text = server._validate_final_narration(
             {"hook": "Conteudo educativo"},

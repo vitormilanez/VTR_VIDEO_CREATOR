@@ -204,16 +204,14 @@ def _trim_source(job_id: str, source: Path, destination: Path, start: float, end
 
 
 def _clip_schema(count: int | None) -> dict[str, Any]:
-    min_items = 0 if count is None else count
-    max_items = 8 if count is None else count
+    # Claude Structured Outputs does not support array size keywords.
+    # Enforce the requested quantity after parsing instead.
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "clips": {
                 "type": "array",
-                "minItems": min_items,
-                "maxItems": max_items,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
@@ -697,7 +695,11 @@ TRANSCRICAO:
         clip["end"] = round(end, 3)
         clip["score"] = max(0, min(100, int(clip["score"])))
         valid.append(clip)
-    if count is not None and len(valid) != count:
+    if count is None:
+        valid = valid[:8]
+    elif len(valid) >= count:
+        valid = valid[:count]
+    else:
         raise RuntimeError("A analise nao retornou a quantidade esperada de cortes validos.")
     if record_usage:
         record_usage("cuts.suggest", model, message)

@@ -3015,8 +3015,6 @@ _EXPAND_IDEAS_SCHEMA = {
     "properties": {
         "ideas": {
             "type": "array",
-            "minItems": 1,
-            "maxItems": 5,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
