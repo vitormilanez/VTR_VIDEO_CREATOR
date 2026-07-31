@@ -535,7 +535,7 @@ TRANSCRICAO:
     client = anthropic.Anthropic()
     try:
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
             max_tokens=4000,
             system="Voce e editor senior de videos curtos e conteudo medico responsavel.",
             output_config={"format": {"type": "json_schema", "schema": _clip_schema(count)}},

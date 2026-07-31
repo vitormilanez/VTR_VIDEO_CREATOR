@@ -34,9 +34,11 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from api.cut_service import process_cut_project
 from api.job_store import JobStore
+from integrations.heygen_client import load_dotenv
 from integrations.portuguese_br import prepare_script_for_heygen_voice
 
 ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(str(ROOT / ".env"))
 SNAPSHOT = ROOT / "data" / "sheets_snapshot.json"
 VIDEO_JOBS = ROOT / "data" / "video_jobs.json"
 AVATAR_JOBS = ROOT / "data" / "avatar_jobs.json"
@@ -1340,7 +1342,7 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
     try:
         client = anthropic.Anthropic()
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
             max_tokens=1200,
             system=_NATURAL_SCRIPT_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _NATURAL_SCRIPT_SCHEMA}},
@@ -3247,7 +3249,7 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
     try:
         client = anthropic.Anthropic()
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
             max_tokens=1800,
             system=_EXPAND_IDEAS_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _EXPAND_IDEAS_SCHEMA}},
@@ -3289,7 +3291,7 @@ def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
     try:
         client = anthropic.Anthropic()
         message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
             max_tokens=2600,
             system=_ARTICLE_ANALYSIS_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _ARTICLE_ANALYSIS_SCHEMA}},
@@ -3654,9 +3656,7 @@ def generate_pack(payload: PackIn) -> dict:
     try:
         client = anthropic.Anthropic()
         message = client.messages.create(
-            # Sonnet 5: bom custo/qualidade e suporta structured outputs.
-            # Troque para claude-opus-4-8 via ANTHROPIC_MODEL se quiser o topo de linha.
-            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
             max_tokens=2000,
             system=_PACK_SYSTEM,
             output_config={"format": {"type": "json_schema", "schema": _PACK_SCHEMA}},
