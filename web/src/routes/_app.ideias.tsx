@@ -4,6 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { DataToolbar } from "@/components/data-toolbar";
 import { EmptyState } from "@/components/empty-state";
+import { NextStepBanner } from "@/components/next-step-banner";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
@@ -150,6 +151,8 @@ export function IdeiasPage() {
   }
 
   const usedIdeas = ideas.filter((idea) => Boolean(scriptForIdea(idea)));
+  const pendingIdeas = ordered.filter((idea) => !scriptForIdea(idea) && idea.status !== "descartado");
+  const nextIdea = pendingIdeas[0];
   const previewScript = preview ? scriptForIdea(preview) : undefined;
   const previewVideo = previewScript ? videoForScript(previewScript.id) : undefined;
 
@@ -313,6 +316,34 @@ export function IdeiasPage() {
         </div>
       }
     >
+      <NextStepBanner
+        className="mb-3"
+        title={
+          nextIdea
+            ? `Transformar "${nextIdea.titulo}" em roteiro`
+            : "Criar uma nova ideia para alimentar a esteira"
+        }
+        description={
+          nextIdea
+            ? "Esta é a ideia mais recente ainda sem roteiro. Gere o roteiro ou abra a ideia para revisar antes."
+            : "Importe um artigo, cole uma ideia bruta ou volte ao Radar para capturar novos temas."
+        }
+        actionLabel={nextIdea ? "Criar roteiro" : "Importar artigo"}
+        onAction={nextIdea ? () => void gerarRoteiro(nextIdea) : () => setArticleOpen(true)}
+        meta={
+          <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+            <span className="rounded-full bg-background px-2.5 py-1">
+              {pendingIdeas.length} sem roteiro
+            </span>
+            <span className="rounded-full bg-background px-2.5 py-1">
+              {usedIdeas.length} já viraram roteiro
+            </span>
+            <span className="rounded-full bg-background px-2.5 py-1">
+              {ideas.length} ideias no total
+            </span>
+          </div>
+        }
+      />
       {usedIdeas.length > 0 ? (
         <div className="mb-3 flex items-center gap-2 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs">
           <CircleCheck className="h-4 w-4 shrink-0 text-status-info" />

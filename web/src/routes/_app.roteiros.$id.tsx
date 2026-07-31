@@ -4,6 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel, HighlightedText } from "@/components/compliance-panel";
 import { StatusTimeline, type TimelineStep } from "@/components/status-timeline";
+import { NextStepBanner } from "@/components/next-step-banner";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import { narrationQualityIssues } from "@/lib/script-quality";
@@ -190,6 +191,17 @@ function RoteiroDetalhe() {
     criadoEm: draft.criadoEm,
     validadoEm: draft.validadoEm,
   });
+  const productionBlockedReason = qualityIssues[0]
+    ? `Revise a fala final: ${qualityIssues[0]}`
+    : catalogLoading
+      ? "Carregando avatares e vozes da HeyGen."
+      : !avatarId
+        ? "Selecione um avatar pronto."
+        : !voiceId
+          ? "Selecione uma voz."
+          : saving
+            ? "Salvando roteiro."
+            : null;
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
@@ -362,13 +374,57 @@ function RoteiroDetalhe() {
             ) : null}
           </div>
 
+          <NextStepBanner
+            title={
+              latestJob
+                ? "Este roteiro já tem vídeo criado"
+                : dirty
+                  ? "Salvar ajustes e enviar para o HeyGen"
+                  : "Enviar roteiro para produção"
+            }
+            description={
+              latestJob
+                ? "Você pode abrir a produção existente ou gerar uma nova versão se quiser testar outro avatar, duração ou fala."
+                : "Revise a fala final do avatar, confira avatar/voz e envie para criar o vídeo."
+            }
+            actionLabel={
+              latestJob ? "Ver vídeo" : dirty ? "Salvar e enviar" : "Enviar para produção"
+            }
+            onAction={
+              latestJob
+                ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } })
+                : () => void enviarProducao(false)
+            }
+            disabled={!latestJob && Boolean(productionBlockedReason)}
+            disabledReason={!latestJob ? productionBlockedReason || undefined : undefined}
+            meta={
+              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                <span className="rounded-full bg-background px-2.5 py-1">
+                  {narrationText.trim().split(/\s+/).filter(Boolean).length} palavras
+                </span>
+                <span className="rounded-full bg-background px-2.5 py-1">
+                  ~
+                  {Math.max(
+                    1,
+                    Math.round(narrationText.trim().split(/\s+/).filter(Boolean).length / 2.4),
+                  )}
+                  s de fala
+                </span>
+                <span className="rounded-full bg-background px-2.5 py-1">
+                  {dirty ? "Alterações pendentes" : "Roteiro salvo"}
+                </span>
+              </div>
+            }
+          />
+
           <WorkflowJump />
 
           <div id="roteiro-editar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
             <div className="mb-4">
-              <h3 className="font-display text-sm font-semibold">1. Editar roteiro</h3>
+              <h3 className="font-display text-sm font-semibold">1. Briefing do roteiro</h3>
               <p className="mt-1 text-xs text-muted-foreground">
-                Ajuste a ideia, o cuidado médico e o status antes de preparar o vídeo.
+                Campos que orientam a IA e preservam o contexto médico. A fala final fica na etapa
+                de vídeo.
               </p>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
@@ -461,9 +517,9 @@ function RoteiroDetalhe() {
             className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
           >
             <div className="mb-4">
-              <h3 className="font-display text-sm font-semibold">2. Preparar vídeo</h3>
+              <h3 className="font-display text-sm font-semibold">2. Fala final e vídeo</h3>
               <p className="mt-1 text-xs text-muted-foreground">
-                Escolha o visual e o ritmo. A voz do Dr. Guilherme já está configurada.
+                Edite exatamente o que o avatar vai falar e escolha visual, duração e ritmo.
               </p>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
@@ -612,7 +668,7 @@ function RoteiroDetalhe() {
             <div className="mt-4 border-t pt-4">
               <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                 <div>
-                  <Label htmlFor="narration-text">Texto falado</Label>
+                  <Label htmlFor="narration-text">Fala final do avatar</Label>
                   <p className="mt-0.5 text-[11px] text-muted-foreground">
                     Edite livremente. Isso muda apenas a fala do vídeo, não o roteiro no Sheets.
                   </p>
