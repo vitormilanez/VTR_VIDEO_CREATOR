@@ -49,6 +49,12 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -288,6 +294,11 @@ export function IdeiasPage() {
               savingIdeaId={savingIdeaId}
               onAnalyze={analisarArtigo}
               onCreateScript={salvarIdeiaERoteiro}
+              onClear={() => {
+                setArticleText("");
+                setArticleUrl("");
+                setArticleResult(null);
+              }}
             />
           </Dialog>
           <Dialog open={manualOpen} onOpenChange={setManualOpen}>
@@ -311,6 +322,10 @@ export function IdeiasPage() {
               savingIdeaId={savingIdeaId}
               onExpand={explorarIdeiaManual}
               onCreateScript={salvarIdeiaERoteiro}
+              onClear={() => {
+                setManualSeed("");
+                setManualIdeas([]);
+              }}
             />
           </Dialog>
         </div>
@@ -417,7 +432,7 @@ export function IdeiasPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {ordered.map((i) => {
+              {ordered.map((i, index) => {
                 const usedScript = scriptForIdea(i);
                 const producedVideo = usedScript ? videoForScript(usedScript.id) : undefined;
                 return (
@@ -432,6 +447,14 @@ export function IdeiasPage() {
                           <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
                             {i.tipo}
                           </span>
+                        ) : null}
+                        {index === 0 ? (
+                          <Badge
+                            variant="outline"
+                            className="h-5 border-status-info/30 bg-status-info/5 px-1.5 text-[10px] text-status-info"
+                          >
+                            Mais recente
+                          </Badge>
                         ) : null}
                         {usedScript ? (
                           <Badge
@@ -476,7 +499,7 @@ export function IdeiasPage() {
                               disabled={i.status === "descartado"}
                               onClick={() => gerarRoteiro(i)}
                             >
-                              <Sparkles className="mr-1 h-3.5 w-3.5" /> Roteiro
+                              <Sparkles className="mr-1 h-3.5 w-3.5" /> Criar roteiro
                             </Button>
                           </WithTooltip>
                         )}
@@ -603,6 +626,7 @@ function ArticleImportDialog({
   savingIdeaId,
   onAnalyze,
   onCreateScript,
+  onClear,
 }: {
   article: string;
   onArticleChange: (value: string) => void;
@@ -617,11 +641,15 @@ function ArticleImportDialog({
   savingIdeaId: string | null;
   onAnalyze: () => void;
   onCreateScript: (idea: Idea) => void;
+  onClear: () => void;
 }) {
   return (
     <DialogContent className="max-h-[88vh] max-w-5xl overflow-y-auto">
       <DialogHeader>
         <DialogTitle>Importar artigo</DialogTitle>
+        <p className="text-sm text-muted-foreground">
+          Transforme evidência em uma ideia clara, com os limites clínicos preservados.
+        </p>
       </DialogHeader>
 
       <div className="grid gap-4">
@@ -681,80 +709,75 @@ function ArticleImportDialog({
           </div>
         </div>
 
-        <Button onClick={onAnalyze} disabled={isAnalyzing || article.trim().length < 120}>
-          {isAnalyzing ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          ) : (
-            <FileText className="mr-2 h-4 w-4" />
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button onClick={onAnalyze} disabled={isAnalyzing || article.trim().length < 120}>
+            {isAnalyzing ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <FileText className="mr-2 h-4 w-4" />
+            )}
+            Analisar artigo
+          </Button>
+          {(article || sourceUrl || result) && (
+            <Button size="sm" variant="ghost" onClick={onClear}>
+              Limpar artigo
+            </Button>
           )}
-          Analisar artigo
-        </Button>
+        </div>
 
         {result ? (
           <div className="grid gap-4">
             <div className="rounded-lg border border-status-info/30 bg-status-info/5 p-4">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
-                  <h3 className="font-display text-sm font-semibold">O que a IA entendeu</h3>
+                  <h3 className="font-display text-sm font-semibold">Resumo do artigo</h3>
                   <p className="text-xs text-muted-foreground">
-                    Revise esta leitura antes de transformar em roteiro.
+                    A leitura usada para construir a ideia, antes de chegar ao avatar.
                   </p>
                 </div>
                 <Badge variant="outline" className="text-[10px]">
-                  {result.provider === "claude" ? "IA" : "Fallback local"}
+                  {result.provider === "claude" ? "Analisado por IA" : "Análise local"}
                 </Badge>
               </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
-                <ArticleFact label="Achado principal" value={result.analysis.achadoPrincipal} />
+              <p className="mt-3 text-sm leading-6">{result.analysis.achadoPrincipal}</p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <ArticleFact label="Tipo de estudo" value={result.analysis.tipoEstudo} />
                 <ArticleFact label="População" value={result.analysis.populacao} />
-                <ArticleFact label="Amostra" value={result.analysis.amostra} />
-                <ArticleFact label="Seguimento" value={result.analysis.seguimento} />
               </div>
-              <div className="mt-4 grid gap-3 md:grid-cols-2">
-                <ArticleList title="Números-chave" rows={result.analysis.numerosChave} />
-                <ArticleList title="Limitações" rows={result.analysis.limitacoes} />
-                <ArticleList title="Pode falar" rows={result.analysis.podeFalar} />
-                <ArticleList title="Não pode falar" rows={result.analysis.naoPodeFalar} danger />
-              </div>
+              <Accordion type="single" collapsible className="mt-2 border-t border-status-info/20">
+                <AccordionItem value="detalhes" className="border-b-0">
+                  <AccordionTrigger className="py-3 text-xs text-muted-foreground hover:no-underline">
+                    Ver dados, números e limites da leitura
+                  </AccordionTrigger>
+                  <AccordionContent>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <ArticleFact label="Amostra" value={result.analysis.amostra} />
+                      <ArticleFact label="Seguimento" value={result.analysis.seguimento} />
+                      <ArticleList title="Números-chave" rows={result.analysis.numerosChave} />
+                      <ArticleList title="Limitações" rows={result.analysis.limitacoes} />
+                      <ArticleList title="Pode falar" rows={result.analysis.podeFalar} />
+                      <ArticleList title="Não pode falar" rows={result.analysis.naoPodeFalar} danger />
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
             </div>
 
             <div>
-              <h3 className="font-display text-sm font-semibold">Ideias a partir do artigo</h3>
+              <h3 className="font-display text-sm font-semibold">Escolha uma ideia para criar roteiro</h3>
               <p className="text-xs text-muted-foreground">
-                Escolha uma. Ela será salva em Ideias e já abrirá o roteiro.
+                A primeira foi priorizada como ponto de partida. As outras mantêm ângulos alternativos.
               </p>
             </div>
-            {result.ideas.map((idea) => (
-              <div key={idea.id} className="rounded-lg border bg-card p-3">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="font-semibold">{idea.titulo}</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                        {familiaLabel[idea.familia]}
-                      </span>
-                      <StatusBadge {...prioridadeLabel[idea.prioridade]} />
-                    </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    onClick={() => onCreateScript(idea)}
-                    disabled={Boolean(savingIdeaId)}
-                  >
-                    {savingIdeaId === idea.id ? (
-                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Sparkles className="mr-1 h-3.5 w-3.5" />
-                    )}
-                    Criar roteiro
-                  </Button>
-                </div>
-                <Block label="Hook" text={idea.hook} />
-                <Block label="Contexto" text={idea.angulo} />
-                {idea.publicoDor ? <Block label="Público / Dor" text={idea.publicoDor} /> : null}
-                <Block label="Compliance" text={idea.observacaoCompliance} />
-              </div>
+            {result.ideas.map((idea, index) => (
+              <IdeaSuggestionCard
+                key={idea.id}
+                idea={idea}
+                recommended={index === 0}
+                isSaving={savingIdeaId === idea.id}
+                disabled={Boolean(savingIdeaId)}
+                onCreateScript={() => onCreateScript(idea)}
+              />
             ))}
           </div>
         ) : null}
@@ -808,6 +831,78 @@ function ArticleList({
   );
 }
 
+function IdeaSuggestionCard({
+  idea,
+  recommended = false,
+  isSaving,
+  disabled,
+  onCreateScript,
+}: {
+  idea: Idea;
+  recommended?: boolean;
+  isSaving: boolean;
+  disabled: boolean;
+  onCreateScript: () => void;
+}) {
+  return (
+    <div
+      className={`rounded-lg border bg-card p-4 ${
+        recommended ? "border-status-info/40 bg-status-info/5" : "border-border"
+      }`}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="font-semibold leading-6">{idea.titulo}</div>
+            {recommended ? (
+              <Badge className="bg-status-info text-status-info-foreground">Recomendada</Badge>
+            ) : null}
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {familiaLabel[idea.familia]}
+            </span>
+            <StatusBadge {...prioridadeLabel[idea.prioridade]} />
+          </div>
+        </div>
+        <Button size="sm" onClick={onCreateScript} disabled={disabled}>
+          {isSaving ? (
+            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Sparkles className="mr-1 h-3.5 w-3.5" />
+          )}
+          Criar roteiro
+        </Button>
+      </div>
+
+      {recommended ? (
+        <>
+          <Block label="Hook" text={idea.hook} />
+          <Block label="Como o avatar deve explicar" text={idea.angulo} />
+          {idea.publicoDor ? <Block label="Para quem" text={idea.publicoDor} /> : null}
+          <p className="mt-3 rounded-md border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-xs leading-5 text-status-warn-foreground">
+            {idea.observacaoCompliance}
+          </p>
+        </>
+      ) : (
+        <Accordion type="single" collapsible className="mt-2">
+          <AccordionItem value="detalhes" className="border-b-0">
+            <AccordionTrigger className="py-2 text-xs text-muted-foreground hover:no-underline">
+              Ver hook e contexto
+            </AccordionTrigger>
+            <AccordionContent>
+              <Block label="Hook" text={idea.hook} />
+              <Block label="Como o avatar deve explicar" text={idea.angulo} />
+              {idea.publicoDor ? <Block label="Para quem" text={idea.publicoDor} /> : null}
+              <Block label="Limite clínico" text={idea.observacaoCompliance} />
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
+      )}
+    </div>
+  );
+}
+
 function NovaIdeiaDialog({
   seed,
   onSeedChange,
@@ -820,6 +915,7 @@ function NovaIdeiaDialog({
   savingIdeaId,
   onExpand,
   onCreateScript,
+  onClear,
 }: {
   seed: string;
   onSeedChange: (value: string) => void;
@@ -832,11 +928,15 @@ function NovaIdeiaDialog({
   savingIdeaId: string | null;
   onExpand: () => void;
   onCreateScript: (idea: Idea) => void;
+  onClear: () => void;
 }) {
   return (
     <DialogContent className="max-h-[88vh] max-w-3xl overflow-y-auto">
       <DialogHeader>
         <DialogTitle>Nova ideia</DialogTitle>
+        <p className="text-sm text-muted-foreground">
+          Escreva o ponto de partida. A IA organiza os melhores ângulos para o roteiro.
+        </p>
       </DialogHeader>
 
       <div className="grid gap-4">
@@ -888,53 +988,39 @@ function NovaIdeiaDialog({
           </div>
         </div>
 
-        <Button onClick={onExpand} disabled={isExpanding || seed.trim().length < 8}>
-          {isExpanding ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          ) : (
-            <Wand2 className="mr-2 h-4 w-4" />
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button onClick={onExpand} disabled={isExpanding || seed.trim().length < 8}>
+            {isExpanding ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Wand2 className="mr-2 h-4 w-4" />
+            )}
+            Explorar com IA
+          </Button>
+          {(seed || ideas.length > 0) && (
+            <Button size="sm" variant="ghost" onClick={onClear}>
+              Limpar ideia
+            </Button>
           )}
-          Explorar com IA
-        </Button>
+        </div>
 
         {ideas.length > 0 ? (
           <div className="grid gap-3">
             <div>
-              <h3 className="font-display text-sm font-semibold">Sugestões prontas para roteiro</h3>
+              <h3 className="font-display text-sm font-semibold">Escolha uma ideia para criar roteiro</h3>
               <p className="text-xs text-muted-foreground">
-                Escolha a melhor. Ela será salva em Ideias e já abrirá o roteiro.
+                A primeira foi priorizada como ponto de partida. As outras trazem variações de ângulo.
               </p>
             </div>
-            {ideas.map((idea) => (
-              <div key={idea.id} className="rounded-lg border bg-card p-3">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="font-semibold">{idea.titulo}</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                        {familiaLabel[idea.familia]}
-                      </span>
-                      <StatusBadge {...prioridadeLabel[idea.prioridade]} />
-                    </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    onClick={() => onCreateScript(idea)}
-                    disabled={Boolean(savingIdeaId)}
-                  >
-                    {savingIdeaId === idea.id ? (
-                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Sparkles className="mr-1 h-3.5 w-3.5" />
-                    )}
-                    Criar roteiro
-                  </Button>
-                </div>
-                <Block label="Hook" text={idea.hook} />
-                <Block label="Contexto" text={idea.angulo} />
-                {idea.publicoDor ? <Block label="Público / Dor" text={idea.publicoDor} /> : null}
-                <Block label="Compliance" text={idea.observacaoCompliance} />
-              </div>
+            {ideas.map((idea, index) => (
+              <IdeaSuggestionCard
+                key={idea.id}
+                idea={idea}
+                recommended={index === 0}
+                isSaving={savingIdeaId === idea.id}
+                disabled={Boolean(savingIdeaId)}
+                onCreateScript={() => onCreateScript(idea)}
+              />
             ))}
           </div>
         ) : null}
