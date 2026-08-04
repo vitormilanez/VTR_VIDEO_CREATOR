@@ -94,9 +94,11 @@ class StableIdTests(unittest.TestCase):
                 "Tome 5 mg todos os dias para ter resultado certo. "
                 "Esse texto ainda precisa de revisao medica antes de publicar. "
                 "Mesmo assim, o sistema deve permitir teste interno sem enviar a decisao "
-                "como orientacao final para o paciente."
+                "como orientacao final para o paciente. O objetivo deste teste e confirmar que "
+                "os alertas de compliance continuam visiveis sem confundir duracao com bloqueio "
+                "clinico durante a revisao interna do material."
             ),
-            10,
+            30,
         )
         self.assertIn("Tome 5 mg", text)
         self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
@@ -111,7 +113,7 @@ class StableIdTests(unittest.TestCase):
                 )
             },
             None,
-            10,
+            15,
         )
         self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
 
@@ -756,6 +758,27 @@ class StableIdTests(unittest.TestCase):
         self.assertEqual(clips[0]["start"], 0)
         self.assertIn("Vou explicar", clips[0]["caption"])
 
+    def test_context_safe_bounds_never_start_or_end_mid_idea(self) -> None:
+        segments = [
+            {"start": 0, "end": 4, "text": "Você sabia que esse detalhe muda a decisão?"},
+            {"start": 4, "end": 8, "text": "Por isso vale olhar o contexto antes de agir."},
+            {"start": 8, "end": 12, "text": "A avaliação individual evita decisões precipitadas."},
+        ]
+
+        start, end, text = cut_service._context_safe_bounds(
+            segments,
+            requested_start=4.2,
+            requested_end=9.1,
+            min_duration=8,
+            max_duration=30,
+            video_duration=12,
+        )
+
+        self.assertEqual(start, 0)
+        self.assertEqual(end, 12)
+        self.assertTrue(text.startswith("Você sabia"))
+        self.assertTrue(text.endswith("precipitadas."))
+
     def test_automatic_cut_count_can_skip_weak_video(self) -> None:
         transcript = {
             "duration": 30,
@@ -1028,6 +1051,43 @@ class StableIdTests(unittest.TestCase):
             self.assertEqual(result["failedStep"], "sync_sheets")
             self.assertIn("token expirado", result["detail"])
             self.assertEqual(len(calls), 2)
+
+    def test_article_parser_keeps_editorial_facts_and_ignores_navigation(self) -> None:
+        parser = server._ArticleTextParser()
+        parser.feed(
+            "<nav>Menu sem valor</nav><article><h1>Cinco novas canetas</h1>"
+            "<p>Orsema, Owozy, Seemasun, Semavy e Zempneo foram registradas pela Anvisa.</p>"
+            "</article><footer>Rodape sem valor</footer>"
+        )
+        extracted = " ".join(parser.parts)
+        self.assertIn("Orsema", extracted)
+        self.assertNotIn("Menu sem valor", extracted)
+        self.assertNotIn("Rodape sem valor", extracted)
+
+    def test_expanded_idea_preserves_source_url(self) -> None:
+        source_url = "https://example.com/materia"
+        payload = server.ExpandIdeasIn(
+            seed="Anvisa registrou cinco novas canetas de semaglutida",
+            quantity=1,
+            familia="medicamento",
+            sourceUrl=source_url,
+        )
+        ideas = server._normalize_expanded_ideas(
+            payload,
+            [
+                {
+                    "titulo": "Cinco novas canetas: o que mudou",
+                    "hook": "A aprovacao nao significa que todas tratam a mesma condicao.",
+                    "angulo": "Comparar indicacoes aprovadas e disponibilidade.",
+                    "tipo": "Reel educativo",
+                    "publicoDor": "Pessoa confusa com a manchete.",
+                    "cta": "Leia a indicacao aprovada.",
+                    "observacaoCompliance": "Nao indicar uso.",
+                    "prioridade": "alta",
+                }
+            ],
+        )
+        self.assertEqual(ideas[0]["linkOrigem"], source_url)
 
 
 if __name__ == "__main__":

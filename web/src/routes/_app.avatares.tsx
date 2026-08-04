@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -16,8 +16,10 @@ import {
   RefreshCw,
   Repeat2,
   ScanFace,
+  Search,
   ShieldCheck,
   Sparkles,
+  Star,
   Trash2,
   Upload,
   UserRound,
@@ -49,6 +51,7 @@ import {
   fetchHeyGenAvatars,
   fetchHeyGenStyles,
   refreshHeyGenAvatar,
+  saveSettings,
   type AvatarJob,
   type AvatarMediaPayload,
   type CreateAvatarPayload,
@@ -56,6 +59,7 @@ import {
   type HeyGenAvatarLook,
   type HeyGenStyle,
 } from "@/lib/api/local";
+import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_app/avatares")({
@@ -75,6 +79,7 @@ type CreationType = "photo" | "digital_twin" | "prompt";
 type VoiceSource = "upload" | "video";
 type StudioMode = "single" | "dialogue";
 type Scene = { id: string; speaker: "a" | "b"; text: string };
+const EMPTY_AVATAR_IDS: string[] = [];
 
 const creationOptions: Array<{
   value: CreationType;
@@ -225,6 +230,78 @@ function AvatarLibrary({
   onJobUpdated: (job: AvatarJob) => void;
 }) {
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<"all" | "favorites" | "portrait" | "landscape">("all");
+  const [savingPreferenceId, setSavingPreferenceId] = useState<string | null>(null);
+  const deferredSearch = useDeferredValue(search.trim().toLocaleLowerCase("pt-BR"));
+  const settings = useStore((state) => state.settings);
+  const setSettings = useStore((state) => state.setSettings);
+  const defaultAvatarId = settings.heygen?.defaultAvatarId || null;
+  const favoriteAvatarIds = settings.heygen?.favoriteAvatarIds || EMPTY_AVATAR_IDS;
+  const favoriteSet = useMemo(() => new Set(favoriteAvatarIds), [favoriteAvatarIds]);
+
+  const visibleLooks = useMemo(() => {
+    const filtered = looks.filter((look) => {
+      const matchesSearch = deferredSearch
+        ? `${look.name} ${look.group_name}`.toLocaleLowerCase("pt-BR").includes(deferredSearch)
+        : true;
+      const matchesFilter =
+        filter === "all" ||
+        (filter === "favorites" && favoriteSet.has(look.id)) ||
+        (filter === "portrait" && look.preferred_orientation !== "landscape") ||
+        (filter === "landscape" && look.preferred_orientation === "landscape");
+      return matchesSearch && matchesFilter;
+    });
+    return filtered.sort((left, right) => {
+      if (left.id === defaultAvatarId) return -1;
+      if (right.id === defaultAvatarId) return 1;
+      const favoriteOrder = Number(favoriteSet.has(right.id)) - Number(favoriteSet.has(left.id));
+      if (favoriteOrder) return favoriteOrder;
+      return `${left.group_name} ${left.name}`.localeCompare(
+        `${right.group_name} ${right.name}`,
+        "pt-BR",
+      );
+    });
+  }, [defaultAvatarId, deferredSearch, favoriteSet, filter, looks]);
+
+  async function saveAvatarPreferences(
+    next: { defaultAvatarId: string | null; favoriteAvatarIds: string[] },
+    feedback: string,
+    pendingId: string,
+  ) {
+    setSavingPreferenceId(pendingId);
+    try {
+      const saved = await saveSettings({ ...settings, heygen: next });
+      setSettings(saved);
+      toast.success(feedback);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Não foi possível salvar a preferência.",
+      );
+    } finally {
+      setSavingPreferenceId(null);
+    }
+  }
+
+  function toggleFavorite(look: HeyGenAvatarLook) {
+    const isFavorite = favoriteSet.has(look.id);
+    const nextFavorites = isFavorite
+      ? favoriteAvatarIds.filter((id) => id !== look.id)
+      : [...favoriteAvatarIds, look.id];
+    void saveAvatarPreferences(
+      { defaultAvatarId, favoriteAvatarIds: nextFavorites },
+      isFavorite ? "Avatar removido dos favoritos." : "Avatar adicionado aos favoritos.",
+      look.id,
+    );
+  }
+
+  function makeDefault(look: HeyGenAvatarLook) {
+    void saveAvatarPreferences(
+      { defaultAvatarId: look.id, favoriteAvatarIds },
+      `${look.name} definido como avatar padrão.`,
+      look.id,
+    );
+  }
 
   async function refreshJob(job: AvatarJob) {
     setRefreshingId(job.id);
@@ -286,11 +363,11 @@ function AvatarLibrary({
       ) : null}
 
       <section>
-        <div className="mb-3 flex items-end justify-between gap-3">
+        <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h2 className="text-sm font-semibold">Biblioteca</h2>
             <p className="text-xs text-muted-foreground">
-              Somente identidades privadas criadas na conta conectada.
+              Organize identidades privadas e escolha o avatar usado automaticamente nos vídeos.
             </p>
           </div>
           <Badge variant="outline">
@@ -298,16 +375,47 @@ function AvatarLibrary({
             {avatars.length === 1 ? "identidade" : "identidades"}
           </Badge>
         </div>
+        <div className="mb-4 grid gap-2 rounded-lg border bg-card p-3 md:grid-cols-[minmax(0,1fr)_220px]">
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Buscar por avatar ou identidade"
+              aria-label="Buscar avatares"
+              className="pl-9"
+            />
+          </div>
+          <Select
+            value={filter}
+            onValueChange={(value) =>
+              setFilter(value as "all" | "favorites" | "portrait" | "landscape")
+            }
+          >
+            <SelectTrigger aria-label="Filtrar avatares">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todos os avatares</SelectItem>
+              <SelectItem value="favorites">Somente favoritos</SelectItem>
+              <SelectItem value="portrait">Verticais</SelectItem>
+              <SelectItem value="landscape">Horizontais</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
         {loading ? (
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {[1, 2, 3].map((item) => (
               <div key={item} className="h-52 animate-pulse rounded-md border bg-muted" />
             ))}
           </div>
-        ) : looks.length ? (
+        ) : visibleLooks.length ? (
           <div className="space-y-6">
             {avatars.map((avatar) => {
-              const avatarLooks = looks.filter((look) => look.group_id === avatar.id);
+              const avatarLooks = visibleLooks.filter((look) => look.group_id === avatar.id);
               if (!avatarLooks.length) return null;
               return (
                 <section key={avatar.id}>
@@ -319,8 +427,14 @@ function AvatarLibrary({
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                     {avatarLooks.map((look) => (
-                      <article key={look.id} className="overflow-hidden rounded-md border bg-card">
-                        <div className="aspect-[16/9] bg-muted">
+                      <article
+                        key={look.id}
+                        className={cn(
+                          "overflow-hidden rounded-md border bg-card transition-colors",
+                          look.id === defaultAvatarId && "border-primary ring-1 ring-primary/30",
+                        )}
+                      >
+                        <div className="relative aspect-[16/9] bg-muted">
                           {look.preview_image_url ? (
                             <img
                               src={look.preview_image_url}
@@ -332,17 +446,61 @@ function AvatarLibrary({
                               <UserRound className="h-9 w-9" />
                             </div>
                           )}
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="secondary"
+                            className="absolute right-2 top-2 h-9 w-9 cursor-pointer bg-background/90 shadow-sm backdrop-blur-sm"
+                            onClick={() => toggleFavorite(look)}
+                            disabled={savingPreferenceId === look.id}
+                            aria-label={
+                              favoriteSet.has(look.id)
+                                ? `Remover ${look.name} dos favoritos`
+                                : `Adicionar ${look.name} aos favoritos`
+                            }
+                            title={favoriteSet.has(look.id) ? "Remover dos favoritos" : "Favoritar"}
+                          >
+                            <Star
+                              className={cn(
+                                "h-4 w-4",
+                                favoriteSet.has(look.id) &&
+                                  "fill-status-warn text-status-warn-foreground",
+                              )}
+                            />
+                          </Button>
                         </div>
-                        <div className="flex items-start justify-between gap-2 p-3">
-                          <div className="min-w-0">
-                            <h4 className="truncate text-sm font-semibold">{look.name}</h4>
-                            <p className="text-xs text-muted-foreground">
-                              {look.preferred_orientation === "landscape"
-                                ? "Horizontal"
-                                : "Vertical"}
-                            </p>
+                        <div className="space-y-3 p-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <h4 className="truncate text-sm font-semibold">{look.name}</h4>
+                              <p className="text-xs text-muted-foreground">
+                                {look.preferred_orientation === "landscape"
+                                  ? "Horizontal"
+                                  : "Vertical"}
+                              </p>
+                            </div>
+                            <StatusBadge status={look.status || "processing"} />
                           </div>
-                          <StatusBadge status={look.status || "processing"} />
+                          {look.id === defaultAvatarId ? (
+                            <div className="flex min-h-9 items-center gap-2 rounded-md bg-status-success/10 px-3 text-xs font-semibold text-status-success-foreground">
+                              <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                              Avatar padrão
+                            </div>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="secondary"
+                              className="w-full cursor-pointer"
+                              onClick={() => makeDefault(look)}
+                              disabled={
+                                look.status !== "completed" || savingPreferenceId === look.id
+                              }
+                            >
+                              <CheckCircle2 className="mr-1.5 h-4 w-4" />
+                              Definir como padrão
+                            </Button>
+                          )}
                         </div>
                       </article>
                     ))}
@@ -351,6 +509,24 @@ function AvatarLibrary({
               );
             })}
           </div>
+        ) : looks.length ? (
+          <EmptyState
+            icon={<Search className="h-5 w-5" />}
+            title="Nenhum avatar encontrado"
+            description="Ajuste a busca ou o filtro para ver outros avatares."
+            action={
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setSearch("");
+                  setFilter("all");
+                }}
+              >
+                Limpar filtros
+              </Button>
+            }
+          />
         ) : (
           <EmptyState
             icon={<ScanFace className="h-5 w-5" />}
@@ -699,6 +875,9 @@ function AvatarStudio({
   styles: HeyGenStyle[];
   onCreateClick: () => void;
 }) {
+  const configuredDefaultAvatarId = useStore(
+    (state) => state.settings.heygen?.defaultAvatarId || null,
+  );
   const [mode, setMode] = useState<StudioMode>("single");
   const [avatarA, setAvatarA] = useState("");
   const [avatarB, setAvatarB] = useState("");
@@ -756,7 +935,11 @@ function AvatarStudio({
 
   useEffect(() => {
     if (avatars.length && !avatars.some((avatar) => avatar.id === avatarA)) {
-      setAvatarA(avatars[0].id);
+      setAvatarA(
+        avatars.some((avatar) => avatar.id === configuredDefaultAvatarId)
+          ? configuredDefaultAvatarId || avatars[0].id
+          : avatars[0].id,
+      );
     }
     if (
       avatars.length > 1 &&
@@ -764,7 +947,7 @@ function AvatarStudio({
     ) {
       setAvatarB(avatars.find((avatar) => avatar.id !== avatarA)?.id || "");
     }
-  }, [avatars, avatarA, avatarB]);
+  }, [avatars, avatarA, avatarB, configuredDefaultAvatarId]);
 
   useEffect(() => {
     if (styleId && !visibleStyles.some((style) => style.style_id === styleId)) {

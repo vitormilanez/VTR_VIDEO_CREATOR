@@ -98,16 +98,28 @@ def _slug(value: str) -> str:
 
 
 def _caption_python(root: Path) -> Path:
+    configured = os.getenv("CUTS_PYTHON", "").strip()
     candidates = [
-        Path(os.getenv("CUTS_PYTHON", "")),
+        *([Path(configured)] if configured else []),
         root / ".venv-cuts" / "bin" / "python",
+        root / ".venv" / "bin" / "python",
         root.parent / "Video Creator" / ".venv_caption" / "bin" / "python",
     ]
     for candidate in candidates:
-        if str(candidate) and candidate.is_file():
+        if not candidate.is_file():
+            continue
+        check = subprocess.run(
+            [str(candidate), "-c", "import faster_whisper"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if check.returncode == 0:
             return candidate
     raise RuntimeError(
-        "Ambiente de transcricao nao encontrado. Configure CUTS_PYTHON ou crie .venv-cuts."
+        "Transcricao indisponivel. Execute ./tools/setup_cuts_env.sh ou configure CUTS_PYTHON "
+        "com um Python que tenha faster-whisper instalado."
     )
 
 
@@ -398,8 +410,129 @@ def _bad_clip_start(text: str) -> bool:
             "pensando ",
             "na verdade ",
             "ou seja",
+            "onde ",
+            "para ",
+            "porque ",
+            "que ",
+            "de ",
+            "com ",
+            "na ",
+            "no ",
         )
     )
+
+
+def _starts_with_contextless_connector(text: str) -> bool:
+    return text.strip().lower().startswith(
+        (
+            "e ",
+            "mas ",
+            "porque ",
+            "por isso ",
+            "onde ",
+            "que ",
+            "para ",
+            "com ",
+            "de ",
+            "na ",
+            "no ",
+            "isso ",
+            "ele ",
+            "ela ",
+        )
+    )
+
+
+def _looks_like_new_sentence(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped) and stripped[:1].isupper() and not _starts_with_contextless_connector(stripped)
+
+
+def _semantic_start_indices(segments: list[dict[str, Any]]) -> set[int]:
+    starts = {0} if segments else set()
+    for index in range(1, len(segments)):
+        previous = str(segments[index - 1].get("text") or "").strip()
+        current = str(segments[index].get("text") or "").strip()
+        gap = float(segments[index].get("start") or 0) - float(segments[index - 1].get("end") or 0)
+        if not _starts_with_contextless_connector(current) and (
+            previous.endswith((".", "!", "?", "…"))
+            or (gap >= 0.18 and _looks_like_new_sentence(current))
+        ):
+            starts.add(index)
+    return starts
+
+
+def _semantic_end_indices(segments: list[dict[str, Any]]) -> set[int]:
+    ends: set[int] = set()
+    for index, segment in enumerate(segments):
+        text = str(segment.get("text") or "").strip()
+        if text.endswith((".", "!", "?", "…")):
+            ends.add(index)
+            continue
+        if index + 1 < len(segments) and _looks_like_new_sentence(
+            str(segments[index + 1].get("text") or "")
+        ):
+            ends.add(index)
+    if segments:
+        ends.add(len(segments) - 1)
+    return ends
+
+
+def _clip_text(segments: list[dict[str, Any]], start: float, end: float) -> str:
+    return " ".join(
+        str(segment.get("text") or "").strip()
+        for segment in segments
+        if float(segment.get("end") or 0) > start and float(segment.get("start") or 0) < end
+    ).strip()
+
+
+def _context_safe_bounds(
+    segments: list[dict[str, Any]],
+    *,
+    requested_start: float,
+    requested_end: float,
+    min_duration: int,
+    max_duration: int,
+    video_duration: float,
+    context_margin: float = 3.0,
+) -> tuple[float, float, str]:
+    """Adiciona margem contextual e ajusta a sugestão a frases completas."""
+    if not segments:
+        return requested_start, requested_end, ""
+
+    margin = max(2.0, min(5.0, context_margin))
+    contextual_start = max(0.0, requested_start - margin)
+    contextual_end = min(video_duration, requested_end + margin)
+    starts = _semantic_start_indices(segments)
+    ends = _semantic_end_indices(segments)
+    minimum_with_margin = max(1.0, float(min_duration) - 2.0)
+    maximum_with_margin = float(max_duration) + 5.0
+    pairs: list[tuple[float, int, int]] = []
+    for start_index in starts:
+        start = max(0.0, float(segments[start_index].get("start") or 0))
+        if start > requested_start + 0.25:
+            continue
+        for end_index in ends:
+            if end_index < start_index:
+                continue
+            end = min(video_duration, float(segments[end_index].get("end") or video_duration))
+            duration = end - start
+            if duration < minimum_with_margin or duration > maximum_with_margin:
+                continue
+            if end < requested_end - 0.25:
+                continue
+            boundary_distance = abs(start - contextual_start) + abs(end - contextual_end)
+            pairs.append((boundary_distance, start_index, end_index))
+
+    if pairs:
+        _, start_index, end_index = min(pairs, key=lambda item: item[0])
+    else:
+        start_index = min(starts)
+        compatible_ends = [index for index in ends if index >= start_index]
+        end_index = compatible_ends[-1] if compatible_ends else len(segments) - 1
+    start = max(0.0, float(segments[start_index].get("start") or 0))
+    end = min(video_duration, float(segments[end_index].get("end") or video_duration))
+    return round(start, 3), round(end, 3), _clip_text(segments, start, end)
 
 
 def _expand_auto_window(
@@ -634,7 +767,11 @@ Regras:
 - Priorize somente potencial viral: hook forte, tensão, clareza, opinião memorável, quebra de expectativa ou utilidade imediata.
 - Nao force cortes medianos apenas para preencher quantidade.
 - {"Escolha livremente a duracao de cada corte pelo inicio e fechamento natural da ideia." if auto_duration else "Mantenha os cortes dentro da faixa solicitada, priorizando frases completas."}
-- Use somente timestamps existentes e preserve frases completas.
+- Use exclusivamente inicio e fim de segmentos da transcricao. Nunca escolha um ponto no meio de uma fala.
+- Considere 2 a 5 segundos de margem contextual antes e depois da ideia principal, sem ultrapassar a duração máxima.
+- Um corte deve ser compreensivel isoladamente: comece no início de uma ideia, não em conectivos como "e", "mas", "porque", "onde", "para", "isso", "ele" ou "ela".
+- Termine somente depois de uma ideia completa; nunca em vírgula, conectivo ou explicação pela metade.
+- Se a ideia exigir uma frase anterior para fazer sentido, inclua essa frase ou descarte o corte.
 - Evite sobreposicao entre os cortes.
 - O trecho precisa comecar com contexto ou hook compreensivel.
 - Para saude, nao transforme a fala em prescricao ou promessa.
@@ -644,6 +781,7 @@ Regras:
 TRANSCRICAO:
 {timeline}"""
     cache_payload = {
+        "promptVersion": "context-safe-v3-margin",
         "timeline": timeline,
         "count": count,
         "minDuration": min_duration,
@@ -681,26 +819,64 @@ TRANSCRICAO:
     raw = "".join(getattr(block, "text", "") for block in message.content)
     clips = json.loads(raw)["clips"]
     duration = float(transcript.get("duration") or 0)
+    segments = [segment for segment in transcript.get("segments", []) if segment.get("text")]
     valid = []
     for clip in clips:
         start = max(0.0, float(clip["start"]))
         end = min(duration, float(clip["end"])) if duration else float(clip["end"])
         if end <= start:
             continue
-        if end - start > max_duration:
-            end = start + max_duration
-        if end - start < min_duration:
-            end = min(duration or start + min_duration, start + min_duration)
+        start, end, context_text = _context_safe_bounds(
+            segments,
+            requested_start=start,
+            requested_end=end,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            video_duration=duration,
+        )
+        if (
+            end <= start
+            or end - start < max(1.0, min_duration - 2.0)
+            or end - start > max_duration + 5.0
+        ):
+            continue
+        if _bad_clip_start(context_text):
+            continue
         clip["start"] = round(start, 3)
         clip["end"] = round(end, 3)
         clip["score"] = max(0, min(100, int(clip["score"])))
+        clip["hook"] = context_text[:180]
+        clip["summary"] = context_text[:320]
+        clip["caption"] = context_text[:500]
+        title_words = context_text.strip(" .,!?:;").split()[:8]
+        if title_words:
+            clip["title"] = " ".join(title_words) + ("..." if len(context_text.split()) > 8 else "")
+        clip["reason"] = "Ideia completa com começo e fechamento preservados."
         valid.append(clip)
+    non_overlapping: list[dict[str, Any]] = []
+    for candidate in sorted(valid, key=lambda item: -int(item["score"])):
+        candidate_duration = float(candidate["end"]) - float(candidate["start"])
+        overlaps_existing = False
+        for current in non_overlapping:
+            overlap = max(
+                0.0,
+                min(float(candidate["end"]), float(current["end"]))
+                - max(float(candidate["start"]), float(current["start"])),
+            )
+            shorter = min(
+                candidate_duration,
+                float(current["end"]) - float(current["start"]),
+            )
+            if overlap / max(shorter, 0.1) >= 0.35:
+                overlaps_existing = True
+                break
+        if not overlaps_existing:
+            non_overlapping.append(candidate)
+    valid = sorted(non_overlapping, key=lambda item: float(item["start"]))
     if count is None:
         valid = valid[:8]
     elif len(valid) >= count:
         valid = valid[:count]
-    else:
-        raise RuntimeError("A analise nao retornou a quantidade esperada de cortes validos.")
     if record_usage:
         record_usage("cuts.suggest", model, message)
     if cache_put:

@@ -28,6 +28,7 @@ from dateutil import parser as date_parser
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from integrations.portuguese_br import apply_portuguese_br_accents
+from integrations.google_news import resolve_google_news_url
 
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
@@ -255,7 +256,7 @@ def fetch_google_news(
             return []
         for entry in feed.entries[:per_query]:
             title = entry.get("title", "").strip()
-            link = entry.get("link", "").strip()
+            link = resolve_google_news_url(entry.get("link", "").strip())
             summary = entry.get("summary", "")
             text = f"{title} {summary}"
             terms = found_terms(text, keywords)

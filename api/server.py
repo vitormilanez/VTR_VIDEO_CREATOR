@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import shutil
 import sqlite3
 import subprocess
@@ -25,6 +27,7 @@ import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote_plus, urlparse
@@ -38,6 +41,7 @@ from api.cut_service import cancel_cut_job as cancel_cut_worker
 from api.cut_service import prepare_cut_job, process_cut_project
 from api.job_store import JobStore
 from integrations.heygen_client import load_dotenv
+from integrations.google_news import resolve_google_news_url
 from integrations.portuguese_br import prepare_script_for_heygen_voice
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -374,6 +378,18 @@ def _script_text(script: dict[str, Any]) -> str:
     return "\n\n".join(str(part).strip() for part in parts if str(part or "").strip())
 
 
+def _strip_video_outros(text: str, selected_outro: str = "") -> str:
+    body = text
+    for candidate in {
+        selected_outro.strip(),
+        MANDATORY_VIDEO_OUTRO,
+        "Veja o contexto no perfil.",
+    }:
+        if candidate:
+            body = re.sub(rf"\s*{re.escape(candidate)}\s*", " ", body, flags=re.I)
+    return re.sub(r"[ \t]+", " ", body).strip()
+
+
 def _video_prompt(
     script: dict[str, Any],
     *,
@@ -385,11 +401,24 @@ def _video_prompt(
     outro_text: str = MANDATORY_VIDEO_OUTRO,
 ) -> str:
     texto = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
-    selected_outro = re.sub(r"\s+", " ", outro_text).strip() or MANDATORY_VIDEO_OUTRO
+    omit_outro = duration_seconds == 10
+    selected_outro = "" if omit_outro else re.sub(r"\s+", " ", outro_text).strip() or MANDATORY_VIDEO_OUTRO
+    if omit_outro:
+        texto = _strip_video_outros(texto, outro_text)
     if optimize_pronunciation:
         texto = prepare_script_for_heygen_voice(texto)
-    if selected_outro.lower() not in texto.lower():
+    if selected_outro and selected_outro.lower() not in texto.lower():
         texto = f"{texto.rstrip()}\n{selected_outro}"
+
+    ending_direction = (
+        "Start speaking immediately and end on the hook's strongest point. Do not add a closing phrase, "
+        "spoken call to action, greeting, intro sequence, or outro sequence."
+        if omit_outro
+        else (
+            "End the spoken narration exactly once with: "
+            f'"{selected_outro}" This must be the final sentence.'
+        )
+    )
 
     speech_directions = {
         "natural": (
@@ -405,24 +434,53 @@ def _video_prompt(
             "every essential message and medical caution."
         ),
     }
+    opening_direction = (
+        "Create a portrait 9:16 single-take talking-head clip in Brazilian Portuguese."
+        if omit_outro
+        else "Create a portrait educational video in Brazilian Portuguese for social media."
+    )
+    presenter_direction = (
+        "Keep the selected presenter centered and visible for the entire clip in one continuous locked-camera shot."
+        if omit_outro
+        else "The selected presenter explains one health topic with a clear, calm and non-prescriptive tone."
+    )
+    script_direction = (
+        "Speak ONLY the supplied Portuguese script, verbatim. Do not expand, explain, paraphrase, summarize, "
+        "or add any words."
+        if omit_outro
+        else "Preserve the supplied script's facts and medical meaning."
+    )
+    visual_direction = (
+        "Do not create multiple scenes, a visual narrative, music, B-roll, A-roll overlays, motion graphics, "
+        "stock media, AI-generated media, transitions, cutaways, title cards, or a visual intro/outro. "
+        "Use only the selected presenter. Preserve the selected avatar's existing background exactly as-is. "
+        "Do not generate, select, replace, extend, or restyle the background. This project has exactly one A-roll scene."
+        if omit_outro
+        else (
+            "Use minimal, clean styled visuals. Blue, black, and white as main colors. "
+            "Leverage motion graphics as B-rolls and A-roll overlays."
+        )
+    )
     return "\n\n".join(
         [
-            "Create a portrait educational video in Brazilian Portuguese for social media.",
-            "The selected presenter explains one health topic with a clear, calm and non-prescriptive tone.",
+            opening_direction,
+            presenter_direction,
             "Do not mention medication doses, promise outcomes, or make sensational claims.",
             f"Target duration: approximately {duration_seconds} seconds. Do not pad with silence or pauses.",
-            speech_directions.get(speech_mode, speech_directions["natural"]),
+            (
+                "Deliver the supplied script verbatim with a natural cadence. Do not add transitions or filler words."
+                if omit_outro
+                else speech_directions.get(speech_mode, speech_directions["natural"])
+            ),
+            script_direction,
             (
                 "Add clean, readable Brazilian Portuguese captions synchronized with the narration."
                 if captions
                 else "Do not add burned-in captions or subtitles."
             ),
-            (
-                "End the spoken narration exactly once with: "
-                f'"{selected_outro}" This must be the final sentence.'
-            ),
+            ending_direction,
             f"VOICE-OPTIMIZED SCRIPT (Portuguese):\n{texto}",
-            "Use minimal, clean styled visuals. Blue, black, and white as main colors. Leverage motion graphics as B-rolls and A-roll overlays. Include an intro sequence and an outro with a gentle call to action.",
+            visual_direction,
         ]
     )
 
@@ -720,6 +778,7 @@ DEFAULT_SETTINGS = {
     },
     # Integracoes reais existem no backend, mas so ligar quando testadas.
     "integracoes": {"heygen": False, "meta": False, "googleSheets": True},
+    "heygen": {"defaultAvatarId": None, "favoriteAvatarIds": []},
 }
 
 
@@ -776,11 +835,17 @@ class IntegrationsSettingsIn(BaseModel):
     googleSheets: bool = True
 
 
+class HeyGenSettingsIn(BaseModel):
+    defaultAvatarId: str | None = Field(default=None, max_length=120)
+    favoriteAvatarIds: list[str] = Field(default_factory=list, max_length=100)
+
+
 class AppSettingsIn(BaseModel):
     temasPrioritarios: list[str] = Field(default_factory=list, max_length=80)
     palavrasProibidas: list[str] = Field(default_factory=list, max_length=120)
     radar: RadarSettingsIn = Field(default_factory=RadarSettingsIn)
     integracoes: IntegrationsSettingsIn = Field(default_factory=IntegrationsSettingsIn)
+    heygen: HeyGenSettingsIn = Field(default_factory=HeyGenSettingsIn)
 
 
 def _clean_string_list(values: list[str], *, limit: int = 80) -> list[str]:
@@ -832,6 +897,15 @@ def _merge_settings(raw: dict[str, Any] | None = None) -> dict[str, Any]:
         "meta": bool(integrations.get("meta", settings["integracoes"]["meta"])),
         "googleSheets": bool(
             integrations.get("googleSheets", settings["integracoes"]["googleSheets"])
+        ),
+    }
+    heygen = raw.get("heygen") if isinstance(raw.get("heygen"), dict) else {}
+    default_avatar_id = str(heygen.get("defaultAvatarId") or "").strip()
+    settings["heygen"] = {
+        "defaultAvatarId": default_avatar_id[:120] or None,
+        "favoriteAvatarIds": _clean_string_list(
+            heygen.get("favoriteAvatarIds") or [],
+            limit=100,
         ),
     }
     return settings
@@ -967,10 +1041,13 @@ def _private_avatar_library(
 
 
 def _heygen_default_avatar_id(avatars: list[dict[str, Any]]) -> str:
-    configured = os.getenv("HEYGEN_DEFAULT_AVATAR_ID")
     allowed_ids = {str(avatar.get("id")) for avatar in avatars}
-    if configured in allowed_ids:
-        return configured
+    saved_default = str(_load_settings().get("heygen", {}).get("defaultAvatarId") or "")
+    if saved_default in allowed_ids:
+        return saved_default
+    environment_default = os.getenv("HEYGEN_DEFAULT_AVATAR_ID")
+    if environment_default in allowed_ids:
+        return environment_default
     if not avatars:
         raise HTTPException(status_code=503, detail="Nenhum avatar privado pronto foi encontrado.")
     return str(avatars[0]["id"])
@@ -1442,7 +1519,7 @@ class VideoCreateIn(BaseModel):
     styleId: str | None = None
     forceNewVersion: bool = False
     narrationText: str | None = Field(default=None, max_length=6000)
-    outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, min_length=1, max_length=200)
+    outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
 
 
@@ -1450,6 +1527,7 @@ class NaturalizeScriptIn(BaseModel):
     text: str = Field(min_length=20, max_length=6000)
     medicalCautions: str = Field(default="", max_length=2000)
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+    outro: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
 
 
 _NATURAL_SCRIPT_SCHEMA = {
@@ -1459,7 +1537,15 @@ _NATURAL_SCRIPT_SCHEMA = {
     "required": ["text"],
 }
 
-_NATURAL_SCRIPT_SYSTEM = """Voce e um diretor de fala para videos curtos do Dr. Guilherme.
+def _natural_script_system(duration_seconds: int, outro: str = MANDATORY_VIDEO_OUTRO) -> str:
+    minimum_words, maximum_words = _duration_word_limits(duration_seconds)
+    selected_outro = re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
+    ending_rule = (
+        "- Para 10 segundos, entregue entre 18 e 24 palavras e termine no impacto, sem frase final ou CTA falado."
+        if duration_seconds == 10
+        else f'- Termine exatamente com: "{selected_outro}"'
+    )
+    return f"""Voce e um diretor de fala para videos curtos do Dr. Guilherme.
 Transforme o texto em portugues brasileiro falado, espontaneo, humano e facil de entender.
 
 Regras obrigatorias:
@@ -1469,8 +1555,71 @@ Regras obrigatorias:
 - Evite linguagem de artigo, listas, titulos, jargao e repeticoes.
 - Nao use indicacoes de cena, parenteses, emojis ou marcacoes de pausa.
 - Mantenha um tom acolhedor, seguro e profissional.
-- Termine exatamente com: "Me siga para mais dicas, e obrigado."
+- O texto final completo deve ter entre {minimum_words} e {maximum_words} palavras. Conte todas as palavras, incluindo o encerramento.
+- Respeite rigorosamente a duracao solicitada; corte explicacoes secundarias antes de responder.
+{ending_rule}
 - Responda somente no JSON solicitado."""
+
+
+def _fit_ten_second_text(text: str) -> str:
+    """Reduz uma fala a um hook coerente de 18–24 palavras, sem encerramento."""
+    clean = _strip_video_outros(text)
+    sentences = re.findall(r"[^.!?…]+[.!?…]*", clean)
+    selected: list[str] = []
+    count = 0
+    for sentence in sentences:
+        words = sentence.strip().split()
+        if not words:
+            continue
+        remaining = 24 - count
+        if len(words) <= remaining:
+            selected.append(sentence.strip())
+            count += len(words)
+            if count >= 18:
+                break
+        elif remaining > 0:
+            selected.append(" ".join(words[:remaining]).rstrip(" ,:;") + "…")
+            break
+    result = " ".join(selected).strip()
+    return result or " ".join(clean.split()[:24]).strip()
+
+
+def _duration_word_limits(duration_seconds: int) -> tuple[int, int]:
+    return {
+        10: (18, 24),
+        15: (25, 36),
+        30: (55, 72),
+        45: (85, 108),
+        60: (115, 144),
+    }.get(duration_seconds, (85, 108))
+
+
+def _fit_text_to_duration(text: str, duration_seconds: int, outro: str) -> str:
+    if duration_seconds == 10:
+        return _fit_ten_second_text(text)
+    selected_outro = re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
+    _minimum_words, maximum_words = _duration_word_limits(duration_seconds)
+    outro_words = len(selected_outro.split())
+    body_limit = max(1, maximum_words - outro_words)
+    clean = _strip_video_outros(text, selected_outro)
+    sentences = re.findall(r"[^.!?…]+[.!?…]*", clean)
+    selected: list[str] = []
+    count = 0
+    for sentence in sentences:
+        words = sentence.strip().split()
+        if not words:
+            continue
+        remaining = body_limit - count
+        if remaining <= 0:
+            break
+        if len(words) <= remaining:
+            selected.append(sentence.strip())
+            count += len(words)
+        else:
+            selected.append(" ".join(words[:remaining]).rstrip(" ,:;") + "…")
+            break
+    body = " ".join(selected).strip() or " ".join(clean.split()[:body_limit]).strip()
+    return f"{body.rstrip()} {selected_outro}".strip()
 
 
 _SCRIPT_GENERATION_SCHEMA = {
@@ -1499,10 +1648,10 @@ _SCRIPT_GENERATION_SCHEMA = {
 }
 
 
-SCRIPT_GENERATION_PROMPT_VERSION = "2026-07-31-v2"
+SCRIPT_GENERATION_PROMPT_VERSION = "2026-08-03-v3-duration-enforced"
 
 
-def _script_generation_system(tone: str) -> str:
+def _script_generation_system(tone: str, duration_seconds: int) -> str:
     """Sistema de prompt para gerar roteiros com tom editorial especificado."""
     tone_guide = {
         "positivo": """
@@ -1525,6 +1674,11 @@ TOM APREENSIVO: Cria tensao e atencao via riscos reais.
 - Proibido: alarmismo, diagnóstico, vergonha, urgencia falsa, risco inventado.
 - Riscos devem estar explicitamente na fonte (artigo, analise, contexto).""",
     }
+    ending_rule = (
+        "- Para 10 segundos: textoFalado entre 18 e 24 palavras, sem frase final, CTA falado ou despedida."
+        if duration_seconds == 10
+        else "- Termine com a frase final fornecida no pedido. Nao use outro encerramento padrao."
+    )
     return f"""Voce e um roteirista editorial para videos curtos do Dr. Guilherme.
 Crie um roteiro estruturado e um texto falado completo a partir da ideia e analise fornecidas.
 
@@ -1539,7 +1693,7 @@ REGRAS OBRIGATORIAS PARA TODO TOM:
 - Quando houver dado numerico, trate como "estudos sugerem/associam", nunca como verdade absoluta.
 - Respeite a observacaoCompliance da ideia.
 - O texto falado deve ser portugues brasileiro falado, espontaneo, humano, com frases curtas.
-- Termine com a frase final fornecida no pedido. Nao use outro encerramento padrao.
+{ending_rule}
 - Responda somente no JSON solicitado."""
 
 
@@ -1551,7 +1705,7 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
             status_code=503,
             detail="Defina ANTHROPIC_API_KEY no arquivo .env para naturalizar com IA.",
         )
-    cache_payload = payload.model_dump()
+    cache_payload = {"promptVersion": "2026-08-03-v2-duration", **payload.model_dump()}
     cached = _ai_cache_get("scripts.naturalize", cache_payload)
     if cached:
         return cached
@@ -1568,7 +1722,7 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
         message = client.messages.create(
             model=model,
             max_tokens=1200,
-            system=_NATURAL_SCRIPT_SYSTEM,
+            system=_natural_script_system(payload.durationSeconds, payload.outro),
             output_config={"format": {"type": "json_schema", "schema": _NATURAL_SCRIPT_SCHEMA}},
             messages=[{"role": "user", "content": source}],
         )
@@ -1586,13 +1740,11 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
     except (json.JSONDecodeError, KeyError, TypeError):
         raise HTTPException(status_code=502, detail="A IA nao retornou um texto valido.")
 
-    natural_text = re.sub(
-        re.escape(MANDATORY_VIDEO_OUTRO),
-        "",
+    natural_text = _fit_text_to_duration(
         natural_text,
-        flags=re.IGNORECASE,
-    ).strip()
-    natural_text = f"{natural_text.rstrip(' .')}. {MANDATORY_VIDEO_OUTRO}"
+        payload.durationSeconds,
+        payload.outro,
+    )
     response = {"ok": True, "text": natural_text}
     _record_anthropic_usage("scripts.naturalize", model, message)
     _ai_cache_put("scripts.naturalize", cache_payload, response)
@@ -1630,7 +1782,7 @@ class GenerateScriptIn(BaseModel):
     articleAnalysis: ArticleAnalysisForScriptIn | None = None
     editorialTone: Literal["positivo", "neutro", "apreensivo"] = "neutro"
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
-    outro: str = Field(default=MANDATORY_VIDEO_OUTRO, min_length=1, max_length=200)
+    outro: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
 
 
 def _script_risk_for_idea(idea: IdeaForScriptIn) -> str:
@@ -1679,28 +1831,30 @@ def _script_generation_prompt(payload: GenerateScriptIn) -> str:
             lines.append(f"Pode falar: {'; '.join(analysis.podeFalar)}")
         if analysis.naoPodeFalar:
             lines.append(f"Nao pode falar: {'; '.join(analysis.naoPodeFalar)}")
-    word_range = {
-        10: "20 a 30",
-        15: "30 a 40",
-        30: "60 a 80",
-        45: "90 a 115",
-        60: "120 a 150",
-    }[payload.durationSeconds]
+    minimum_words, maximum_words = _duration_word_limits(payload.durationSeconds)
+    word_range = f"{minimum_words} a {maximum_words}"
     lines.append(f"\nDURACAO ALVO: {payload.durationSeconds} segundos ({word_range} palavras)")
-    lines.append(f"FRASE FINAL OBRIGATORIA (ultima frase do texto falado): {payload.outro}")
+    if payload.durationSeconds == 10:
+        lines.append("SEM FRASE FINAL: termine diretamente no impacto do hook, sem CTA falado ou despedida.")
+        ending_direction = "terminando diretamente no impacto, sem frase final"
+    else:
+        lines.append(f"FRASE FINAL OBRIGATORIA (ultima frase do texto falado): {payload.outro}")
+        ending_direction = "terminando com a frase final obrigatoria"
     lines.append(
         "\nGere titulo, hook, dorConflito, explicacaoSimples, virada, cta, cuidadosMedicos "
-        "e o textoFalado completo (fala unica, pronta para o avatar, terminando com a frase final obrigatoria)."
+        f"e o textoFalado completo (fala unica, pronta para o avatar, {ending_direction})."
     )
     return "\n".join(lines)
 
 
-def _normalize_generated_outro(text: str, outro: str) -> str:
+def _normalize_generated_outro(text: str, outro: str, *, omit_outro: bool = False) -> str:
     selected = re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
     body = text.strip()
     for candidate in {selected, MANDATORY_VIDEO_OUTRO}:
         body = re.sub(rf"\s*{re.escape(candidate)}\s*", " ", body, flags=re.I)
     body = re.sub(r"[ \t]+", " ", body).strip().rstrip(" .!?…")
+    if omit_outro:
+        return f"{body}." if body else ""
     return f"{body}. {selected}" if body else selected
 
 
@@ -1740,7 +1894,7 @@ def _manual_script_generation(payload: GenerateScriptIn) -> dict[str, Any]:
         for part in [hook, dor_conflito, explicacao, tone_turn, cta]
         if part and part.strip()
     )
-    texto_falado = _normalize_generated_outro(texto_falado, payload.outro)
+    texto_falado = _fit_text_to_duration(texto_falado, payload.durationSeconds, payload.outro)
 
     return {
         "titulo": titulo,
@@ -1782,7 +1936,7 @@ def generate_script(payload: GenerateScriptIn) -> dict:
         message = client.messages.create(
             model=model,
             max_tokens=1400,
-            system=_script_generation_system(payload.editorialTone),
+            system=_script_generation_system(payload.editorialTone, payload.durationSeconds),
             output_config={"format": {"type": "json_schema", "schema": _SCRIPT_GENERATION_SCHEMA}},
             messages=[{"role": "user", "content": prompt}],
         )
@@ -1795,9 +1949,14 @@ def generate_script(payload: GenerateScriptIn) -> dict:
         script = _manual_script_generation(payload)
         return {"ok": True, "provider": "fallback", "script": script}
 
-    script["textoFalado"] = _normalize_generated_outro(
-        str(script.get("textoFalado") or ""), payload.outro
+    raw_spoken_text = str(script.get("textoFalado") or "")
+    script["textoFalado"] = _fit_text_to_duration(
+        raw_spoken_text,
+        payload.durationSeconds,
+        payload.outro,
     )
+    if payload.durationSeconds == 10:
+        script["cta"] = ""
 
     response = {"ok": True, "provider": "claude", "script": script}
     _record_anthropic_usage("scripts.generate", model, message)
@@ -2003,7 +2162,7 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
         "--orientation",
         payload.orientation,
     ]
-    if payload.styleId:
+    if payload.styleId and payload.durationSeconds != 10:
         args.extend(["--style-id", payload.styleId])
     job["productionSettings"]["avatarId"] = avatar_id
     job["submissionState"] = "submitting"
@@ -2827,6 +2986,25 @@ class ExpandIdeasIn(BaseModel):
     quantity: int = Field(default=3, ge=1, le=5)
     familia: Literal["medicamento", "comportamento", "metabolismo", "obesidade", "educativo"] = "educativo"
     prioridade: Literal["alta", "media", "baixa"] = "media"
+    sourceUrl: str | None = Field(default=None, max_length=1000)
+
+
+class CaptureHooksIn(BaseModel):
+    trendId: str = Field(min_length=1, max_length=200)
+    titulo: str = Field(min_length=3, max_length=500)
+    subtema: str | None = Field(default=None, max_length=500)
+    sinal: str | None = Field(default=None, max_length=2000)
+    dorPublico: str | None = Field(default=None, max_length=1000)
+    notas: str | None = Field(default=None, max_length=2000)
+    familia: Literal["medicamento", "comportamento", "metabolismo", "obesidade", "educativo"] = "educativo"
+    prioridade: Literal["alta", "media", "baixa"] = "media"
+    sourceUrl: str | None = Field(default=None, max_length=1000)
+    durationSeconds: Literal[10, 15] = 10
+
+
+class TrendSummaryIn(BaseModel):
+    title: str = Field(min_length=3, max_length=500)
+    sourceUrl: str = Field(min_length=10, max_length=1000)
 
 
 class ArticleIdeasIn(BaseModel):
@@ -2858,7 +3036,7 @@ class ScriptIn(BaseModel):
     status: str = "aguardando_validacao"
     editorialTone: Literal["positivo", "neutro", "apreensivo"] | None = None
     textoFalado: str = ""
-    outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, min_length=1, max_length=200)
+    outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
 
 
 class CalendarIn(BaseModel):
@@ -3044,6 +3222,203 @@ _EXPAND_IDEAS_SCHEMA = {
     "required": ["ideas"],
 }
 
+
+_CAPTURE_HOOKS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "analysis": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "capturePotential": {"type": "integer"},
+                "audienceReflex": {"type": "string"},
+                "recommendedAngle": {"type": "string"},
+                "riskNotes": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["capturePotential", "audienceReflex", "recommendedAngle", "riskNotes"],
+        },
+        "variants": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "strategy": {"type": "string"},
+                    "title": {"type": "string"},
+                    "hook": {"type": "string"},
+                    "turn": {"type": "string"},
+                    "spokenText": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "stopScore": {"type": "integer"},
+                    "profileScore": {"type": "integer"},
+                    "complianceNotes": {"type": "string"},
+                },
+                "required": [
+                    "strategy",
+                    "title",
+                    "hook",
+                    "turn",
+                    "spokenText",
+                    "rationale",
+                    "stopScore",
+                    "profileScore",
+                    "complianceNotes",
+                ],
+            },
+        },
+    },
+    "required": ["analysis", "variants"],
+}
+
+
+CAPTURE_HOOKS_PROMPT_VERSION = "2026-08-03-v3-duration"
+def _capture_topic(title: str) -> str:
+    words = re.sub(r"\s+", " ", title).strip().split()
+    return " ".join(words[:7]).rstrip(" ,:;.!?") or "essa tendência"
+
+
+def _capture_hooks_fallback(payload: CaptureHooksIn) -> dict[str, Any]:
+    topic = _capture_topic(payload.titulo)
+    rows = [
+        {
+            "strategy": "Quebra de padrão",
+            "title": "O detalhe ignorado",
+            "hook": f"Todo mundo está falando de {topic}.",
+            "turn": "O detalhe ignorado muda a conversa.",
+            "spokenText": f"Todo mundo está falando de {topic}. O detalhe que quase ninguém percebe muda completamente essa conversa.",
+            "rationale": "Interrompe o padrão e abre uma lacuna de informação sem revelar toda a mensagem.",
+            "stopScore": 8,
+            "profileScore": 8,
+            "complianceNotes": "Sem promessa, diagnóstico, prescrição ou transformação corporal.",
+        },
+        {
+            "strategy": "Lacuna de informação",
+            "title": "A parte que a manchete não mostra",
+            "hook": f"A manchete sobre {topic} parece simples.",
+            "turn": "A parte omitida é a mais importante.",
+            "spokenText": f"A manchete sobre {topic} parece simples. Mas ela não mostra justamente a parte mais importante dessa história.",
+            "rationale": "Cria curiosidade factual e convida a buscar o contexto completo no perfil.",
+            "stopScore": 8,
+            "profileScore": 9,
+            "complianceNotes": "Não transforma a tendência em certeza clínica ou recomendação individual.",
+        },
+        {
+            "strategy": "Contraste direto",
+            "title": "Antes de repetir isso",
+            "hook": f"Você ouviu falar de {topic}.",
+            "turn": "Existe uma diferença crucial.",
+            "spokenText": f"Você ouviu falar de {topic}. Mas existe uma diferença crucial que muda tudo agora.",
+            "rationale": "Usa contraste e comando curto para produzir orientação imediata no scroll.",
+            "stopScore": 9,
+            "profileScore": 8,
+            "complianceNotes": "Evita medo, urgência falsa, vergonha e linguagem prescritiva.",
+        },
+    ]
+    if payload.durationSeconds == 15:
+        for row in rows:
+            row["spokenText"] = f'{row["spokenText"]} {MANDATORY_VIDEO_OUTRO}'
+    return {
+        "analysis": {
+            "capturePotential": 8,
+            "audienceReflex": "Interromper o scroll por contraste e curiosidade, antes de entregar uma explicação profunda.",
+            "recommendedAngle": "Abrir uma lacuna factual e direcionar a pessoa ao perfil para buscar contexto.",
+            "riskNotes": ["Não prometer resultado.", "Não usar antes e depois.", "Não prescrever ou diagnosticar."],
+        },
+        "variants": rows,
+    }
+
+
+def _normalize_capture_hooks(payload: CaptureHooksIn, raw: Any) -> dict[str, Any]:
+    fallback = _capture_hooks_fallback(payload)
+    if not isinstance(raw, dict):
+        raw = fallback
+    raw_analysis = raw.get("analysis") if isinstance(raw.get("analysis"), dict) else {}
+    try:
+        capture_potential = max(1, min(10, int(raw_analysis.get("capturePotential") or 1)))
+    except (TypeError, ValueError):
+        capture_potential = fallback["analysis"]["capturePotential"]
+    analysis = {
+        "capturePotential": capture_potential,
+        "audienceReflex": str(raw_analysis.get("audienceReflex") or fallback["analysis"]["audienceReflex"]).strip()[:600],
+        "recommendedAngle": str(raw_analysis.get("recommendedAngle") or fallback["analysis"]["recommendedAngle"]).strip()[:600],
+        "riskNotes": [str(item).strip()[:300] for item in raw_analysis.get("riskNotes", [])[:5] if str(item).strip()]
+        or fallback["analysis"]["riskNotes"],
+    }
+    raw_variants = raw.get("variants") if isinstance(raw.get("variants"), list) else []
+    variants: list[dict[str, Any]] = []
+    for index in range(3):
+        base = fallback["variants"][index]
+        item = raw_variants[index] if index < len(raw_variants) and isinstance(raw_variants[index], dict) else {}
+        spoken_text = re.sub(r"\s+", " ", str(item.get("spokenText") or "")).strip()
+        if payload.durationSeconds == 10:
+            spoken_text = re.sub(
+                r"\s*(?:veja|acesse|confira|siga|me\s+siga)\b.{0,80}$",
+                "",
+                spoken_text,
+                flags=re.I,
+            ).strip()
+        else:
+            spoken_text = _normalize_generated_outro(spoken_text, MANDATORY_VIDEO_OUTRO)
+        spoken_text = spoken_text if spoken_text else base["spokenText"]
+        word_count = len(spoken_text.split())
+        minimum_words, maximum_words = ((18, 24) if payload.durationSeconds == 10 else (25, 36))
+        if word_count < minimum_words or word_count > maximum_words:
+            spoken_text = base["spokenText"]
+
+        def score(name: str) -> int:
+            try:
+                return max(1, min(10, int(item.get(name) or base[name])))
+            except (TypeError, ValueError):
+                return int(base[name])
+
+        variants.append(
+            {
+                "variant": index + 1,
+                "strategy": str(item.get("strategy") or base["strategy"]).strip()[:100],
+                "title": str(item.get("title") or base["title"]).strip()[:160],
+                "hook": str(item.get("hook") or base["hook"]).strip()[:400],
+                "turn": str(item.get("turn") or base["turn"]).strip()[:400],
+                "spokenText": spoken_text,
+                "wordCount": len(spoken_text.split()),
+                "rationale": str(item.get("rationale") or base["rationale"]).strip()[:600],
+                "stopScore": score("stopScore"),
+                "profileScore": score("profileScore"),
+                "complianceNotes": str(item.get("complianceNotes") or base["complianceNotes"]).strip()[:600],
+            }
+        )
+    return {"analysis": analysis, "variants": variants}
+
+
+def _capture_hooks_system(duration_seconds: int) -> str:
+    duration_rule = (
+        "Cada spokenText deve ter entre 18 e 24 palavras. Videos de 10 segundos nao usam frase final ou CTA falado."
+        if duration_seconds == 10
+        else f'Cada spokenText deve ter entre 25 e 36 palavras e terminar exatamente com: "{MANDATORY_VIDEO_OUTRO}"'
+    )
+    return f"""Voce e um estrategista brasileiro de aquisicao para videos verticais.
+Avalie uma tendencia e crie EXATAMENTE 3 roteiros independentes de captura, cada um com cerca de {duration_seconds} segundos.
+
+Objetivo:
+- interromper o scroll em menos de meio segundo;
+- gerar surpresa ou curiosidade factual;
+- levar a pessoa ao perfil, onde ela encontrara o conteudo aprofundado;
+- testar tres hipoteses de gancho, nao resumir uma mensagem longa.
+
+Regras obrigatorias:
+- Escreva em portugues brasileiro, direto e natural.
+- {duration_rule}
+- As tres estrategias precisam ser claramente diferentes: quebra de padrao, lacuna de informacao e contraste/pergunta.
+- Comece pelo impacto. Nao use saudacao, apresentacao ou contextualizacao lenta.
+- Baseie afirmacoes na tendencia e na fonte fornecida. Se um fato nao estiver sustentado, nao invente.
+- Nao entregue toda a explicacao; abra uma lacuna honesta para o perfil.
+- Nao use promessa de resultado, diagnostico, prescricao, dose, medo falso, body shaming ou transformacao corporal de antes/depois.
+- Avalie potencial de captura, reflexo esperado, melhor angulo, riscos, poder de parada e chance de visita ao perfil.
+- Responda somente no JSON solicitado.
+"""
+
 _EXPAND_IDEAS_SYSTEM = """Voce e estrategista editorial de videos curtos para um medico brasileiro.
 Transforme uma ideia bruta em ideias melhores para Reels, TikTok e Shorts.
 
@@ -3054,6 +3429,11 @@ Regras obrigatorias:
 - Nao use cura, milagre, garantia ou sensacionalismo medico.
 - Nao incentive uso de medicamento sem avaliacao individual.
 - Crie titulos especificos, com dor clara, sem ficar generico.
+- Se houver CONTEUDO DA FONTE, cada ideia deve usar pelo menos dois fatos concretos dessa fonte
+  (nomes, numeros, indicacoes, mudancas regulatorias ou limites). Nao apenas repita a manchete.
+- Diferencie com precisao registro/aprovacao, indicacao autorizada, disponibilidade comercial e promessa de resultado.
+- O angulo deve entregar ao futuro roteirista contexto factual suficiente para explicar a noticia sem reabrir o link.
+- Nao substitua fatos por avisos genericos de compliance. Compliance e uma camada, nao o assunto do video.
 - Escreva hooks em fala natural brasileira.
 - Contextualize a dor do publico e o angulo do roteiro.
 - Extraia a tese central do briefing. Nao use frases como "perguntei se" ou pedacos de conversa como titulo.
@@ -3481,7 +3861,7 @@ def _manual_idea_fallback(payload: ExpandIdeasIn) -> list[dict[str, Any]]:
             "tipo": "Reel educativo contextualizado",
             "publicoDor": pain,
             "cta": "Salve para rever antes de transformar conteudo curto em decisao de saude.",
-            "linkOrigem": None,
+            "linkOrigem": payload.sourceUrl,
             "observacaoCompliance": compliance,
             "prioridade": payload.prioridade,
             "status": "novo",
@@ -3511,7 +3891,7 @@ def _idea_base(
         "tipo": tipo,
         "publicoDor": pain,
         "cta": cta,
-        "linkOrigem": None,
+        "linkOrigem": payload.sourceUrl,
         "observacaoCompliance": compliance,
         "prioridade": payload.prioridade,
         "status": "novo",
@@ -3601,6 +3981,173 @@ def _manual_medication_safety_ideas(
         ),
     ]
     return ideas[: payload.quantity]
+
+
+class _ArticleTextParser(HTMLParser):
+    """Extrai texto editorial sem depender de bibliotecas pesadas."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self._ignored = 0
+        self._capture = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "nav", "footer", "header", "aside", "form"}:
+            self._ignored += 1
+        if tag in {"article", "main", "p", "h1", "h2", "li"}:
+            self._capture += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "nav", "footer", "header", "aside", "form"}:
+            self._ignored = max(0, self._ignored - 1)
+        if tag in {"article", "main", "p", "h1", "h2", "li"}:
+            self._capture = max(0, self._capture - 1)
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._ignored and self._capture and data.strip():
+            self.parts.append(data.strip())
+
+
+def _validate_public_article_url(raw_url: str) -> str:
+    parsed = urlparse(raw_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Link da fonte invalido.")
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("Nao foi possivel localizar a fonte.") from exc
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if not ip.is_global:
+            raise ValueError("A fonte precisa ser um endereco publico.")
+    return raw_url.strip()
+
+
+def _fetch_article_context(source_url: str | None) -> str:
+    """Baixa somente texto útil da matéria, com limites de rede e de tokens."""
+    if not source_url:
+        return ""
+    try:
+        url = _validate_public_article_url(resolve_google_news_url(source_url))
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; VTRVideoCreator/1.0)"},
+            timeout=(4, 10),
+            stream=True,
+        )
+        response.raise_for_status()
+        _validate_public_article_url(response.url)
+        content_type = response.headers.get("content-type", "").lower()
+        if "html" not in content_type:
+            return ""
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_content(32_768):
+            total += len(chunk)
+            if total > 1_500_000:
+                break
+            chunks.append(chunk)
+        html = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+    except (requests.RequestException, ValueError):
+        return ""
+
+    parser = _ArticleTextParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return ""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw in " ".join(parser.parts).splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        key = _norm(line)
+        if len(line) < 35 or key in seen:
+            continue
+        seen.add(key)
+        lines.append(line)
+    return "\n".join(lines)[:12_000]
+
+
+_TREND_SUMMARY_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string"},
+        "keyPoints": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary", "keyPoints"],
+}
+
+
+def _trend_summary_fallback(title: str, article: str) -> dict[str, Any]:
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", article)
+        if len(sentence.strip()) >= 55
+        and "publicidade" not in _norm(sentence)
+        and "leia tambem" not in _norm(sentence)
+    ]
+    selected = sentences[:4]
+    return {
+        "summary": " ".join(selected[:2])[:700] or title,
+        "keyPoints": [sentence[:260] for sentence in selected[1:4]],
+    }
+
+
+@app.post("/api/trends/summarize")
+def summarize_trend_source(payload: TrendSummaryIn) -> dict:
+    """Resume a matéria sob demanda e reutiliza o resultado para a mesma URL."""
+    article = _fetch_article_context(payload.sourceUrl)
+    if not article:
+        raise HTTPException(status_code=422, detail="Nao foi possivel ler o conteudo da referencia.")
+    cache_payload = {
+        "title": payload.title,
+        "sourceUrl": payload.sourceUrl,
+        "articleHash": hashlib.sha256(article.encode("utf-8")).hexdigest(),
+    }
+    cached = _ai_cache_get("trends.summarize", cache_payload, max_age_seconds=604800)
+    if cached:
+        return cached
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return {"ok": True, "provider": "fallback", **_trend_summary_fallback(payload.title, article)}
+
+    import anthropic
+
+    try:
+        client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        message = client.messages.create(
+            model=model,
+            max_tokens=650,
+            system=(
+                "Resuma noticias de saude em portugues brasileiro claro. "
+                "O resumo deve explicar o fato principal, quem foi afetado e o que a manchete pode confundir. "
+                "Crie exatamente tres pontos-chave factuais. Nao prescreva, nao invente e nao transforme "
+                "registro regulatorio em promessa de eficacia, disponibilidade ou nova indicacao. "
+                "Responda somente no JSON solicitado."
+            ),
+            output_config={"format": {"type": "json_schema", "schema": _TREND_SUMMARY_SCHEMA}},
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"TITULO:\n{payload.title}\n\nCONTEUDO DA FONTE:\n{article[:9000]}",
+                }
+            ],
+        )
+        parsed = json.loads("".join(getattr(block, "text", "") for block in message.content))
+        response = {
+            "ok": True,
+            "provider": "claude",
+            "summary": str(parsed.get("summary") or "").strip()[:900],
+            "keyPoints": [str(point).strip()[:300] for point in parsed.get("keyPoints", [])[:3]],
+        }
+        _record_anthropic_usage("trends.summarize", model, message)
+        _ai_cache_put("trends.summarize", cache_payload, response)
+        return response
+    except Exception:
+        return {"ok": True, "provider": "fallback", **_trend_summary_fallback(payload.title, article)}
 
 
 def _research_context_for_seed(seed: str) -> str:
@@ -3744,7 +4291,7 @@ def _normalize_expanded_ideas(payload: ExpandIdeasIn, rows: Any) -> list[dict[st
                 "tipo": str(item.get("tipo") or "Reel educativo contextualizado").strip()[:120],
                 "publicoDor": str(item.get("publicoDor") or "").strip()[:500],
                 "cta": str(item.get("cta") or "Salve para rever com calma.").strip()[:300],
-                "linkOrigem": None,
+                "linkOrigem": payload.sourceUrl,
                 "observacaoCompliance": str(item.get("observacaoCompliance") or "Revisar linguagem antes de gravar.").strip()[:600],
                 "prioridade": priority,
                 "status": "novo",
@@ -3758,10 +4305,18 @@ def _normalize_expanded_ideas(payload: ExpandIdeasIn, rows: Any) -> list[dict[st
 def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
     """Expande uma ideia livre em opcoes editoriais prontas para virar roteiro."""
     research_context = _research_context_for_seed(payload.seed)
+    article_context = _fetch_article_context(payload.sourceUrl)
     if not os.getenv("ANTHROPIC_API_KEY"):
-        return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
+        ideas = _manual_idea_fallback(payload)
+        for idea in ideas:
+            idea["linkOrigem"] = payload.sourceUrl
+        return {"ok": True, "provider": "fallback", "ideas": ideas}
 
-    cache_payload = {**payload.model_dump(), "researchContext": research_context}
+    cache_payload = {
+        **payload.model_dump(),
+        "researchContext": research_context,
+        "articleHash": hashlib.sha256(article_context.encode("utf-8")).hexdigest() if article_context else "",
+    }
     cached = _ai_cache_get("ideas.expand", cache_payload)
     if cached:
         return cached
@@ -3773,8 +4328,11 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
         f"Quantidade: {payload.quantity}\n"
         f"Familia sugerida: {payload.familia}\n"
         f"Prioridade sugerida: {payload.prioridade}\n"
+        f"URL DA FONTE: {payload.sourceUrl or 'Nao informada'}\n"
+        f"CONTEUDO DA FONTE (use como base factual principal):\n{article_context or 'Conteudo indisponivel; use apenas o briefing e as fontes recentes.'}\n\n"
         f"FONTES RECENTES PARA CONTEXTUALIZAR, SE RELEVANTES:\n{research_context or 'Nenhuma fonte externa encontrada rapidamente.'}\n"
-        "Crie variacoes distintas, especificas e prontas para virar roteiro."
+        "Crie variacoes distintas, especificas e prontas para virar roteiro. "
+        "Antes de responder, confira se titulo, hook e angulo representam o fato central real da fonte."
     )
     try:
         client = anthropic.Anthropic()
@@ -3789,9 +4347,15 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
         raw_text = "".join(getattr(block, "text", "") for block in message.content)
         parsed = json.loads(raw_text)
     except anthropic.APIStatusError:
-        return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
+        ideas = _manual_idea_fallback(payload)
+        for idea in ideas:
+            idea["linkOrigem"] = payload.sourceUrl
+        return {"ok": True, "provider": "fallback", "ideas": ideas}
     except Exception:
-        return {"ok": True, "provider": "fallback", "ideas": _manual_idea_fallback(payload)}
+        ideas = _manual_idea_fallback(payload)
+        for idea in ideas:
+            idea["linkOrigem"] = payload.sourceUrl
+        return {"ok": True, "provider": "fallback", "ideas": ideas}
 
     response = {
         "ok": True,
@@ -3800,6 +4364,85 @@ def expand_manual_ideas(payload: ExpandIdeasIn) -> dict:
     }
     _record_anthropic_usage("ideas.expand", model, message)
     _ai_cache_put("ideas.expand", cache_payload, response)
+    return response
+
+
+@app.post("/api/trends/capture-hooks")
+def generate_capture_hooks(payload: CaptureHooksIn) -> dict:
+    """Avalia uma tendencia e cria tres roteiros curtos para testar captacao."""
+    article_context = _fetch_article_context(payload.sourceUrl)
+    seed = "\n".join(
+        value
+        for value in [payload.titulo, payload.subtema, payload.sinal, payload.dorPublico, payload.notas]
+        if value
+    )
+    research_context = _research_context_for_seed(seed)
+    cache_payload = {
+        "promptVersion": CAPTURE_HOOKS_PROMPT_VERSION,
+        **payload.model_dump(),
+        "researchContext": research_context,
+        "articleHash": hashlib.sha256(article_context.encode("utf-8")).hexdigest() if article_context else "",
+    }
+    cached = _ai_cache_get("trends.capture_hooks", cache_payload)
+    if cached:
+        return cached
+
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return {
+            "ok": True,
+            "provider": "fallback",
+            **_normalize_capture_hooks(payload, _capture_hooks_fallback(payload)),
+        }
+
+    import anthropic
+
+    prompt = (
+        f"TENDENCIA: {payload.titulo}\n"
+        f"SUBTEMA: {payload.subtema or 'Nao informado'}\n"
+        f"SINAL OBSERVADO: {payload.sinal or 'Nao informado'}\n"
+        f"DOR DO PUBLICO: {payload.dorPublico or 'Nao informada'}\n"
+        f"NOTAS: {payload.notas or 'Nenhuma'}\n"
+        f"FAMILIA EDITORIAL: {payload.familia}\n"
+        f"URL DA FONTE: {payload.sourceUrl or 'Nao informada'}\n\n"
+        "CONTEUDO DA FONTE (base factual principal):\n"
+        f"{article_context or 'Conteudo indisponivel; nao invente numeros ou conclusoes.'}\n\n"
+        "CONTEXTO RECENTE COMPLEMENTAR:\n"
+        f"{research_context or 'Nenhuma fonte complementar encontrada.'}\n\n"
+        "Crie tres testes de captura independentes. Eles devem provocar orientacao e curiosidade, "
+        "nao explicar toda a mensagem."
+    )
+    try:
+        client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        message = client.messages.create(
+            model=model,
+            max_tokens=1800,
+            system=_capture_hooks_system(payload.durationSeconds),
+            output_config={"format": {"type": "json_schema", "schema": _CAPTURE_HOOKS_SCHEMA}},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw_text = "".join(getattr(block, "text", "") for block in message.content)
+        parsed = json.loads(raw_text)
+    except anthropic.APIStatusError:
+        return {
+            "ok": True,
+            "provider": "fallback",
+            **_normalize_capture_hooks(payload, _capture_hooks_fallback(payload)),
+        }
+    except Exception:
+        return {
+            "ok": True,
+            "provider": "fallback",
+            **_normalize_capture_hooks(payload, _capture_hooks_fallback(payload)),
+        }
+
+    response = {
+        "ok": True,
+        "provider": "claude",
+        **_normalize_capture_hooks(payload, parsed),
+    }
+    _record_anthropic_usage("trends.capture_hooks", model, message)
+    _ai_cache_put("trends.capture_hooks", cache_payload, response)
     return response
 
 
@@ -3935,6 +4578,42 @@ def append_idea(payload: IdeaIn) -> dict:
     _append("ideias", row)
     raw = dict(zip(IDEA_HEADERS, row))
     _append_snapshot_row("ideias", raw)
+    return {"ok": True, "idea": map_ideas([raw])[0]}
+
+
+@app.put("/api/sheets/ideias/{item_id}")
+def update_idea(item_id: str, payload: IdeaIn) -> dict:
+    """Atualiza uma ideia completa, inclusive o contexto recuperado da fonte."""
+    from integrations.google_sheets_rest_client import GoogleSheetsRestClient
+
+    item_id = payload.id or item_id
+    row = [
+        payload.titulo,
+        payload.hook,
+        payload.angulo,
+        payload.tipo or "",
+        payload.publicoDor or "",
+        payload.cta,
+        _PRIORIDADE.get(payload.prioridade, "Média"),
+        _IDEIA_STATUS.get(payload.status, "Nova"),
+        payload.linkOrigem or "",
+        payload.observacaoCompliance,
+        item_id,
+        payload.trendId or "",
+        payload.criadoEm or _now(),
+    ]
+    try:
+        client = GoogleSheetsRestClient()
+        _ensure_tab_ids(client, "ideias")
+        values = client.get_values(TAB_RANGE["ideias"])
+        rownum = _sheet_row_number(values, item_id, "i")
+        client.update_values(f"'Ideias'!A{rownum}:M{rownum}", [row])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"falha ao atualizar ideia: {exc}")
+    raw = dict(zip(IDEA_HEADERS, row))
+    _update_snapshot_row("ideias", item_id, raw)
     return {"ok": True, "idea": map_ideas([raw])[0]}
 
 
@@ -4114,22 +4793,25 @@ def _narration_quality_issues(
     outro: str = MANDATORY_VIDEO_OUTRO,
 ) -> list[str]:
     normalized = re.sub(r"\s+", " ", text).strip()
-    selected_outro = re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
+    selected_outro = "" if duration_seconds == 10 else re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
     issues: list[str] = []
     for pattern, issue in _NARRATION_PLACEHOLDERS:
         if pattern.search(normalized):
             issues.append(issue)
 
-    outro_matches = re.findall(re.escape(selected_outro), normalized, flags=re.I)
-    if len(outro_matches) != 1:
-        issues.append("Encerramento padrao deve aparecer exatamente uma vez")
-    elif not normalized.lower().endswith(selected_outro.lower()):
-        issues.append("Encerramento escolhido precisa ser a ultima frase")
+    if selected_outro:
+        outro_matches = re.findall(re.escape(selected_outro), normalized, flags=re.I)
+        if len(outro_matches) != 1:
+            issues.append("Encerramento padrao deve aparecer exatamente uma vez")
+        elif not normalized.lower().endswith(selected_outro.lower()):
+            issues.append("Encerramento escolhido precisa ser a ultima frase")
 
     word_count = len([word for word in re.split(r"\s+", normalized) if word])
-    minimum_words = 18 if duration_seconds <= 15 else 35 if duration_seconds <= 30 else 50 if duration_seconds <= 45 else 65
+    minimum_words, maximum_words = _duration_word_limits(duration_seconds)
     if word_count < minimum_words:
         issues.append(f"Texto muito curto para {duration_seconds}s")
+    if word_count > maximum_words:
+        issues.append(f"Texto muito longo para {duration_seconds}s ({word_count} palavras; maximo {maximum_words})")
 
     return list(dict.fromkeys(issues))
 
@@ -4144,9 +4826,9 @@ def _validate_final_narration(
     text = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
     if not text:
         raise HTTPException(status_code=422, detail="O texto falado esta vazio.")
-    selected_outro = re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
-    final_text = text
-    if selected_outro.lower() not in final_text.lower():
+    selected_outro = "" if duration_seconds == 10 else re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
+    final_text = _strip_video_outros(text, outro) if duration_seconds == 10 else text
+    if selected_outro and selected_outro.lower() not in final_text.lower():
         final_text = f"{final_text.rstrip()} {selected_outro}"
     quality_issues = _narration_quality_issues(final_text, duration_seconds, selected_outro)
     if quality_issues:

@@ -1,7 +1,13 @@
 // Fluxo unico de geracao de roteiro com IA: o usuario escolhe o tom editorial
 // ANTES da chamada paga, entao geramos o texto falado uma unica vez (nunca
 // tres vezes por ideia, o que triplicaria o custo).
-import { appendIdea, appendScript, generateScript, type ArticleAnalysis } from "@/lib/api/local";
+import {
+  appendIdea,
+  appendScript,
+  generateCaptureHooks,
+  generateScript,
+  type ArticleAnalysis,
+} from "@/lib/api/local";
 import { genId } from "@/lib/store";
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
 import type { EditorialTone, Idea, Script } from "@/lib/mock-data";
@@ -36,6 +42,53 @@ export interface GenerateScriptResult {
   provider: "claude" | "fallback";
 }
 
+export async function generateAndPersistCaptureScripts(
+  options: Pick<GenerateScriptOptions, "idea" | "persistIdea"> & {
+    durationSeconds: 10 | 15;
+  },
+): Promise<{ idea: Idea; scripts: Script[]; provider: "claude" | "fallback" }> {
+  const persistedIdea = options.persistIdea ? await appendIdea(options.idea) : options.idea;
+  const result = await generateCaptureHooks({
+    durationSeconds: options.durationSeconds,
+    trendId: persistedIdea.trendId || persistedIdea.id,
+    titulo: persistedIdea.titulo,
+    subtema: persistedIdea.tipo,
+    sinal: persistedIdea.angulo,
+    dorPublico: persistedIdea.publicoDor,
+    notas: persistedIdea.observacaoCompliance,
+    familia: persistedIdea.familia,
+    prioridade: persistedIdea.prioridade,
+    sourceUrl: persistedIdea.linkOrigem || null,
+  });
+  const scripts: Script[] = [];
+  for (const variant of result.variants) {
+    const saved = await appendScript({
+      id: genId("s"),
+      ideaId: persistedIdea.id,
+      categoria: persistedIdea.familia,
+      tema: persistedIdea.titulo,
+      titulo: `Captura ${variant.variant}: ${variant.title}`,
+      hook: variant.hook,
+      dorConflito: "",
+      explicacaoSimples: "",
+      virada: variant.turn,
+      cta: options.durationSeconds === 10 ? "" : DEFAULT_OUTRO,
+      cuidadosMedicos: variant.complianceNotes,
+      risco: riskForIdea(persistedIdea),
+      prioridade: persistedIdea.prioridade,
+      formatoSugerido: `Hook de captura · ${options.durationSeconds} segundos`,
+      status: "aguardando_validacao",
+      criadoEm: new Date().toISOString(),
+      link: persistedIdea.linkOrigem || undefined,
+      editorialTone: "neutro",
+      textoFalado: variant.spokenText,
+      outroText: options.durationSeconds === 10 ? "" : DEFAULT_OUTRO,
+    });
+    scripts.push(saved);
+  }
+  return { idea: persistedIdea, scripts, provider: result.provider };
+}
+
 /**
  * Gera o roteiro + texto falado completo via IA (uma unica chamada paga) e
  * persiste ideia (se necessario) e roteiro no Sheets.
@@ -50,6 +103,7 @@ export async function generateAndPersistScript(
     durationSeconds = 45,
     outro = DEFAULT_OUTRO,
   } = options;
+  const effectiveOutro = durationSeconds === 10 ? "" : outro;
 
   const { provider, script: generated } = await generateScript({
     idea: {
@@ -67,7 +121,7 @@ export async function generateAndPersistScript(
     articleAnalysis,
     editorialTone,
     durationSeconds,
-    outro,
+    outro: effectiveOutro,
   });
 
   // A geracao e validada antes de qualquer escrita. Em uma repeticao com o
@@ -94,7 +148,7 @@ export async function generateAndPersistScript(
     link: persistedIdea.linkOrigem || undefined,
     editorialTone,
     textoFalado: generated.textoFalado,
-    outroText: outro,
+    outroText: effectiveOutro,
   };
 
   const savedScript = await appendScript(script);

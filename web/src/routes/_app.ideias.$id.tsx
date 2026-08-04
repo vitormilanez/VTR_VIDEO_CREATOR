@@ -4,17 +4,21 @@ import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel } from "@/components/compliance-panel";
 import { ToneSelectDialog } from "@/components/tone-select-dialog";
-import { generateAndPersistScript } from "@/lib/script-generation";
+import { CaptureScriptChoices } from "@/components/capture-script-choices";
+import {
+  generateAndPersistCaptureScripts,
+  generateAndPersistScript,
+} from "@/lib/script-generation";
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
 import { useStore } from "@/lib/store";
-import { setSheetStatus } from "@/lib/api/local";
+import { expandIdeas, saveIdea, saveScript, setSheetStatus } from "@/lib/api/local";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Save, Sparkles } from "lucide-react";
-import type { EditorialTone, Idea } from "@/lib/mock-data";
+import { ArrowLeft, Loader2, RefreshCcw, Save, Sparkles } from "lucide-react";
+import type { EditorialTone, Idea, Script } from "@/lib/mock-data";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/ideias/$id")({
@@ -27,8 +31,12 @@ export const Route = createFileRoute("/_app/ideias/$id")({
 function IdeiaDetalhe() {
   const { id } = Route.useParams();
   const idea = useStore((s) => s.ideas.find((i) => i.id === id));
+  const sourceTrend = useStore((s) =>
+    s.trends.find((trend) => trend.id === s.ideas.find((item) => item.id === id)?.trendId),
+  );
   const updateIdea = useStore((s) => s.updateIdea);
   const addScript = useStore((s) => s.addScript);
+  const updateScript = useStore((s) => s.updateScript);
   const palavras = useStore((s) => s.settings.palavrasProibidas);
   const navigate = useNavigate();
 
@@ -38,6 +46,9 @@ function IdeiaDetalhe() {
   const [scriptDuration, setScriptDuration] = useState<10 | 15 | 30 | 45 | 60>(45);
   const [scriptOutro, setScriptOutro] = useState(DEFAULT_OUTRO);
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+  const [isRefreshingSource, setIsRefreshingSource] = useState(false);
+  const [captureChoices, setCaptureChoices] = useState<Script[]>([]);
+  const sourceUrl = draft?.linkOrigem || sourceTrend?.link;
 
   useEffect(() => {
     if (idea) setDraft(idea);
@@ -68,15 +79,66 @@ function IdeiaDetalhe() {
     setToneOpen(true);
   }
 
+  async function recontextualizarFonte() {
+    if (!sourceUrl || !draft || !idea) return;
+    const currentDraft = draft;
+    const currentIdea = idea;
+    setIsRefreshingSource(true);
+    try {
+      const [generated] = await expandIdeas({
+        seed: [currentDraft.titulo, currentDraft.hook, currentDraft.angulo]
+          .filter(Boolean)
+          .join("\n"),
+        quantity: 1,
+        familia: currentDraft.familia,
+        prioridade: currentDraft.prioridade,
+        sourceUrl,
+      });
+      if (!generated) throw new Error("A IA nao retornou contexto novo para esta fonte.");
+      const refreshed = await saveIdea({
+        ...currentDraft,
+        ...generated,
+        id: currentDraft.id,
+        trendId: currentDraft.trendId,
+        linkOrigem: sourceUrl,
+        criadoEm: currentDraft.criadoEm,
+      });
+      setDraft(refreshed);
+      updateIdea(currentIdea.id, refreshed);
+      toast.success("Ideia recontextualizada com os fatos da fonte.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel reler a fonte.");
+    } finally {
+      setIsRefreshingSource(false);
+    }
+  }
+
   async function confirmarTomEGerarRoteiro() {
     if (!idea || !draft) return;
     setIsGeneratingScript(true);
     try {
+      if (scriptDuration <= 15) {
+        const { scripts, provider } = await generateAndPersistCaptureScripts({
+          idea: draft,
+          persistIdea: false,
+          durationSeconds: scriptDuration as 10 | 15,
+        });
+        scripts.forEach(addScript);
+        updateIdea(idea.id, { status: "aprovado" });
+        setToneOpen(false);
+        setCaptureChoices(scripts);
+        toast[provider === "fallback" ? "warning" : "success"](
+          provider === "fallback"
+            ? "Claude indisponível. Três hooks locais foram salvos."
+            : `Claude gerou e salvou os 3 hooks de ${scriptDuration} segundos.`,
+        );
+        return;
+      }
       const { script, provider } = await generateAndPersistScript({
         idea: draft,
         editorialTone,
         durationSeconds: scriptDuration,
-        outro: scriptOutro.trim() || DEFAULT_OUTRO,
+        outro: scriptDuration === 10 ? "" : scriptOutro.trim() || DEFAULT_OUTRO,
         persistIdea: false,
       });
       addScript(script);
@@ -100,6 +162,22 @@ function IdeiaDetalhe() {
     }
   }
 
+  async function confirmarRoteirosDeCaptura(selected: Script[]) {
+    try {
+      const updated = await Promise.all(
+        selected.map((candidate) => saveScript({ ...candidate, status: "em_revisao" })),
+      );
+      updated.forEach((candidate) => updateScript(candidate.id, candidate));
+      setCaptureChoices([]);
+      toast.success(
+        `${updated.length} ${updated.length === 1 ? "roteiro selecionado" : "roteiros selecionados"} para produção.`,
+      );
+      navigate({ to: "/roteiros/$id", params: { id: updated[0].id } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Não foi possível salvar a seleção.");
+    }
+  }
+
   return (
     <AppShell
       title={idea.titulo}
@@ -120,6 +198,21 @@ function IdeiaDetalhe() {
           >
             <Save className="mr-1 h-4 w-4" /> Salvar
           </Button>
+          {sourceUrl ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => void recontextualizarFonte()}
+              disabled={isRefreshingSource}
+            >
+              {isRefreshingSource ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCcw className="mr-1 h-4 w-4" />
+              )}
+              {isRefreshingSource ? "Lendo fonte" : "Recontextualizar"}
+            </Button>
+          ) : null}
           <Button size="sm" onClick={abrirEscolhaDeTom}>
             <Sparkles className="mr-1 h-4 w-4" /> Gerar roteiro
           </Button>
@@ -195,6 +288,11 @@ function IdeiaDetalhe() {
         onOutroChange={setScriptOutro}
         isGenerating={isGeneratingScript}
         onConfirm={() => void confirmarTomEGerarRoteiro()}
+      />
+      <CaptureScriptChoices
+        scripts={captureChoices}
+        onOpenChange={(open) => !open && setCaptureChoices([])}
+        onConfirm={confirmarRoteirosDeCaptura}
       />
     </AppShell>
   );

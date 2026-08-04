@@ -96,6 +96,13 @@ function VideoDetalhe() {
               <RefreshCcw className="mr-1 h-4 w-4" /> Atualizar status
             </Button>
           </WithTooltip>
+          {script ? (
+            <Button size="sm" variant="secondary" asChild>
+              <Link to="/roteiros/$id" params={{ id: script.id }}>
+                <Film className="mr-1 h-4 w-4" /> Refazer vídeo
+              </Link>
+            </Button>
+          ) : null}
           {job.videoUrl ? (
             <Button size="sm" variant="secondary" asChild>
               <a href={videoDownloadUrl(job.id)}>
