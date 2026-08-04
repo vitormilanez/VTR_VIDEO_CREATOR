@@ -154,6 +154,10 @@ export interface AppSettings {
     meta: boolean;
     googleSheets: boolean;
   };
+  heygen: {
+    defaultAvatarId: string | null;
+    favoriteAvatarIds: string[];
+  };
 }
 
 // Configuracoes padrao (nao sao dados mock de dominio; sao defaults de app).
@@ -185,4 +189,5 @@ export const defaultSettings: AppSettings = {
     potencialMinimo: 1,
   },
   integracoes: { heygen: false, meta: false, googleSheets: true },
+  heygen: { defaultAvatarId: null, favoriteAvatarIds: [] },
 };

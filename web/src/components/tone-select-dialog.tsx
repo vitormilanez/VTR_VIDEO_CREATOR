@@ -68,7 +68,8 @@ export function ToneSelectDialog({
           <p className="text-sm text-muted-foreground">
             <span className="font-medium text-foreground">&ldquo;{ideaTitle}&rdquo;</span> — o tom
             define como a IA vai escrever o texto falado. Essa escolha acontece antes da geração
-            paga, para criar o roteiro em uma única chamada.
+            paga, em uma única chamada
+            {durationSeconds <= 15 ? " que cria três alternativas." : "."}
           </p>
         </DialogHeader>
 
@@ -101,7 +102,9 @@ export function ToneSelectDialog({
             <ToggleGroup
               type="single"
               value={String(durationSeconds)}
-              onValueChange={(value) => value && onDurationChange(Number(value) as 10 | 15 | 30 | 45 | 60)}
+              onValueChange={(value) =>
+                value && onDurationChange(Number(value) as 10 | 15 | 30 | 45 | 60)
+              }
               className="justify-start"
             >
               {DURATIONS.map((seconds) => (
@@ -112,27 +115,36 @@ export function ToneSelectDialog({
             </ToggleGroup>
           </div>
 
-          <div className="grid gap-2">
-            <Label className="text-xs">Frase final do vídeo</Label>
-            <Textarea
-              rows={2}
-              value={outro}
-              onChange={(event) => onOutroChange(event.target.value)}
-            />
-          </div>
+          {durationSeconds === 10 ? (
+            <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-muted-foreground">
+              Vídeos de 10 segundos terminam diretamente no impacto, sem frase final.
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              <Label className="text-xs">Frase final do vídeo</Label>
+              <Textarea
+                rows={2}
+                value={outro}
+                onChange={(event) => onOutroChange(event.target.value)}
+              />
+            </div>
+          )}
         </div>
 
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={isGenerating}>
             Cancelar
           </Button>
-          <Button onClick={onConfirm} disabled={isGenerating || !outro.trim()}>
+          <Button
+            onClick={onConfirm}
+            disabled={isGenerating || (durationSeconds !== 10 && !outro.trim())}
+          >
             {isGenerating ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             ) : (
               <Sparkles className="mr-2 h-4 w-4" />
             )}
-            Gerar um roteiro
+            {durationSeconds <= 15 ? "Gerar 3 roteiros" : "Gerar um roteiro"}
           </Button>
         </DialogFooter>
       </DialogContent>

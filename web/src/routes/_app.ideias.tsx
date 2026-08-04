@@ -9,19 +9,24 @@ import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import { ToneSelectDialog } from "@/components/tone-select-dialog";
+import { CaptureScriptChoices } from "@/components/capture-script-choices";
 import { evaluateIdeaQuality } from "@/lib/idea-quality";
-import { generateAndPersistScript } from "@/lib/script-generation";
+import {
+  generateAndPersistCaptureScripts,
+  generateAndPersistScript,
+} from "@/lib/script-generation";
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import {
   analyzeArticle,
   expandIdeas,
+  saveScript,
   setSheetStatus,
   type ArticleAnalysis,
   type ArticleIdeasResult,
 } from "@/lib/api/local";
-import type { EditorialTone, Idea, IdeaStatus, ThemeFamily } from "@/lib/mock-data";
+import type { EditorialTone, Idea, IdeaStatus, Script, ThemeFamily } from "@/lib/mock-data";
 import {
   Table,
   TableBody,
@@ -107,6 +112,7 @@ export function IdeiasPage() {
   const addIdea = useStore((s) => s.addIdea);
   const updateIdea = useStore((s) => s.updateIdea);
   const addScript = useStore((s) => s.addScript);
+  const updateScript = useStore((s) => s.updateScript);
   const navigate = useNavigate();
 
   const [familia, setFamilia] = useState("todas");
@@ -139,6 +145,7 @@ export function IdeiasPage() {
   const [scriptDuration, setScriptDuration] = useState<10 | 15 | 30 | 45 | 60>(45);
   const [scriptOutro, setScriptOutro] = useState(DEFAULT_OUTRO);
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+  const [captureChoices, setCaptureChoices] = useState<Script[]>([]);
 
   const filtered = ideas.filter((i) => {
     if (familia !== "todas" && i.familia !== familia) return false;
@@ -170,9 +177,11 @@ export function IdeiasPage() {
   }
 
   const usedIdeas = ideas.filter((idea) => Boolean(scriptForIdea(idea)));
-  const pendingIdeas = ordered.filter((idea) => !scriptForIdea(idea) && idea.status !== "descartado");
+  const pendingIdeas = ordered.filter(
+    (idea) => !scriptForIdea(idea) && idea.status !== "descartado",
+  );
   const nextIdea = pendingIdeas[0];
-  const savingIdeaId = isGeneratingScript ? tonePending?.idea.id ?? null : null;
+  const savingIdeaId = isGeneratingScript ? (tonePending?.idea.id ?? null) : null;
   const previewScript = preview ? scriptForIdea(preview) : undefined;
   const previewVideo = previewScript ? videoForScript(previewScript.id) : undefined;
 
@@ -203,12 +212,40 @@ export function IdeiasPage() {
     if (!tonePending) return;
     setIsGeneratingScript(true);
     try {
-      const { idea: savedIdea, script, provider } = await generateAndPersistScript({
+      if (scriptDuration <= 15) {
+        const {
+          idea: savedIdea,
+          scripts: captureScripts,
+          provider,
+        } = await generateAndPersistCaptureScripts({
+          idea: tonePending.idea,
+          persistIdea: tonePending.persistIdea,
+          durationSeconds: scriptDuration as 10 | 15,
+        });
+        if (tonePending.persistIdea) addIdea(savedIdea);
+        captureScripts.forEach(addScript);
+        updateIdea(savedIdea.id, { status: "aprovado" });
+        setTonePending(null);
+        setManualOpen(false);
+        setArticleOpen(false);
+        setCaptureChoices(captureScripts);
+        toast[provider === "fallback" ? "warning" : "success"](
+          provider === "fallback"
+            ? "Claude indisponível. Três hooks locais foram salvos."
+            : `Claude gerou e salvou os 3 hooks de ${scriptDuration} segundos.`,
+        );
+        return;
+      }
+      const {
+        idea: savedIdea,
+        script,
+        provider,
+      } = await generateAndPersistScript({
         idea: tonePending.idea,
         articleAnalysis: tonePending.analysis,
         editorialTone,
         durationSeconds: scriptDuration,
-        outro: scriptOutro.trim() || DEFAULT_OUTRO,
+        outro: scriptDuration === 10 ? "" : scriptOutro.trim() || DEFAULT_OUTRO,
         persistIdea: tonePending.persistIdea,
       });
       if (tonePending.persistIdea) {
@@ -236,6 +273,22 @@ export function IdeiasPage() {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar o roteiro.");
     } finally {
       setIsGeneratingScript(false);
+    }
+  }
+
+  async function confirmarRoteirosDeCaptura(selected: Script[]) {
+    try {
+      const updated = await Promise.all(
+        selected.map((script) => saveScript({ ...script, status: "em_revisao" })),
+      );
+      updated.forEach((script) => updateScript(script.id, script));
+      setCaptureChoices([]);
+      toast.success(
+        `${updated.length} ${updated.length === 1 ? "roteiro selecionado" : "roteiros selecionados"} para produção.`,
+      );
+      navigate({ to: "/roteiros/$id", params: { id: updated[0].id } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Não foi possível salvar a seleção.");
     }
   }
 
@@ -638,7 +691,9 @@ export function IdeiasPage() {
                 ) : (
                   <Button
                     size="sm"
-                    disabled={preview.status === "descartado" || !evaluateIdeaQuality(preview).ready}
+                    disabled={
+                      preview.status === "descartado" || !evaluateIdeaQuality(preview).ready
+                    }
                     onClick={() => {
                       gerarRoteiro(preview);
                       setPreview(null);
@@ -670,6 +725,11 @@ export function IdeiasPage() {
         onOutroChange={setScriptOutro}
         isGenerating={isGeneratingScript}
         onConfirm={() => void confirmarTomEGerarRoteiro()}
+      />
+      <CaptureScriptChoices
+        scripts={captureChoices}
+        onOpenChange={(open) => !open && setCaptureChoices([])}
+        onConfirm={confirmarRoteirosDeCaptura}
       />
     </AppShell>
   );
@@ -752,7 +812,10 @@ function ArticleImportDialog({
           </div>
           <div className="grid gap-2">
             <Label>Família</Label>
-            <Select value={familia} onValueChange={(value) => onFamiliaChange(value as ThemeFamily)}>
+            <Select
+              value={familia}
+              onValueChange={(value) => onFamiliaChange(value as ThemeFamily)}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -830,7 +893,11 @@ function ArticleImportDialog({
                       <ArticleList title="Números-chave" rows={result.analysis.numerosChave} />
                       <ArticleList title="Limitações" rows={result.analysis.limitacoes} />
                       <ArticleList title="Pode falar" rows={result.analysis.podeFalar} />
-                      <ArticleList title="Não pode falar" rows={result.analysis.naoPodeFalar} danger />
+                      <ArticleList
+                        title="Não pode falar"
+                        rows={result.analysis.naoPodeFalar}
+                        danger
+                      />
                     </div>
                   </AccordionContent>
                 </AccordionItem>
@@ -838,9 +905,12 @@ function ArticleImportDialog({
             </div>
 
             <div>
-              <h3 className="font-display text-sm font-semibold">Escolha uma ideia para criar roteiro</h3>
+              <h3 className="font-display text-sm font-semibold">
+                Escolha uma ideia para criar roteiro
+              </h3>
               <p className="text-xs text-muted-foreground">
-                A primeira foi priorizada como ponto de partida. As outras mantêm ângulos alternativos.
+                A primeira foi priorizada como ponto de partida. As outras mantêm ângulos
+                alternativos.
               </p>
             </div>
             {result.ideas.map((idea, index) => (
@@ -888,7 +958,9 @@ function ArticleList({
   danger?: boolean;
 }) {
   return (
-    <div className={`rounded-md border bg-background px-3 py-2 ${danger ? "border-status-danger/30" : ""}`}>
+    <div
+      className={`rounded-md border bg-background px-3 py-2 ${danger ? "border-status-danger/30" : ""}`}
+    >
       <div
         className={`text-[10px] font-semibold uppercase tracking-wider ${
           danger ? "text-status-danger" : "text-muted-foreground"
@@ -927,7 +999,7 @@ function IdeaSuggestionCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-          <div className="font-semibold leading-6">{idea.titulo}</div>
+            <div className="font-semibold leading-6">{idea.titulo}</div>
             {recommended ? (
               <Badge className="bg-status-info text-status-info-foreground">Recomendada</Badge>
             ) : null}
@@ -1057,7 +1129,10 @@ function NovaIdeiaDialog({
         <div className="grid gap-3 md:grid-cols-2">
           <div className="grid gap-2">
             <Label>Família</Label>
-            <Select value={familia} onValueChange={(value) => onFamiliaChange(value as ThemeFamily)}>
+            <Select
+              value={familia}
+              onValueChange={(value) => onFamiliaChange(value as ThemeFamily)}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -1107,9 +1182,12 @@ function NovaIdeiaDialog({
         {ideas.length > 0 ? (
           <div className="grid gap-3">
             <div>
-              <h3 className="font-display text-sm font-semibold">Escolha uma ideia para criar roteiro</h3>
+              <h3 className="font-display text-sm font-semibold">
+                Escolha uma ideia para criar roteiro
+              </h3>
               <p className="text-xs text-muted-foreground">
-                A primeira foi priorizada como ponto de partida. As outras trazem variações de ângulo.
+                A primeira foi priorizada como ponto de partida. As outras trazem variações de
+                ângulo.
               </p>
             </div>
             {ideas.map((idea, index) => (

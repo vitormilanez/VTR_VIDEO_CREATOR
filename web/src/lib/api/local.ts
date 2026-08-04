@@ -95,11 +95,21 @@ export async function appendIdea(idea: Idea): Promise<Idea> {
   return response.idea;
 }
 
+/** Atualiza uma ideia existente no Sheets, preservando ID e vinculo com a tendencia. */
+export async function saveIdea(idea: Idea): Promise<Idea> {
+  const response = await requestJson<{ ok: boolean; idea: Idea }>(
+    `/api/sheets/ideias/${encodeURIComponent(idea.id)}`,
+    { method: "PUT", body: JSON.stringify(idea) },
+  );
+  return response.idea;
+}
+
 export interface ExpandIdeasInput {
   seed: string;
   quantity?: number;
   familia?: Idea["familia"];
   prioridade?: Idea["prioridade"];
+  sourceUrl?: string | null;
 }
 
 /** Expande uma ideia livre em opcoes editoriais prontas para roteiro. */
@@ -109,6 +119,71 @@ export async function expandIdeas(input: ExpandIdeasInput): Promise<Idea[]> {
     input,
   );
   return response.ideas;
+}
+
+export interface CaptureHooksInput {
+  durationSeconds: 10 | 15;
+  trendId: string;
+  titulo: string;
+  subtema?: string | null;
+  sinal?: string | null;
+  dorPublico?: string | null;
+  notas?: string | null;
+  familia: Trend["familia"];
+  prioridade: Trend["prioridade"];
+  sourceUrl?: string | null;
+}
+
+export interface CaptureHookVariant {
+  variant: number;
+  strategy: string;
+  title: string;
+  hook: string;
+  turn: string;
+  spokenText: string;
+  wordCount: number;
+  rationale: string;
+  stopScore: number;
+  profileScore: number;
+  complianceNotes: string;
+}
+
+export interface CaptureHooksResult {
+  provider: "claude" | "fallback";
+  analysis: {
+    capturePotential: number;
+    audienceReflex: string;
+    recommendedAngle: string;
+    riskNotes: string[];
+  };
+  variants: CaptureHookVariant[];
+}
+
+/** Uma chamada ao Claude avalia a tendencia e devolve tres testes de captura de 10s ou 15s. */
+export async function generateCaptureHooks(input: CaptureHooksInput): Promise<CaptureHooksResult> {
+  const response = await postJson<{ ok: boolean } & CaptureHooksResult>(
+    "/api/trends/capture-hooks",
+    input,
+  );
+  return {
+    provider: response.provider,
+    analysis: response.analysis,
+    variants: response.variants,
+  };
+}
+
+export interface TrendSourceSummary {
+  summary: string;
+  keyPoints: string[];
+  provider: "claude" | "fallback";
+}
+
+/** Le e resume a fonte somente quando o usuario abre o preview; o backend mantém cache por URL. */
+export async function summarizeTrendSource(
+  title: string,
+  sourceUrl: string,
+): Promise<TrendSourceSummary> {
+  return postJson<TrendSourceSummary>("/api/trends/summarize", { title, sourceUrl });
 }
 
 export interface ArticleIdeasInput {
@@ -478,6 +553,7 @@ export async function naturalizeScript(input: {
   text: string;
   medicalCautions: string;
   durationSeconds: 10 | 15 | 30 | 45 | 60;
+  outro: string;
 }): Promise<string> {
   const response = await postJson<{ ok: boolean; text: string }>("/api/scripts/naturalize", input);
   return response.text;

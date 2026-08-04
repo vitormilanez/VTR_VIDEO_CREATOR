@@ -9,8 +9,10 @@ import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import {
   DEFAULT_OUTRO,
+  maximumWordsForDuration,
   narrationQualityIssues,
   normalizeNarrationOutro,
+  removeNarrationOutro,
 } from "@/lib/script-quality";
 import { editorialToneLabel, prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
@@ -79,12 +81,28 @@ const HEYGEN_CATALOG_FALLBACK_VOICES: HeyGenCatalog["voices"] = [
 function RoteiroDetalhe() {
   const { id } = Route.useParams();
   const script = useStore((s) => s.scripts.find((x) => x.id === id));
+  const allScripts = useStore((s) => s.scripts);
+  const siblingCaptureScripts = useMemo(
+    () =>
+      allScripts
+        .filter(
+          (candidate) =>
+            candidate.ideaId &&
+            candidate.ideaId === script?.ideaId &&
+            candidate.formatoSugerido.toLowerCase().includes("hook de captura"),
+        )
+        .sort((a, b) => a.titulo.localeCompare(b.titulo)),
+    [allScripts, script?.ideaId],
+  );
   const updateScript = useStore((s) => s.updateScript);
   const addVideoJob = useStore((s) => s.addVideoJob);
   const videoJobs = useStore((s) => s.videoJobs);
   const palavras = useStore((s) => s.settings.palavrasProibidas);
   const complianceRules = useStore((s) => s.complianceRules);
   const navigate = useNavigate();
+  const initialCaptureDuration = captureHookDuration(script);
+  const captureHook = initialCaptureDuration !== null;
+  const initialOutro = initialCaptureDuration === 10 ? "" : script?.outroText || DEFAULT_OUTRO;
 
   const [draft, setDraft] = useState<Script | undefined>(script);
   const [sending, setSending] = useState(false);
@@ -96,14 +114,16 @@ function RoteiroDetalhe() {
   const [avatarId, setAvatarId] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
-  const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(45);
+  const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(
+    initialCaptureDuration ?? 45,
+  );
   const [speechMode, setSpeechMode] = useState<"natural" | "fiel" | "direto">("natural");
   const [captions, setCaptions] = useState(true);
   const [optimizePronunciation, setOptimizePronunciation] = useState(true);
   const [styleId, setStyleId] = useState("");
-  const [outroText, setOutroText] = useState(script?.outroText || DEFAULT_OUTRO);
+  const [outroText, setOutroText] = useState(initialOutro);
   const [narrationText, setNarrationText] = useState(() =>
-    script ? buildNarrationText(script) : "",
+    script ? buildNarrationText(script, initialOutro) : "",
   );
   const [naturalizing, setNaturalizing] = useState(false);
   const existingJobs = useMemo(
@@ -120,6 +140,7 @@ function RoteiroDetalhe() {
     () => narrationQualityIssues(narrationText, durationSeconds, outroText),
     [durationSeconds, narrationText, outroText],
   );
+  const hasHighCreditConsumption = durationSeconds >= 45;
   const canSendToProduction = qualityIssues.length === 0;
   const narrationWords = narrationText.trim().split(/\s+/).filter(Boolean).length;
   const estimatedSpeechSeconds = Math.max(1, Math.round(narrationWords / 2.4));
@@ -127,9 +148,14 @@ function RoteiroDetalhe() {
   useEffect(() => {
     if (script) {
       setDraft(script);
-      const savedOutro = script.outroText || DEFAULT_OUTRO;
+      const savedCaptureDuration = captureHookDuration(script);
+      const savedOutro = savedCaptureDuration === 10 ? "" : script.outroText || DEFAULT_OUTRO;
       setOutroText(savedOutro);
       setNarrationText(buildNarrationText(script, savedOutro));
+      if (savedCaptureDuration !== null) {
+        setDurationSeconds(savedCaptureDuration);
+        setSpeechMode("direto");
+      }
     }
   }, [script]);
 
@@ -251,7 +277,7 @@ function RoteiroDetalhe() {
         styleId: styleId || undefined,
         forceNewVersion,
         narrationText,
-        outroText,
+        outroText: durationSeconds === 10 ? "" : outroText,
       });
       addVideoJob(job);
       toast.success(
@@ -290,8 +316,13 @@ function RoteiroDetalhe() {
         text: narrationText,
         medicalCautions: draft.cuidadosMedicos,
         durationSeconds,
+        outro: durationSeconds === 10 ? "" : outroText,
       });
-      setNarrationText(normalizeNarrationOutro(naturalized, outroText));
+      setNarrationText(
+        durationSeconds === 10
+          ? removeNarrationOutro(naturalized, outroText)
+          : normalizeNarrationOutro(naturalized, outroText),
+      );
       toast.success("Texto naturalizado. Revise a fala antes de enviar.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Não foi possível naturalizar o texto.");
@@ -328,11 +359,16 @@ function RoteiroDetalhe() {
                 </Link>
               </Button>
               <ConfirmAction
-                title="Criar uma nova versão?"
-                description={`Este roteiro já possui ${existingJobs.length} ${
-                  existingJobs.length === 1 ? "vídeo" : "vídeos"
-                }. A nova versão consumirá créditos adicionais do HeyGen.`}
-                confirmLabel="Criar nova versão"
+                title="Refazer este vídeo?"
+                description={
+                  <div className="space-y-3">
+                    <p>{`Este roteiro já possui ${existingJobs.length} ${
+                      existingJobs.length === 1 ? "vídeo" : "vídeos"
+                    }. A nova versão consumirá créditos adicionais do HeyGen.`}</p>
+                    {hasHighCreditConsumption ? <HighCreditConsumptionNotice compact /> : null}
+                  </div>
+                }
+                confirmLabel="Refazer vídeo"
                 onConfirm={() => void enviarProducao(true)}
                 trigger={
                   <Button
@@ -347,7 +383,7 @@ function RoteiroDetalhe() {
                     }
                     disabled={saving || sending || !avatarId || !voiceId || !canSendToProduction}
                   >
-                    <History className="mr-1 h-4 w-4" /> Nova versão
+                    <History className="mr-1 h-4 w-4" /> Refazer vídeo
                   </Button>
                 }
               />
@@ -355,7 +391,12 @@ function RoteiroDetalhe() {
           ) : (
             <ConfirmAction
               title="Enviar para producao?"
-              description="Este clique envia o roteiro ao HeyGen e pode consumir creditos da conta."
+              description={
+                <div className="space-y-3">
+                  <p>Este clique envia o roteiro ao HeyGen e pode consumir créditos da conta.</p>
+                  {hasHighCreditConsumption ? <HighCreditConsumptionNotice compact /> : null}
+                </div>
+              }
               confirmLabel="Enviar"
               onConfirm={() => void enviarProducao(false)}
               trigger={
@@ -363,14 +404,15 @@ function RoteiroDetalhe() {
                   size="sm"
                   title={
                     !canSendToProduction
-                        ? "Revise o texto falado antes de enviar"
-                        : dirty
-                          ? "Salvar alteracoes e enviar roteiro ao HeyGen"
-                          : "Enviar roteiro ao HeyGen"
+                      ? "Revise o texto falado antes de enviar"
+                      : dirty
+                        ? "Salvar alteracoes e enviar roteiro ao HeyGen"
+                        : "Enviar roteiro ao HeyGen"
                   }
                   disabled={saving || sending || !avatarId || !voiceId || !canSendToProduction}
                 >
-                  <Film className="mr-1 h-4 w-4" /> {dirty ? "Salvar e enviar" : "Enviar para producao"}
+                  <Film className="mr-1 h-4 w-4" />{" "}
+                  {dirty ? "Salvar e enviar" : "Enviar para producao"}
                 </Button>
               }
             />
@@ -437,100 +479,136 @@ function RoteiroDetalhe() {
             }
           />
 
-          <WorkflowJump />
+          {captureHook && siblingCaptureScripts.length > 1 ? (
+            <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4">
+              <div className="mb-3 text-sm font-semibold">Compare os 3 roteiros de 10s</div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {siblingCaptureScripts.map((candidate, index) => (
+                  <Link
+                    key={candidate.id}
+                    to="/roteiros/$id"
+                    params={{ id: candidate.id }}
+                    className={`rounded-lg border p-3 text-sm transition-colors ${
+                      candidate.id === script.id
+                        ? "border-status-info bg-background"
+                        : "bg-background/60 hover:border-status-info/50"
+                    }`}
+                  >
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-status-info">
+                      Teste {index + 1}
+                    </div>
+                    <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
+                      {candidate.textoFalado}
+                    </p>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          ) : null}
 
-          <div id="roteiro-editar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
-            <div className="mb-4">
-              <h3 className="font-display text-sm font-semibold">1. Briefing do roteiro</h3>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Campos que orientam a IA e preservam o contexto médico. A fala final fica na etapa
-                de vídeo.
-              </p>
+          {durationSeconds > 15 ? <WorkflowJump /> : null}
+
+          {durationSeconds > 15 ? (
+            <div
+              id="roteiro-editar"
+              className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
+            >
+              <div className="mb-4">
+                <h3 className="font-display text-sm font-semibold">1. Briefing do roteiro</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Campos que orientam a IA e preservam o contexto médico. A fala final fica na etapa
+                  de vídeo.
+                </p>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <Field label="Titulo">
+                  <Input value={draft.titulo} onChange={(e) => set("titulo", e.target.value)} />
+                </Field>
+                <Field label="Tema">
+                  <Input value={draft.tema} onChange={(e) => set("tema", e.target.value)} />
+                </Field>
+                <Field label="Hook">
+                  <Textarea
+                    rows={2}
+                    value={draft.hook}
+                    onChange={(e) => set("hook", e.target.value)}
+                  />
+                </Field>
+                <Field label="Dor / conflito">
+                  <Textarea
+                    rows={2}
+                    value={draft.dorConflito}
+                    onChange={(e) => set("dorConflito", e.target.value)}
+                  />
+                </Field>
+                <Field label="Explicacao simples">
+                  <Textarea
+                    rows={3}
+                    value={draft.explicacaoSimples}
+                    onChange={(e) => set("explicacaoSimples", e.target.value)}
+                  />
+                </Field>
+                <Field label="Virada / provocacao">
+                  <Textarea
+                    rows={3}
+                    value={draft.virada}
+                    onChange={(e) => set("virada", e.target.value)}
+                  />
+                </Field>
+                <Field label="CTA">
+                  <Textarea
+                    rows={2}
+                    value={draft.cta}
+                    onChange={(e) => set("cta", e.target.value)}
+                  />
+                </Field>
+                <Field label="Cuidados medicos">
+                  <Textarea
+                    rows={2}
+                    value={draft.cuidadosMedicos}
+                    onChange={(e) => set("cuidadosMedicos", e.target.value)}
+                  />
+                </Field>
+                <Field label="Formato">
+                  <Input
+                    value={draft.formatoSugerido}
+                    onChange={(e) => set("formatoSugerido", e.target.value)}
+                  />
+                </Field>
+                <Field label="Prioridade">
+                  <Select
+                    value={draft.prioridade}
+                    onValueChange={(v) => set("prioridade", v as Prioridade)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="alta">Alta</SelectItem>
+                      <SelectItem value="media">Media</SelectItem>
+                      <SelectItem value="baixa">Baixa</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Status">
+                  <Select
+                    value={draft.status}
+                    onValueChange={(v) => set("status", v as ScriptStatus)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="aguardando_validacao">Rascunho</SelectItem>
+                      <SelectItem value="em_revisao">Em edicao</SelectItem>
+                      <SelectItem value="aprovado_clinicamente">Pronto</SelectItem>
+                      <SelectItem value="rejeitado">Arquivado</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </div>
             </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <Field label="Titulo">
-                <Input value={draft.titulo} onChange={(e) => set("titulo", e.target.value)} />
-              </Field>
-              <Field label="Tema">
-                <Input value={draft.tema} onChange={(e) => set("tema", e.target.value)} />
-              </Field>
-              <Field label="Hook">
-                <Textarea
-                  rows={2}
-                  value={draft.hook}
-                  onChange={(e) => set("hook", e.target.value)}
-                />
-              </Field>
-              <Field label="Dor / conflito">
-                <Textarea
-                  rows={2}
-                  value={draft.dorConflito}
-                  onChange={(e) => set("dorConflito", e.target.value)}
-                />
-              </Field>
-              <Field label="Explicacao simples">
-                <Textarea
-                  rows={3}
-                  value={draft.explicacaoSimples}
-                  onChange={(e) => set("explicacaoSimples", e.target.value)}
-                />
-              </Field>
-              <Field label="Virada / provocacao">
-                <Textarea
-                  rows={3}
-                  value={draft.virada}
-                  onChange={(e) => set("virada", e.target.value)}
-                />
-              </Field>
-              <Field label="CTA">
-                <Textarea rows={2} value={draft.cta} onChange={(e) => set("cta", e.target.value)} />
-              </Field>
-              <Field label="Cuidados medicos">
-                <Textarea
-                  rows={2}
-                  value={draft.cuidadosMedicos}
-                  onChange={(e) => set("cuidadosMedicos", e.target.value)}
-                />
-              </Field>
-              <Field label="Formato">
-                <Input
-                  value={draft.formatoSugerido}
-                  onChange={(e) => set("formatoSugerido", e.target.value)}
-                />
-              </Field>
-              <Field label="Prioridade">
-                <Select
-                  value={draft.prioridade}
-                  onValueChange={(v) => set("prioridade", v as Prioridade)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="alta">Alta</SelectItem>
-                    <SelectItem value="media">Media</SelectItem>
-                    <SelectItem value="baixa">Baixa</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label="Status">
-                <Select
-                  value={draft.status}
-                  onValueChange={(v) => set("status", v as ScriptStatus)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="aguardando_validacao">Rascunho</SelectItem>
-                    <SelectItem value="em_revisao">Em edicao</SelectItem>
-                    <SelectItem value="aprovado_clinicamente">Pronto</SelectItem>
-                    <SelectItem value="rejeitado">Arquivado</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-            </div>
-          </div>
+          ) : null}
 
           <div
             id="roteiro-produzir"
@@ -538,7 +616,9 @@ function RoteiroDetalhe() {
           >
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h3 className="font-display text-sm font-semibold">2. Fala final e vídeo</h3>
+                <h3 className="font-display text-sm font-semibold">
+                  {durationSeconds === 10 ? "Hook e vídeo" : "2. Fala final e vídeo"}
+                </h3>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Edite exatamente o que o avatar vai falar e escolha visual, duração e ritmo.
                 </p>
@@ -603,25 +683,39 @@ function RoteiroDetalhe() {
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Duração aproximada">
-                <Select
-                  value={String(durationSeconds)}
-                  onValueChange={(value) =>
-                    setDurationSeconds(Number(value) as 10 | 15 | 30 | 45 | 60)
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="10">10 segundos - impacto rápido</SelectItem>
-                    <SelectItem value="15">15 segundos - ultracurto</SelectItem>
-                    <SelectItem value="30">30 segundos - rápido</SelectItem>
-                    <SelectItem value="45">45 segundos - recomendado</SelectItem>
-                    <SelectItem value="60">60 segundos - mais completo</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
+              <div className="space-y-2">
+                <Field label="Duração aproximada">
+                  <Select
+                    value={String(durationSeconds)}
+                    onValueChange={(value) => {
+                      const nextDuration = Number(value) as 10 | 15 | 30 | 45 | 60;
+                      setDurationSeconds(nextDuration);
+                      if (nextDuration === 10) {
+                        setNarrationText((current) => removeNarrationOutro(current, outroText));
+                        setOutroText("");
+                        setSpeechMode("direto");
+                      } else if (!outroText.trim()) {
+                        setOutroText(DEFAULT_OUTRO);
+                        setNarrationText((current) =>
+                          normalizeNarrationOutro(current, DEFAULT_OUTRO),
+                        );
+                      }
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="10">10 segundos - impacto rápido</SelectItem>
+                      <SelectItem value="15">15 segundos - ultracurto</SelectItem>
+                      <SelectItem value="30">30 segundos - rápido</SelectItem>
+                      <SelectItem value="45">45 segundos - maior consumo</SelectItem>
+                      <SelectItem value="60">60 segundos - alto consumo</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
+              </div>
               <Field label="Jeito de falar">
                 <Select
                   value={speechMode}
@@ -678,31 +772,44 @@ function RoteiroDetalhe() {
                 onCheckedChange={setOptimizePronunciation}
               />
             </div>
-            <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
-              <Label htmlFor="outro-text" className="text-xs font-medium">
-                Escolha a frase final do vídeo
-              </Label>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                A frase será colocada uma única vez no fim da fala. Você pode editar livremente.
-              </p>
-              <div className="mt-2 flex gap-2">
-                <Input
-                  id="outro-text"
-                  value={outroText}
-                  onChange={(event) => setOutroText(event.target.value)}
-                  onBlur={() => setNarrationText((current) => normalizeNarrationOutro(current, outroText))}
-                  placeholder="Ex.: Me siga para mais dicas."
-                  maxLength={180}
-                />
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setNarrationText((current) => normalizeNarrationOutro(current, outroText))}
-                >
-                  Aplicar
-                </Button>
+            {durationSeconds === 10 ? (
+              <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
+                <div className="text-xs font-medium">Sem frase final nos vídeos de 10 segundos</div>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  A fala termina diretamente no ponto de maior impacto do hook.
+                </p>
               </div>
-            </div>
+            ) : (
+              <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
+                <Label htmlFor="outro-text" className="text-xs font-medium">
+                  Escolha a frase final do vídeo
+                </Label>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  A frase será colocada uma única vez no fim da fala. Você pode editar livremente.
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <Input
+                    id="outro-text"
+                    value={outroText}
+                    onChange={(event) => setOutroText(event.target.value)}
+                    onBlur={() =>
+                      setNarrationText((current) => normalizeNarrationOutro(current, outroText))
+                    }
+                    placeholder="Ex.: Me siga para mais dicas."
+                    maxLength={180}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() =>
+                      setNarrationText((current) => normalizeNarrationOutro(current, outroText))
+                    }
+                  >
+                    Aplicar
+                  </Button>
+                </div>
+              </div>
+            )}
             <div className="mt-4 border-t pt-4">
               <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                 <div>
@@ -716,7 +823,11 @@ function RoteiroDetalhe() {
                     type="button"
                     size="sm"
                     variant="ghost"
-                    onClick={() => setNarrationText(buildNarrationText(draft))}
+                    onClick={() =>
+                      setNarrationText(
+                        buildNarrationText(draft, durationSeconds === 10 ? "" : outroText),
+                      )
+                    }
                   >
                     <RotateCcw className="mr-1 h-4 w-4" />
                     Restaurar
@@ -729,7 +840,11 @@ function RoteiroDetalhe() {
                     onClick={() => void naturalizarFala()}
                   >
                     <Sparkles className="mr-1 h-4 w-4" />
-                    {naturalizing ? "Ajustando..." : "Deixar natural com IA"}
+                    {naturalizing
+                      ? "Ajustando..."
+                      : narrationWords > maximumWordsForDuration(durationSeconds)
+                        ? `Encurtar para ${durationSeconds}s com IA`
+                        : "Deixar natural com IA"}
                   </Button>
                 </div>
               </div>
@@ -753,7 +868,9 @@ function RoteiroDetalhe() {
                         size="sm"
                         variant="secondary"
                         className="h-7 px-2 text-[11px]"
-                        onClick={() => setNarrationText(normalizeNarrationOutro(narrationText, outroText))}
+                        onClick={() =>
+                          setNarrationText(normalizeNarrationOutro(narrationText, outroText))
+                        }
                       >
                         Corrigir encerramento
                       </Button>
@@ -774,9 +891,8 @@ function RoteiroDetalhe() {
               </div>
               <div className="mt-2 flex items-start gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />A fala
-                exata será validada antes do envio ao HeyGen. Se houver dose, promessa ou
-                instrução prescritiva, o sistema mantém o alerta para revisão, mas não bloqueia
-                o teste.
+                exata será validada antes do envio ao HeyGen. Se houver dose, promessa ou instrução
+                prescritiva, o sistema mantém o alerta para revisão, mas não bloqueia o teste.
               </div>
             </div>
           </div>
@@ -931,12 +1047,7 @@ function AvatarThumbnail({
   fit?: "cover" | "contain";
 }) {
   return (
-    <span
-      className={cn(
-        "block shrink-0 overflow-hidden rounded-md border bg-muted",
-        className,
-      )}
-    >
+    <span className={cn("block shrink-0 overflow-hidden rounded-md border bg-muted", className)}>
       {avatar.previewImageUrl ? (
         <img
           src={avatar.previewImageUrl}
@@ -1029,6 +1140,28 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div className="space-y-1">
       <Label className="text-xs">{label}</Label>
       {children}
+    </div>
+  );
+}
+
+function HighCreditConsumptionNotice({ compact = false }: { compact?: boolean }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={cn(
+        "flex items-start gap-2 rounded-lg border border-status-warn/60 bg-status-warn/15 text-status-warn-foreground",
+        compact ? "px-3 py-2" : "px-3 py-2.5",
+      )}
+    >
+      <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+      <div className="min-w-0">
+        <p className="text-xs font-semibold">Maior consumo de créditos</p>
+        <p className="mt-0.5 text-[11px] leading-4">
+          Vídeos de 45 segundos ou mais podem consumir mais créditos/tokens do HeyGen. Verifique o
+          saldo antes de gerar.
+        </p>
+      </div>
     </div>
   );
 }
@@ -1143,6 +1276,12 @@ function ProductionReadinessCard({
       </ul>
     </div>
   );
+}
+
+function captureHookDuration(script?: Script): 10 | 15 | null {
+  if (!script?.formatoSugerido.toLowerCase().includes("hook de captura")) return null;
+  const duration = script.formatoSugerido.match(/(10|15) segundos/i)?.[1];
+  return duration === "15" ? 15 : 10;
 }
 
 function buildNarrationText(script: Script, outro = DEFAULT_OUTRO): string {

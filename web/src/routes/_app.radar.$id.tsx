@@ -1,14 +1,22 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
-import { buildIdeaFromTrend } from "@/lib/idea-builder";
 import { genId, useStore } from "@/lib/store";
 import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { appendIdea, setSheetStatus } from "@/lib/api/local";
-import { ArrowLeft, ExternalLink, Sparkles } from "lucide-react";
+import {
+  appendIdea,
+  appendScript,
+  expandIdeas,
+  generateCaptureHooks,
+  setSheetStatus,
+  type CaptureHooksResult,
+} from "@/lib/api/local";
+import type { Idea, Script } from "@/lib/mock-data";
+import { ArrowLeft, ExternalLink, Loader2, Sparkles, Target, Zap } from "lucide-react";
 import { toast } from "sonner";
+import { useState } from "react";
 
 export const Route = createFileRoute("/_app/radar/$id")({
   head: ({ params }) => ({
@@ -28,9 +36,21 @@ function TendenciaDetalhe() {
       .filter((i) => i.trendId === id)
       .sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime()),
   );
+  const scripts = useStore((s) => s.scripts);
   const updateTrend = useStore((s) => s.updateTrend);
   const addIdea = useStore((s) => s.addIdea);
+  const addScript = useStore((s) => s.addScript);
   const navigate = useNavigate();
+  const [generating, setGenerating] = useState(false);
+  const [generatingCaptures, setGeneratingCaptures] = useState(false);
+  const [captureResult, setCaptureResult] = useState<CaptureHooksResult | null>(null);
+
+  const captureIdeas = ideas.filter((idea) => idea.tipo === "Hook de captura 10s");
+  const messageIdeas = ideas.filter((idea) => idea.tipo !== "Hook de captura 10s");
+  const captureIdeaIds = new Set(captureIdeas.map((idea) => idea.id));
+  const captureScripts = scripts
+    .filter((script) => script.ideaId && captureIdeaIds.has(script.ideaId))
+    .sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime());
 
   if (!trend) {
     return (
@@ -47,12 +67,29 @@ function TendenciaDetalhe() {
 
   async function gerarIdeia() {
     if (!trend) return;
-    if (ideas[0]) {
-      navigate({ to: "/ideias/$id", params: { id: ideas[0].id } });
+    if (messageIdeas[0]) {
+      navigate({ to: "/ideias/$id", params: { id: messageIdeas[0].id } });
       return;
     }
-    const idea = buildIdeaFromTrend(trend, genId("i"));
+    setGenerating(true);
     try {
+      const [generated] = await expandIdeas({
+        seed: [trend.titulo, trend.subtema, trend.sinal, trend.dorPublico, trend.notas]
+          .filter(Boolean)
+          .join("\n"),
+        quantity: 1,
+        familia: trend.familia,
+        prioridade: trend.prioridade,
+        sourceUrl: trend.link || null,
+      });
+      if (!generated) throw new Error("A IA nao retornou uma ideia contextualizada.");
+      const idea = {
+        ...generated,
+        id: genId("i"),
+        trendId: trend.id,
+        linkOrigem: trend.link || generated.linkOrigem,
+        criadoEm: new Date().toISOString(),
+      };
       const saved = await appendIdea(idea);
       addIdea(saved);
       updateTrend(trend.id, { status: "em_analise" });
@@ -65,6 +102,91 @@ function TendenciaDetalhe() {
       navigate({ to: "/ideias/$id", params: { id: saved.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel criar a ideia.");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function gerarHooksCaptura() {
+    if (!trend) return;
+    setGeneratingCaptures(true);
+    try {
+      const result = await generateCaptureHooks({
+        durationSeconds: 10,
+        trendId: trend.id,
+        titulo: trend.titulo,
+        subtema: trend.subtema,
+        sinal: trend.sinal,
+        dorPublico: trend.dorPublico,
+        notas: trend.notas,
+        familia: trend.familia,
+        prioridade: trend.prioridade,
+        sourceUrl: trend.link || null,
+      });
+      setCaptureResult(result);
+
+      for (const variant of result.variants) {
+        const now = new Date().toISOString();
+        const idea: Idea = {
+          id: genId("i"),
+          trendId: trend.id,
+          titulo: `Captura ${variant.variant}: ${variant.title}`,
+          familia: trend.familia,
+          hook: variant.hook,
+          angulo: `${variant.strategy}. ${variant.rationale}`,
+          tipo: "Hook de captura 10s",
+          publicoDor: trend.dorPublico,
+          cta: "",
+          linkOrigem: trend.link,
+          observacaoCompliance: variant.complianceNotes,
+          prioridade: trend.prioridade,
+          status: "novo",
+          criadoEm: now,
+        };
+        const savedIdea = await appendIdea(idea);
+        addIdea(savedIdea);
+
+        const script: Script = {
+          id: genId("s"),
+          ideaId: savedIdea.id,
+          categoria: trend.familia,
+          tema: trend.titulo,
+          titulo: idea.titulo,
+          hook: variant.hook,
+          dorConflito: "",
+          explicacaoSimples: "",
+          virada: variant.turn,
+          cta: "",
+          cuidadosMedicos: variant.complianceNotes,
+          risco: trend.risco,
+          prioridade: trend.prioridade,
+          formatoSugerido: "Hook de captura · 10 segundos",
+          link: trend.link,
+          status: "aguardando_validacao",
+          criadoEm: now,
+          editorialTone: "neutro",
+          textoFalado: variant.spokenText,
+          outroText: "",
+        };
+        const savedScript = await appendScript(script);
+        addScript(savedScript);
+      }
+
+      updateTrend(trend.id, { status: "em_analise" });
+      try {
+        await setSheetStatus("radar", trend.id, "em_analise");
+      } catch {
+        toast.warning("Hooks salvos, mas o status da tendencia nao foi atualizado.");
+      }
+      if (result.provider === "fallback") {
+        toast.warning("Claude indisponivel. Salvamos 3 hooks seguros de contingencia.");
+      } else {
+        toast.success("Claude avaliou a tendencia e salvou 3 hooks de captura.");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar os hooks.");
+    } finally {
+      setGeneratingCaptures(false);
     }
   }
 
@@ -95,8 +217,17 @@ function TendenciaDetalhe() {
               <ArrowLeft className="mr-1 h-4 w-4" /> Voltar
             </Link>
           </Button>
-          <Button size="sm" onClick={gerarIdeia}>
-            <Sparkles className="mr-1 h-4 w-4" /> {ideas[0] ? "Ver ideia" : "Gerar ideia"}
+          <Button size="sm" onClick={gerarIdeia} disabled={generating}>
+            {generating ? (
+              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+            ) : (
+              <Sparkles className="mr-1 h-4 w-4" />
+            )}{" "}
+            {generating
+              ? "Lendo e contextualizando"
+              : messageIdeas[0]
+                ? "Ver ideia"
+                : "Gerar ideia"}
           </Button>
         </>
       }
@@ -107,7 +238,7 @@ function TendenciaDetalhe() {
             <StatusBadge {...trendStatusLabel[trend.status]} />
             <StatusBadge {...prioridadeLabel[trend.prioridade]} />
             <PotencialBadge valor={trend.potencial} />
-            {ideas[0] || trend.status === "em_analise" ? (
+            {messageIdeas[0] || trend.status === "em_analise" ? (
               <Badge variant="outline" className="border-status-success/40 text-status-success">
                 Ideia gerada
               </Badge>
@@ -195,17 +326,129 @@ function TendenciaDetalhe() {
             </dl>
           </div>
 
+          <section className="overflow-hidden rounded-xl border border-status-info/30 bg-card shadow-sm">
+            <div className="flex flex-col gap-4 bg-status-info/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="max-w-2xl">
+                <div className="mb-1 flex items-center gap-2">
+                  <Target className="h-4 w-4 text-status-info" />
+                  <h2 className="font-display text-base font-semibold">3 hooks de captura</h2>
+                  <Badge variant="outline" className="border-status-info/40 text-status-info">
+                    10s cada
+                  </Badge>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Um experimento de aquisicao: tres tentativas curtas para interromper o scroll e
+                  levar a pessoa ao perfil. Nao substitui o video de mensagem.
+                </p>
+              </div>
+              <Button
+                onClick={gerarHooksCaptura}
+                disabled={generatingCaptures}
+                className="shrink-0"
+              >
+                {generatingCaptures ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Zap className="mr-2 h-4 w-4" />
+                )}
+                {generatingCaptures
+                  ? "Claude esta avaliando"
+                  : captureScripts.length
+                    ? "Gerar novo trio"
+                    : "Gerar 3 hooks de 10s"}
+              </Button>
+            </div>
+
+            {captureResult ? (
+              <div className="border-t p-4">
+                <div className="mb-4 grid gap-3 sm:grid-cols-[120px_1fr]">
+                  <div className="rounded-lg bg-muted p-3 text-center">
+                    <div className="text-2xl font-bold tabular-nums text-status-info">
+                      {captureResult.analysis.capturePotential}/10
+                    </div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Potencial de captura
+                    </div>
+                  </div>
+                  <div className="rounded-lg border p-3 text-sm">
+                    <div className="font-medium">Angulo recomendado</div>
+                    <p className="mt-1 text-muted-foreground">
+                      {captureResult.analysis.recommendedAngle}
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-3 lg:grid-cols-3">
+                  {captureResult.variants.map((variant) => {
+                    const savedScript = captureScripts.find(
+                      (script) => script.titulo === `Captura ${variant.variant}: ${variant.title}`,
+                    );
+                    return (
+                      <article
+                        key={variant.variant}
+                        className="flex flex-col rounded-lg border p-3"
+                      >
+                        <div className="mb-2 flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-status-info">
+                              Teste {variant.variant} · {variant.strategy}
+                            </div>
+                            <h3 className="mt-1 text-sm font-semibold">{variant.title}</h3>
+                          </div>
+                          <Badge variant="secondary">{variant.wordCount} palavras</Badge>
+                        </div>
+                        <p className="flex-1 text-sm leading-relaxed">“{variant.spokenText}”</p>
+                        <div className="mt-3 flex items-center justify-between border-t pt-3 text-xs text-muted-foreground">
+                          <span>
+                            Parada {variant.stopScore}/10 · Perfil {variant.profileScore}/10
+                          </span>
+                          {savedScript ? (
+                            <Button size="sm" variant="ghost" asChild>
+                              <Link to="/roteiros/$id" params={{ id: savedScript.id }}>
+                                Produzir
+                              </Link>
+                            </Button>
+                          ) : null}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : captureScripts.length ? (
+              <div className="border-t p-4">
+                <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Ultimos roteiros salvos
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {captureScripts.slice(0, 3).map((script) => (
+                    <Link
+                      key={script.id}
+                      to="/roteiros/$id"
+                      params={{ id: script.id }}
+                      className="rounded-lg border p-3 text-sm transition-colors hover:border-status-info/50 hover:bg-status-info/5"
+                    >
+                      <div className="font-medium">{script.titulo}</div>
+                      <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
+                        {script.textoFalado}
+                      </p>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </section>
+
           <div className="rounded-xl border bg-card p-4 shadow-sm">
             <h3 className="mb-2 font-display text-sm font-semibold">
-              Ideias geradas ({ideas.length})
+              Ideias de mensagem ({messageIdeas.length})
             </h3>
-            {ideas.length === 0 ? (
+            {messageIdeas.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                Ainda nao ha ideias vinculadas a esta tendencia.
+                Ainda nao ha ideias de mensagem vinculadas a esta tendencia.
               </p>
             ) : (
               <ul className="space-y-2">
-                {ideas.map((i) => (
+                {messageIdeas.map((i) => (
                   <li key={i.id} className="rounded-md border p-2 text-sm">
                     <Link
                       to="/ideias/$id"

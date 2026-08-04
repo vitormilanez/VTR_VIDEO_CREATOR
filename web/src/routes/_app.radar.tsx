@@ -1,5 +1,5 @@
 import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { DataToolbar } from "@/components/data-toolbar";
@@ -7,10 +7,18 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
-import { buildIdeaFromTrend } from "@/lib/idea-builder";
 import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
-import { appendIdea, appendTrend, fetchState, huntTrends, setSheetStatus } from "@/lib/api/local";
+import {
+  appendIdea,
+  appendTrend,
+  expandIdeas,
+  fetchState,
+  huntTrends,
+  setSheetStatus,
+  summarizeTrendSource,
+} from "@/lib/api/local";
+import type { TrendSourceSummary } from "@/lib/api/local";
 import { defaultSettings } from "@/lib/mock-data";
 import type { Prioridade, ThemeFamily, Trend, TrendStatus } from "@/lib/mock-data";
 import {
@@ -109,7 +117,39 @@ export function RadarPage() {
   const [busca, setBusca] = useState("");
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [generatingIdeaId, setGeneratingIdeaId] = useState<string | null>(null);
   const [preview, setPreview] = useState<Trend | null>(null);
+  const [sourceSummary, setSourceSummary] = useState<TrendSourceSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setSourceSummary(null);
+    setSummaryError("");
+    if (!preview?.link) {
+      setSummaryLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+    setSummaryLoading(true);
+    summarizeTrendSource(preview.sinal || preview.subtema || preview.titulo, preview.link)
+      .then((result) => {
+        if (active) setSourceSummary(result);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setSummaryError(error instanceof Error ? error.message : "Resumo indisponivel.");
+        }
+      })
+      .finally(() => {
+        if (active) setSummaryLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [preview?.id, preview?.link, preview?.sinal, preview?.subtema, preview?.titulo]);
 
   const filtered = trends.filter((t) => {
     if (familia !== "todas" && t.familia !== familia) return false;
@@ -167,8 +207,23 @@ export function RadarPage() {
       );
       return;
     }
-    const idea = buildIdeaFromTrend(t, genId("i"));
+    setGeneratingIdeaId(t.id);
     try {
+      const [generated] = await expandIdeas({
+        seed: [t.titulo, t.subtema, t.sinal, t.dorPublico, t.notas].filter(Boolean).join("\n"),
+        quantity: 1,
+        familia: t.familia,
+        prioridade: t.prioridade,
+        sourceUrl: t.link || null,
+      });
+      if (!generated) throw new Error("A IA nao retornou uma ideia contextualizada.");
+      const idea = {
+        ...generated,
+        id: genId("i"),
+        trendId: t.id,
+        linkOrigem: t.link || generated.linkOrigem,
+        criadoEm: new Date().toISOString(),
+      };
       const saved = await appendIdea(idea);
       addIdea(saved);
       updateTrend(t.id, { status: "em_analise" });
@@ -181,6 +236,8 @@ export function RadarPage() {
       navigate({ to: "/ideias/$id", params: { id: saved.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel criar a ideia.");
+    } finally {
+      setGeneratingIdeaId(null);
     }
   }
 
@@ -446,14 +503,23 @@ export function RadarPage() {
                           <Button
                             size="sm"
                             variant={generated ? "ghost" : "secondary"}
+                            disabled={generatingIdeaId === t.id}
                             onClick={() =>
                               linkedIdea
                                 ? navigate({ to: "/ideias/$id", params: { id: linkedIdea.id } })
                                 : gerarIdeia(t)
                             }
                           >
-                            <Sparkles className="mr-1 h-3.5 w-3.5" />
-                            {generated ? "Ver ideia" : "Ideia"}
+                            {generatingIdeaId === t.id ? (
+                              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Sparkles className="mr-1 h-3.5 w-3.5" />
+                            )}
+                            {generatingIdeaId === t.id
+                              ? "Lendo fonte"
+                              : generated
+                                ? "Ver ideia"
+                                : "Ideia"}
                           </Button>
                         </WithTooltip>
                         <ConfirmAction
@@ -525,6 +591,34 @@ export function RadarPage() {
                   <p className="mt-1 text-sm text-muted-foreground">{preview.dorPublico}</p>
                 </div>
               ) : null}
+              <div className="mt-4 rounded-md border bg-muted/35 p-3">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Resumo da noticia
+                </div>
+                {summaryLoading ? (
+                  <div className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Lendo a fonte...
+                  </div>
+                ) : sourceSummary ? (
+                  <div className="mt-2 space-y-2">
+                    <p className="text-sm leading-relaxed">{sourceSummary.summary}</p>
+                    {sourceSummary.keyPoints.length ? (
+                      <ul className="space-y-1 text-xs text-muted-foreground">
+                        {sourceSummary.keyPoints.map((point) => (
+                          <li key={point} className="flex gap-2">
+                            <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-status-info" />
+                            <span>{point}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {summaryError || "Esta tendencia nao possui uma fonte legivel para resumir."}
+                  </p>
+                )}
+              </div>
               {preview.link ? (
                 <a
                   href={preview.link}
@@ -546,6 +640,7 @@ export function RadarPage() {
               <div className="mt-6 flex flex-col gap-2">
                 <Button
                   size="sm"
+                  disabled={generatingIdeaId === preview.id}
                   onClick={() => {
                     const linkedIdea = ideaForTrend(preview);
                     if (linkedIdea) {
@@ -556,8 +651,16 @@ export function RadarPage() {
                     setPreview(null);
                   }}
                 >
-                  <Sparkles className="mr-1 h-4 w-4" />{" "}
-                  {trendHasIdea(preview) ? "Ver ideia gerada" : "Gerar ideia"}
+                  {generatingIdeaId === preview.id ? (
+                    <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="mr-1 h-4 w-4" />
+                  )}{" "}
+                  {generatingIdeaId === preview.id
+                    ? "Lendo e contextualizando"
+                    : trendHasIdea(preview)
+                      ? "Ver ideia gerada"
+                      : "Gerar ideia"}
                 </Button>
                 <Button asChild size="sm" variant="secondary">
                   <Link to="/radar/$id" params={{ id: preview.id }}>

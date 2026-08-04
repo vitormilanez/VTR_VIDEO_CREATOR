@@ -1,4 +1,5 @@
 export const DEFAULT_OUTRO = "Me siga para mais dicas, e obrigado.";
+const LEGACY_CAPTURE_OUTRO = "Veja o contexto no perfil.";
 
 const PLACEHOLDER_PATTERNS: Array<{ regex: RegExp; message: string }> = [
   {
@@ -33,10 +34,10 @@ export function narrationQualityIssues(
     if (pattern.regex.test(normalized)) issues.push(pattern.message);
   }
 
-  const selectedOutro = outro.replace(/\s+/g, " ").trim();
-  if (!selectedOutro) {
+  const selectedOutro = durationSeconds === 10 ? "" : outro.replace(/\s+/g, " ").trim();
+  if (durationSeconds !== 10 && !selectedOutro) {
     issues.push("Escolha uma frase final para o vídeo.");
-  } else {
+  } else if (selectedOutro) {
     const outroMatches = normalized.match(new RegExp(escapeRegExp(selectedOutro), "gi")) ?? [];
     if (outroMatches.length !== 1) {
       issues.push("A frase final deve aparecer exatamente uma vez.");
@@ -46,9 +47,15 @@ export function narrationQualityIssues(
   }
 
   const wordCount = normalized.split(/\s+/).filter(Boolean).length;
-  const minimumWords = minWordsForDuration(durationSeconds);
+  const minimumWords = minimumWordsForDuration(durationSeconds);
   if (wordCount < minimumWords) {
     issues.push(`Texto muito curto para ${durationSeconds}s. Ajuste ou escolha uma duracao menor.`);
+  }
+  const maximumWords = maximumWordsForDuration(durationSeconds);
+  if (wordCount > maximumWords) {
+    issues.push(
+      `Texto muito longo para ${durationSeconds}s (${wordCount} palavras). Encurte para no máximo ${maximumWords}.`,
+    );
   }
 
   return Array.from(new Set(issues));
@@ -57,7 +64,7 @@ export function narrationQualityIssues(
 /** Remove o encerramento selecionado e recoloca uma única vez no fim. */
 export function normalizeNarrationOutro(text: string, outro = DEFAULT_OUTRO): string {
   const selectedOutro = outro.replace(/\s+/g, " ").trim();
-  if (!selectedOutro) return text.trim();
+  if (!selectedOutro) return removeNarrationOutro(text);
   const withoutOutro = text
     .replace(new RegExp(`\\s*${escapeRegExp(DEFAULT_OUTRO)}\\s*`, "gi"), " ")
     .replace(new RegExp(`\\s*${escapeRegExp(selectedOutro)}\\s*`, "gi"), " ")
@@ -69,11 +76,36 @@ export function normalizeNarrationOutro(text: string, outro = DEFAULT_OUTRO): st
   return withoutOutro ? `${withoutOutro}.\n\n${selectedOutro}` : selectedOutro;
 }
 
-function minWordsForDuration(durationSeconds: number): number {
-  if (durationSeconds <= 15) return 18;
-  if (durationSeconds <= 30) return 35;
-  if (durationSeconds <= 45) return 50;
-  return 65;
+/** Remove encerramentos conhecidos ou o encerramento atualmente selecionado. */
+export function removeNarrationOutro(text: string, outro = ""): string {
+  const candidates = [outro, DEFAULT_OUTRO, LEGACY_CAPTURE_OUTRO]
+    .map((candidate) => candidate.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  let body = text;
+  for (const candidate of candidates) {
+    body = body.replace(new RegExp(`\\s*${escapeRegExp(candidate)}\\s*`, "gi"), " ");
+  }
+  return body
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .replace(/\s+([.!?…])/g, "$1");
+}
+
+export function minimumWordsForDuration(durationSeconds: number): number {
+  if (durationSeconds <= 10) return 18;
+  if (durationSeconds <= 15) return 25;
+  if (durationSeconds <= 30) return 55;
+  if (durationSeconds <= 45) return 85;
+  return 115;
+}
+
+export function maximumWordsForDuration(durationSeconds: number): number {
+  if (durationSeconds <= 10) return 24;
+  if (durationSeconds <= 15) return 36;
+  if (durationSeconds <= 30) return 72;
+  if (durationSeconds <= 45) return 108;
+  return 144;
 }
 
 function escapeRegExp(value: string): string {
