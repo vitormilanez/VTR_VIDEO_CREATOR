@@ -103,12 +103,22 @@ export const useStore = create<State>()(
         set((s) => ({
           trends: s.trends.map((t) => (t.id === id ? { ...t, ...patch } : t)),
         })),
-      addIdea: (i) => set((s) => ({ ideas: [i, ...s.ideas] })),
+      addIdea: (i) =>
+        set((s) => ({
+          ideas: s.ideas.some((idea) => idea.id === i.id)
+            ? s.ideas.map((idea) => (idea.id === i.id ? i : idea))
+            : [i, ...s.ideas],
+        })),
       updateIdea: (id, patch) =>
         set((s) => ({
           ideas: s.ideas.map((i) => (i.id === id ? { ...i, ...patch } : i)),
         })),
-      addScript: (sc) => set((s) => ({ scripts: [sc, ...s.scripts] })),
+      addScript: (sc) =>
+        set((s) => ({
+          scripts: s.scripts.some((script) => script.id === sc.id)
+            ? s.scripts.map((script) => (script.id === sc.id ? sc : script))
+            : [sc, ...s.scripts],
+        })),
       updateScript: (id, patch) =>
         set((s) => ({
           scripts: s.scripts.map((sc) => (sc.id === id ? { ...sc, ...patch } : sc)),

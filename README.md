@@ -140,6 +140,17 @@ Fotos, videos e audios nao sao gravados no Google Sheets nem no snapshot. Eles s
 
 O titular precisa confirmar a autorizacao na interface e concluir o consentimento oficial do HeyGen antes do avatar ser usado em producao.
 
+## Publicacao no Instagram
+
+O app publica videos prontos diretamente como Reel ou Story pela API oficial da Meta. As
+credenciais ficam somente no backend. Configure `META_ACCESS_TOKEN` e
+`INSTAGRAM_BUSINESS_ACCOUNT_ID` no `.env`, reinicie a API e use **Configuracoes > Testar
+conexao**. Depois, abra um video com status `pronto` e clique em **Publicar no Instagram**.
+
+A Meta precisa conseguir baixar o arquivo por uma URL HTTPS publica; URLs locais nao funcionam.
+Stories via API exigem conta Business e nao incluem legenda ou stickers interativos. Veja o passo
+a passo em `docs/setup-instagram-meta.md`.
+
 ## Arquivos locais ignorados
 
 O `.gitignore` mantem fora do git credenciais, tokens OAuth, `.env`, ambientes virtuais, snapshots, logs, videos gerados e fotos pessoais usadas como referencia de avatar.

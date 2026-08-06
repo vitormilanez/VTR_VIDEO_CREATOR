@@ -141,7 +141,8 @@ function RoteiroDetalhe() {
     [durationSeconds, narrationText, outroText],
   );
   const hasHighCreditConsumption = durationSeconds >= 45;
-  const canSendToProduction = qualityIssues.length === 0;
+  const approvalReady = draft?.status === "aprovado_clinicamente";
+  const canSendToProduction = qualityIssues.length === 0 && approvalReady;
   const narrationWords = narrationText.trim().split(/\s+/).filter(Boolean).length;
   const estimatedSpeechSeconds = Math.max(1, Math.round(narrationWords / 2.4));
 
@@ -241,20 +242,26 @@ function RoteiroDetalhe() {
   });
   const productionBlockedReason = qualityIssues[0]
     ? `Revise a fala final: ${qualityIssues[0]}`
-    : catalogLoading
-      ? "Carregando avatares e vozes da HeyGen."
-      : !avatarId
-        ? "Selecione um avatar pronto."
-        : !voiceId
-          ? "Selecione uma voz."
-          : saving
-            ? "Salvando roteiro."
-            : null;
+    : !approvalReady
+      ? 'Conclua a revisão e altere o status do roteiro para "Pronto".'
+      : catalogLoading
+        ? "Carregando avatares e vozes da HeyGen."
+        : !avatarId
+          ? "Selecione um avatar pronto."
+          : !voiceId
+            ? "Selecione uma voz."
+            : saving
+              ? "Salvando roteiro."
+              : null;
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
     if (!canSendToProduction) {
-      toast.error(`Revise o texto falado antes de enviar: ${qualityIssues[0]}`);
+      toast.error(
+        qualityIssues[0]
+          ? `Revise o texto falado antes de enviar: ${qualityIssues[0]}`
+          : 'Conclua a revisão e altere o status do roteiro para "Pronto".',
+      );
       return;
     }
     setSending(true);
@@ -714,6 +721,11 @@ function RoteiroDetalhe() {
                     </SelectContent>
                   </Select>
                 </Field>
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  {durationSeconds <= 15
+                    ? "A duração final acompanha a fala, sem silêncio para completar o tempo."
+                    : "O Video Agent organiza o ritmo e as cenas dentro deste tempo aproximado."}
+                </p>
                 {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
               </div>
               <Field label="Jeito de falar">
@@ -731,30 +743,39 @@ function RoteiroDetalhe() {
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Direção visual">
-                <Select
-                  value={styleId || "clean"}
-                  onValueChange={(value) => setStyleId(value === "clean" ? "" : value)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="clean">Clean - visual clínico</SelectItem>
-                    {styles
-                      .filter((style) =>
-                        orientation === "portrait"
-                          ? style.aspect_ratio === "9:16"
-                          : style.aspect_ratio === "16:9",
-                      )
-                      .map((style) => (
-                        <SelectItem key={style.style_id} value={style.style_id}>
-                          Cinematic - {style.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              </Field>
+              {durationSeconds <= 15 ? (
+                <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2.5">
+                  <div className="text-xs font-medium">Clipe contínuo</div>
+                  <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                    O avatar fala em uma tomada direta, com ritmo ajustado automaticamente.
+                  </p>
+                </div>
+              ) : (
+                <Field label="Direção visual">
+                  <Select
+                    value={styleId || "clean"}
+                    onValueChange={(value) => setStyleId(value === "clean" ? "" : value)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="clean">Clean - visual clínico</SelectItem>
+                      {styles
+                        .filter((style) =>
+                          orientation === "portrait"
+                            ? style.aspect_ratio === "9:16"
+                            : style.aspect_ratio === "16:9",
+                        )
+                        .map((style) => (
+                          <SelectItem key={style.style_id} value={style.style_id}>
+                            Cinematic - {style.name}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              )}
             </div>
             <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-2">
               <FriendlySwitch
@@ -922,8 +943,9 @@ function RoteiroDetalhe() {
             catalogError={catalogError}
             avatarReady={Boolean(avatarId)}
             voiceReady={Boolean(voiceId)}
-            speechReady={canSendToProduction}
+            speechReady={qualityIssues.length === 0}
             speechIssue={qualityIssues[0]}
+            approvalReady={approvalReady}
             saved={!dirty}
           />
           <CompliancePanel
@@ -1198,6 +1220,7 @@ function ProductionReadinessCard({
   voiceReady,
   speechReady,
   speechIssue,
+  approvalReady,
   saved,
 }: {
   catalogLoading: boolean;
@@ -1206,9 +1229,11 @@ function ProductionReadinessCard({
   voiceReady: boolean;
   speechReady: boolean;
   speechIssue?: string;
+  approvalReady: boolean;
   saved: boolean;
 }) {
-  const blockingReady = !catalogLoading && avatarReady && voiceReady && speechReady;
+  const blockingReady =
+    !catalogLoading && avatarReady && voiceReady && speechReady && approvalReady;
   const checks = [
     {
       label: "Avatar",
@@ -1227,6 +1252,12 @@ function ProductionReadinessCard({
       ready: speechReady,
       pending: false,
       detail: speechIssue || "Sem alertas de duração ou encerramento",
+    },
+    {
+      label: "Revisão",
+      ready: approvalReady,
+      pending: false,
+      detail: approvalReady ? "Roteiro marcado como Pronto" : 'Altere o status para "Pronto"',
     },
     {
       label: "Sheets",

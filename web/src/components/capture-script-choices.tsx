@@ -56,7 +56,8 @@ export function CaptureScriptChoices({
             <Zap className="h-5 w-5 text-status-info" /> Escolha quais hooks de {duration}s produzir
           </DialogTitle>
           <p className="text-sm text-muted-foreground">
-            Os três roteiros estão abaixo. Marque um, dois ou os três para seguir para produção.
+            Os três roteiros estão abaixo. Marque um, dois ou os três para revisar a fala antes da
+            produção.
           </p>
         </DialogHeader>
         <div className="grid gap-3 md:grid-cols-3">

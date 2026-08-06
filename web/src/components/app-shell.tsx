@@ -13,6 +13,7 @@ import {
   PanelsTopLeft,
   ScanFace,
   Scissors,
+  Newspaper,
 } from "lucide-react";
 import {
   Sidebar,
@@ -46,6 +47,7 @@ const navGroups: Array<{ label: string | null; items: NavItem[] }> = [
     label: "Criacao",
     items: [
       { title: "Radar de tendencias", url: "/radar", icon: Radar },
+      { title: "Noticias - Rede Social", url: "/noticias", icon: Newspaper },
       { title: "Ideias", url: "/ideias", icon: Lightbulb },
       { title: "Roteiros", url: "/roteiros", icon: FileText },
     ],

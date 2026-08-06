@@ -1,14 +1,17 @@
 import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
-import { DataToolbar } from "@/components/data-toolbar";
 import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
+import { WeeklyArchiveSwitch } from "@/components/weekly-archive-switch";
+import { EditorialSignals } from "@/components/editorial-signals";
 import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { genId, useStore } from "@/lib/store";
+import { splitWeekly, type WeeklyView } from "@/lib/weekly-archive";
 import {
   appendIdea,
   appendTrend,
@@ -56,6 +59,7 @@ import {
 } from "@/components/ui/sheet";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   ArrowDownUp,
   ExternalLink,
@@ -63,8 +67,11 @@ import {
   Plus,
   Radar,
   RefreshCcw,
+  Search,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -115,6 +122,7 @@ export function RadarPage() {
   );
   const [ordenacao, setOrdenacao] = useState<string>("recentes");
   const [busca, setBusca] = useState("");
+  const [weeklyView, setWeeklyView] = useState<WeeklyView>("current");
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [generatingIdeaId, setGeneratingIdeaId] = useState<string | null>(null);
@@ -151,7 +159,10 @@ export function RadarPage() {
     };
   }, [preview?.id, preview?.link, preview?.sinal, preview?.subtema, preview?.titulo]);
 
-  const filtered = trends.filter((t) => {
+  const weekly = splitWeekly(trends, (trend) => trend.criadoEm);
+  const weeklyTrends = weeklyView === "current" ? weekly.current : weekly.archive;
+
+  const filtered = weeklyTrends.filter((t) => {
     if (familia !== "todas" && t.familia !== familia) return false;
     if (status !== "todos" && t.status !== status) return false;
     if (prioridade !== "todas" && t.prioridade !== prioridade) return false;
@@ -169,7 +180,7 @@ export function RadarPage() {
   });
 
   const fontes = Array.from(
-    new Set(trends.map((trend) => sourceGroup(trend.fonte)).filter(Boolean)),
+    new Set(weeklyTrends.map((trend) => sourceGroup(trend.fonte)).filter(Boolean)),
   ).sort();
   const ordered = [...filtered].sort((a, b) => {
     if (ordenacao === "potencial") return (b.potencial || 0) - (a.potencial || 0);
@@ -183,7 +194,22 @@ export function RadarPage() {
     em_analise: 0,
     descartado: 0,
   };
-  trends.forEach((t) => (statusCounts[t.status] += 1));
+  weeklyTrends.forEach((t) => (statusCounts[t.status] += 1));
+  const activeFilterCount = [
+    familia !== "todas",
+    prioridade !== "todas",
+    fonte !== "todas",
+    potencialMinimo !== "0",
+    ordenacao !== "recentes",
+  ].filter(Boolean).length;
+
+  function clearAdvancedFilters() {
+    setFamilia("todas");
+    setPrioridade("todas");
+    setFonte("todas");
+    setPotencialMinimo("0");
+    setOrdenacao("recentes");
+  }
 
   function ideaForTrend(trend: Trend) {
     return ideas
@@ -289,20 +315,27 @@ export function RadarPage() {
       actions={
         <>
           <WithTooltip label="Rodar busca real (Google News/Trends) e sincronizar com o Sheets">
-            <Button size="sm" variant="secondary" onClick={handleBuscar} disabled={loading}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={handleBuscar}
+              disabled={loading}
+              aria-label="Buscar tendências"
+            >
               {loading ? (
-                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin sm:mr-1" />
               ) : (
-                <RefreshCcw className="mr-1 h-4 w-4" />
+                <RefreshCcw className="h-4 w-4 sm:mr-1" />
               )}
-              Buscar tendencias
+              <span className="hidden sm:inline">Buscar tendências</span>
             </Button>
           </WithTooltip>
           <Dialog open={open} onOpenChange={setOpen}>
             <WithTooltip label="Cadastrar tendencia manualmente">
               <DialogTrigger asChild>
-                <Button size="sm">
-                  <Plus className="mr-1 h-4 w-4" /> Nova tendencia
+                <Button size="sm" aria-label="Nova tendência">
+                  <Plus className="h-4 w-4 sm:mr-1" />
+                  <span className="hidden sm:inline">Nova tendência</span>
                 </Button>
               </DialogTrigger>
             </WithTooltip>
@@ -318,95 +351,172 @@ export function RadarPage() {
         </>
       }
     >
-      <StatusChips
+      <WeeklyArchiveSwitch
         className="mb-3"
-        value={status}
-        onChange={setStatus}
-        options={[
-          { value: "novo", label: "Novas", tone: "info", count: statusCounts.novo },
-          {
-            value: "em_analise",
-            label: "Em analise",
-            tone: "warn",
-            count: statusCounts.em_analise,
-          },
-          {
-            value: "descartado",
-            label: "Descartadas",
-            tone: "neutral",
-            count: statusCounts.descartado,
-          },
-        ]}
+        value={weeklyView}
+        onChange={setWeeklyView}
+        currentCount={weekly.current.length}
+        archiveCount={weekly.archive.length}
       />
-      <DataToolbar search={busca} onSearch={setBusca} placeholder="Buscar por titulo...">
-        <Select value={familia} onValueChange={setFamilia}>
-          <SelectTrigger className="h-8 w-44">
-            <SelectValue placeholder="Familia" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="todas">Todas as familias</SelectItem>
-            {familias.map((f) => (
-              <SelectItem key={f} value={f}>
-                {familiaLabel[f]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={prioridade} onValueChange={setPrioridade}>
-          <SelectTrigger className="h-8 w-40">
-            <SelectValue placeholder="Prioridade" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="todas">Todas as prioridades</SelectItem>
-            {prioridades.map((p) => (
-              <SelectItem key={p} value={p}>
-                {prioridadeLabel[p].label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={fonte} onValueChange={setFonte}>
-          <SelectTrigger className="h-8 w-40">
-            <SelectValue placeholder="Fonte" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="todas">Todas as fontes</SelectItem>
-            {fontes.map((item) => (
-              <SelectItem key={item} value={item}>
-                {item}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={potencialMinimo} onValueChange={setPotencialMinimo}>
-          <SelectTrigger className="h-8 w-36">
-            <SelectValue placeholder="Potencial" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="0">Qualquer potencial</SelectItem>
-            <SelectItem value="5">5+ potencial</SelectItem>
-            <SelectItem value="7">7+ potencial</SelectItem>
-            <SelectItem value="9">9+ potencial</SelectItem>
-          </SelectContent>
-        </Select>
-        <Select value={ordenacao} onValueChange={setOrdenacao}>
-          <SelectTrigger className="h-8 w-40">
-            <ArrowDownUp className="mr-1 h-3.5 w-3.5" />
-            <SelectValue placeholder="Ordenar" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="recentes">Mais recentes</SelectItem>
-            <SelectItem value="potencial">Maior potencial</SelectItem>
-            <SelectItem value="prioridade">Maior prioridade</SelectItem>
-          </SelectContent>
-        </Select>
-      </DataToolbar>
+      <div className="mb-3 flex flex-col gap-2 rounded-xl border bg-card p-2 shadow-sm lg:flex-row lg:items-center">
+        <StatusChips
+          className="flex-1"
+          value={status}
+          onChange={setStatus}
+          options={[
+            { value: "novo", label: "Novas", tone: "info", count: statusCounts.novo },
+            {
+              value: "em_analise",
+              label: "Em analise",
+              tone: "warn",
+              count: statusCounts.em_analise,
+            },
+            {
+              value: "descartado",
+              label: "Descartadas",
+              tone: "neutral",
+              count: statusCounts.descartado,
+            },
+          ]}
+        />
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="relative min-w-0 flex-1 lg:w-64 lg:flex-none">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={busca}
+              onChange={(event) => setBusca(event.target.value)}
+              placeholder="Buscar tendência..."
+              className="h-8 w-full pl-8"
+            />
+          </div>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="sm" className="cursor-pointer">
+                <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
+                Filtros
+                {activeFilterCount ? (
+                  <Badge className="ml-1.5 h-5 min-w-5 px-1.5 text-[10px]">
+                    {activeFilterCount}
+                  </Badge>
+                ) : null}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-80">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">Refinar resultados</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Use apenas quando precisar reduzir a lista.
+                  </p>
+                </div>
+                {activeFilterCount ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 cursor-pointer px-2 text-xs"
+                    onClick={clearAdvancedFilters}
+                  >
+                    <X className="mr-1 h-3.5 w-3.5" /> Limpar
+                  </Button>
+                ) : null}
+              </div>
+              <div className="mt-4 grid gap-3">
+                <FilterField label="Família">
+                  <Select value={familia} onValueChange={setFamilia}>
+                    <SelectTrigger className="w-full" aria-label="Filtrar por família">
+                      <SelectValue placeholder="Família" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="todas">Todas as famílias</SelectItem>
+                      {familias.map((f) => (
+                        <SelectItem key={f} value={f}>
+                          {familiaLabel[f]}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </FilterField>
+                <FilterField label="Prioridade">
+                  <Select value={prioridade} onValueChange={setPrioridade}>
+                    <SelectTrigger className="w-full" aria-label="Filtrar por prioridade">
+                      <SelectValue placeholder="Prioridade" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="todas">Todas as prioridades</SelectItem>
+                      {prioridades.map((p) => (
+                        <SelectItem key={p} value={p}>
+                          {prioridadeLabel[p].label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </FilterField>
+                <FilterField label="Fonte">
+                  <Select value={fonte} onValueChange={setFonte}>
+                    <SelectTrigger className="w-full" aria-label="Filtrar por fonte">
+                      <SelectValue placeholder="Fonte" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="todas">Todas as fontes</SelectItem>
+                      {fontes.map((item) => (
+                        <SelectItem key={item} value={item}>
+                          {item}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </FilterField>
+                <div className="grid grid-cols-2 gap-2">
+                  <FilterField label="Potencial mínimo">
+                    <Select value={potencialMinimo} onValueChange={setPotencialMinimo}>
+                      <SelectTrigger className="w-full" aria-label="Potencial mínimo">
+                        <SelectValue placeholder="Potencial" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="0">Qualquer</SelectItem>
+                        <SelectItem value="5">5 ou mais</SelectItem>
+                        <SelectItem value="7">7 ou mais</SelectItem>
+                        <SelectItem value="9">9 ou mais</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FilterField>
+                  <FilterField label="Ordenação">
+                    <Select value={ordenacao} onValueChange={setOrdenacao}>
+                      <SelectTrigger className="w-full" aria-label="Ordenar tendências">
+                        <ArrowDownUp className="mr-1 h-3.5 w-3.5" />
+                        <SelectValue placeholder="Ordenar" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="recentes">Recentes</SelectItem>
+                        <SelectItem value="potencial">Potencial</SelectItem>
+                        <SelectItem value="prioridade">Prioridade</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FilterField>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
+      </div>
 
       {filtered.length === 0 ? (
         <EmptyState
           icon={<Radar className="h-4 w-4" />}
-          title="Nenhuma tendencia com esses filtros"
-          description="Ajuste os filtros ou capture novas tendencias."
+          title={
+            weeklyTrends.length === 0
+              ? weeklyView === "current"
+                ? "Esta semana ainda não buscamos tendências"
+                : "O arquivo ainda está vazio"
+              : "Nenhuma tendência com esses filtros"
+          }
+          description={
+            weeklyTrends.length === 0
+              ? weeklyView === "current"
+                ? "Quando a próxima busca for realizada, os novos sinais aparecerão aqui."
+                : "As tendências de semanas anteriores serão preservadas aqui automaticamente."
+              : "Ajuste os filtros para ampliar os resultados."
+          }
           action={
             <Button size="sm" variant="secondary" onClick={handleBuscar}>
               <RefreshCcw className="mr-1 h-4 w-4" /> Buscar tendencias
@@ -414,17 +524,15 @@ export function RadarPage() {
           }
         />
       ) : (
-        <div className="rounded-xl border bg-card shadow-sm">
-          <Table className="w-full table-fixed">
+        <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
+          <Table className="min-w-[620px] table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[22%]">Tendencia</TableHead>
-                <TableHead className="w-[23%]">Sinal / Dor do publico</TableHead>
-                <TableHead className="w-[11%]">Fonte</TableHead>
-                <TableHead className="w-[9%] text-center">Potencial viral</TableHead>
-                <TableHead className="w-[11%]">Prioridade</TableHead>
-                <TableHead className="w-[10%]">Status</TableHead>
-                <TableHead className="w-[14%] text-right">Acoes</TableHead>
+                <TableHead className="w-[31%]">Tema</TableHead>
+                <TableHead className="w-[29%]">Resumo</TableHead>
+                <TableHead className="w-[11%] text-center">Sinais</TableHead>
+                <TableHead className="w-[11%]">Oportunidade</TableHead>
+                <TableHead className="w-[18%] text-right">Ação</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -434,12 +542,16 @@ export function RadarPage() {
                 return (
                   <TableRow
                     key={t.id}
-                    className={generated ? "cursor-pointer bg-status-success/5" : "cursor-pointer"}
+                    className={
+                      generated
+                        ? "group cursor-pointer bg-status-success/5"
+                        : "group cursor-pointer"
+                    }
                     onClick={() => setPreview(t)}
                   >
-                    <TableCell className="align-top">
+                    <TableCell className="align-top py-4">
                       <div className="flex items-center gap-2">
-                        <div className="truncate font-medium">{t.titulo}</div>
+                        <div className="line-clamp-2 font-semibold leading-5">{t.titulo}</div>
                         {generated ? (
                           <Badge
                             variant="outline"
@@ -449,60 +561,63 @@ export function RadarPage() {
                           </Badge>
                         ) : null}
                       </div>
-                      {t.subtema ? (
-                        <div className="truncate text-xs text-muted-foreground">{t.subtema}</div>
-                      ) : null}
-                      <div className="mt-1">
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      <div className="mt-2 flex min-w-0 items-center gap-2">
+                        <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
                           {familiaLabel[t.familia]}
                         </span>
+                        {t.link ? (
+                          <a
+                            href={t.link}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(event) => event.stopPropagation()}
+                            className="flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground hover:underline"
+                            title={t.fonte}
+                          >
+                            <span className="truncate">{sourceGroup(t.fonte)}</span>
+                            <ExternalLink className="h-3 w-3 shrink-0" />
+                          </a>
+                        ) : (
+                          <span className="truncate text-[10px] text-muted-foreground">
+                            {sourceGroup(t.fonte)}
+                          </span>
+                        )}
                       </div>
                     </TableCell>
-                    <TableCell className="align-top">
-                      {t.sinal ? <div className="line-clamp-2 text-sm">{t.sinal}</div> : null}
-                      {t.dorPublico ? (
-                        <div className="line-clamp-2 text-xs text-muted-foreground">
-                          {t.dorPublico}
-                        </div>
-                      ) : null}
-                      {!t.sinal && !t.dorPublico ? (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      ) : null}
+                    <TableCell className="align-top py-4">
+                      <div className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+                        {t.sinal || t.dorPublico || t.subtema || "Resumo não informado."}
+                      </div>
+                      <span className="mt-1 block text-[10px] font-medium text-status-info opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                        Ver completo
+                      </span>
                     </TableCell>
-                    <TableCell className="align-top text-muted-foreground">
-                      {t.link ? (
-                        <a
-                          href={t.link}
-                          target="_blank"
-                          rel="noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="flex items-center gap-1 truncate hover:text-foreground hover:underline"
-                          title={t.fonte}
-                        >
-                          <span className="truncate">{sourceGroup(t.fonte)}</span>
-                          <ExternalLink className="h-3 w-3 shrink-0" />
-                        </a>
-                      ) : (
-                        <span className="block truncate" title={t.fonte}>
-                          {sourceGroup(t.fonte)}
-                        </span>
-                      )}
+                    <TableCell
+                      className="align-top py-3 text-center"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <EditorialSignals
+                        priority={t.prioridade}
+                        note={t.notas}
+                        noteLabel="Notas editoriais"
+                      />
                     </TableCell>
-                    <TableCell className="text-center">
+                    <TableCell className="align-top py-4">
                       <PotencialBadge valor={t.potencial} />
+                      <div className="mt-1.5 text-[11px] text-muted-foreground">
+                        {trendStatusLabel[t.status].label}
+                      </div>
                     </TableCell>
-                    <TableCell>
-                      <StatusBadge {...prioridadeLabel[t.prioridade]} />
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge {...trendStatusLabel[t.status]} />
-                    </TableCell>
-                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                    <TableCell
+                      className="align-top py-3 text-right"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       <div className="flex justify-end gap-1">
                         <WithTooltip label="Gerar ideia a partir desta tendencia">
                           <Button
                             size="sm"
                             variant={generated ? "ghost" : "secondary"}
+                            aria-label={generated ? "Abrir ideia gerada" : "Gerar ideia"}
                             disabled={generatingIdeaId === t.id}
                             onClick={() =>
                               linkedIdea
@@ -511,15 +626,17 @@ export function RadarPage() {
                             }
                           >
                             {generatingIdeaId === t.id ? (
-                              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                              <Loader2 className="h-3.5 w-3.5 animate-spin xl:mr-1" />
                             ) : (
-                              <Sparkles className="mr-1 h-3.5 w-3.5" />
+                              <Sparkles className="h-3.5 w-3.5 xl:mr-1" />
                             )}
-                            {generatingIdeaId === t.id
-                              ? "Lendo fonte"
-                              : generated
-                                ? "Ver ideia"
-                                : "Ideia"}
+                            <span className="hidden xl:inline">
+                              {generatingIdeaId === t.id
+                                ? "Lendo fonte"
+                                : generated
+                                  ? "Ver ideia"
+                                  : "Ideia"}
+                            </span>
                           </Button>
                         </WithTooltip>
                         <ConfirmAction
@@ -530,7 +647,7 @@ export function RadarPage() {
                           onConfirm={() => descartarTrend(t)}
                           trigger={
                             <WithTooltip label="Descartar tendencia">
-                              <Button size="sm" variant="ghost">
+                              <Button size="sm" variant="ghost" aria-label="Descartar tendência">
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
                             </WithTooltip>
@@ -737,6 +854,15 @@ function Meta({ label, value }: { label: string; value: string }) {
         {label}
       </dt>
       <dd className="break-words tabular-nums">{value}</dd>
+    </div>
+  );
+}
+
+function FilterField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid gap-1.5">
+      <span className="text-[11px] font-medium text-muted-foreground">{label}</span>
+      {children}
     </div>
   );
 }

@@ -1,8 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { useStore } from "@/lib/store";
-import { saveSettings } from "@/lib/api/local";
+import { fetchInstagramStatus, saveSettings, type InstagramStatus } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,7 +17,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { Loader2, Save } from "lucide-react";
+import { Instagram, Loader2, RefreshCcw, Save } from "lucide-react";
 import { defaultSettings } from "@/lib/mock-data";
 
 type RadarFonte = "google_news" | "gdelt" | "pubmed" | "reddit" | "serpapi";
@@ -87,6 +87,8 @@ function ConfiguracoesPage() {
   const [potencialMinimo, setPotencialMinimo] = useState(String(currentRadar.potencialMinimo));
   const [integracoes, setIntegracoes] = useState(currentIntegrations);
   const [saving, setSaving] = useState(false);
+  const [instagramStatus, setInstagramStatus] = useState<InstagramStatus | null>(null);
+  const [checkingInstagram, setCheckingInstagram] = useState(false);
 
   useEffect(() => {
     setTemas(settings.temasPrioritarios.join("\n"));
@@ -99,6 +101,30 @@ function ConfiguracoesPage() {
     setPotencialMinimo(String(nextRadar.potencialMinimo));
     setIntegracoes(settings.integracoes ?? defaultSettings.integracoes);
   }, [settings]);
+
+  const testarInstagram = useCallback(async (showToast = true) => {
+    setCheckingInstagram(true);
+    try {
+      const status = await fetchInstagramStatus();
+      setInstagramStatus(status);
+      setIntegracoes((current) => ({ ...current, meta: status.connected }));
+      if (showToast) {
+        if (status.connected) toast.success(`Instagram @${status.account?.username} conectado.`);
+        else toast.error(status.detail);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Nao foi possivel testar o Instagram.";
+      setInstagramStatus({ configured: false, connected: false, account: null, detail: message });
+      if (showToast) toast.error(message);
+    } finally {
+      setCheckingInstagram(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void testarInstagram(false);
+  }, [testarInstagram]);
 
   async function salvar() {
     const next = {
@@ -261,12 +287,47 @@ function ConfiguracoesPage() {
               value={integracoes.heygen}
               onChange={(v) => setIntegracoes((current) => ({ ...current, heygen: v }))}
             />
-            <IntegrationRow
-              label="Meta Graph API"
-              desc="Necessario para metricas de Instagram/Reels."
-              value={integracoes.meta}
-              onChange={(v) => setIntegracoes((current) => ({ ...current, meta: v }))}
-            />
+            <div className="rounded border p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <Instagram className="h-5 w-5 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">Instagram / Meta Graph API</div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {instagramStatus?.connected
+                        ? `@${instagramStatus.account?.username ?? "conta profissional"}`
+                        : (instagramStatus?.detail ?? "Verificando credenciais do backend...")}
+                    </div>
+                  </div>
+                </div>
+                <span
+                  className={
+                    "shrink-0 text-xs " +
+                    (instagramStatus?.connected ? "text-status-success" : "text-muted-foreground")
+                  }
+                >
+                  {checkingInstagram
+                    ? "Verificando..."
+                    : instagramStatus?.connected
+                      ? "Conectado"
+                      : "Nao conectado"}
+                </span>
+              </div>
+              <Button
+                className="mt-3"
+                size="sm"
+                variant="secondary"
+                disabled={checkingInstagram}
+                onClick={() => void testarInstagram()}
+              >
+                {checkingInstagram ? (
+                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCcw className="mr-1 h-4 w-4" />
+                )}
+                Testar conexao
+              </Button>
+            </div>
             <IntegrationRow
               label="Google Sheets"
               desc="Import/export opcional da esteira editorial."
@@ -275,8 +336,8 @@ function ConfiguracoesPage() {
             />
           </div>
           <p className="mt-3 text-[11px] text-muted-foreground">
-            Chaves de API (HEYGEN_API_KEY, META_ACCESS_TOKEN, credenciais Google) ficam apenas no
-            backend. Este toggle simula a conexao ate a fase de integracao real.
+            As chaves ficam apenas no backend. A conexao do Instagram acima e validada em tempo real
+            e habilita a publicacao de Reels e Stories na tela de cada video pronto.
           </p>
         </section>
 

@@ -42,6 +42,7 @@ from api.cut_service import prepare_cut_job, process_cut_project
 from api.job_store import JobStore
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
+from integrations.instagram_client import InstagramClient
 from integrations.portuguese_br import prepare_script_for_heygen_voice
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -468,6 +469,11 @@ def _video_prompt(
             "Do not mention medication doses, promise outcomes, or make sensational claims.",
             f"Target duration: approximately {duration_seconds} seconds. Do not pad with silence or pauses.",
             (
+                "Treat the supplied script as the complete content plan, not as a timing constraint. "
+                "Preserve every medical fact and caution. You may improve only brief transitions, without "
+                "adding new claims. Let the narration determine the final duration and never fill time with silence."
+            ),
+            (
                 "Deliver the supplied script verbatim with a natural cadence. Do not add transitions or filler words."
                 if omit_outro
                 else speech_directions.get(speech_mode, speech_directions["natural"])
@@ -685,6 +691,8 @@ def map_scripts(rows: list[dict]) -> list[dict]:
                 "editorialTone": r.get("Tom editorial") or None,
                 "textoFalado": r.get("Texto falado") or "",
                 "outroText": r.get("Frase final") or MANDATORY_VIDEO_OUTRO,
+                "generationProvider": r.get("Gerado por") or None,
+                "generationFlowVersion": r.get("Versão do fluxo") or None,
             }
         )
     return out
@@ -846,6 +854,13 @@ class AppSettingsIn(BaseModel):
     radar: RadarSettingsIn = Field(default_factory=RadarSettingsIn)
     integracoes: IntegrationsSettingsIn = Field(default_factory=IntegrationsSettingsIn)
     heygen: HeyGenSettingsIn = Field(default_factory=HeyGenSettingsIn)
+
+
+class InstagramPublishIn(BaseModel):
+    videoJobId: str = Field(min_length=3, max_length=120)
+    mediaType: Literal["REELS", "STORIES"] = "REELS"
+    caption: str = Field(default="", max_length=2200)
+    shareToFeed: bool = True
 
 
 def _clean_string_list(values: list[str], *, limit: int = 80) -> list[str]:
@@ -1072,6 +1087,83 @@ def health() -> dict:
         "snapshot_exists": SNAPSHOT.exists(),
         "operational_db": OPERATIONAL_DB.exists(),
     }
+
+
+@app.get("/api/instagram/status")
+def instagram_status() -> dict:
+    """Valida as credenciais Meta sem enviar ou alterar conteudo."""
+    client = InstagramClient()
+    if not client.is_configured:
+        return {
+            "configured": False,
+            "connected": False,
+            "account": None,
+            "detail": "Configure META_ACCESS_TOKEN e INSTAGRAM_BUSINESS_ACCOUNT_ID no backend.",
+        }
+    try:
+        profile = client.profile()
+    except (RuntimeError, requests.RequestException) as exc:
+        return {
+            "configured": True,
+            "connected": False,
+            "account": None,
+            "detail": str(exc),
+        }
+    return {
+        "configured": True,
+        "connected": True,
+        "account": {
+            "id": profile.get("id"),
+            "username": profile.get("username"),
+            "name": profile.get("name"),
+            "profilePictureUrl": profile.get("profile_picture_url"),
+            "followersCount": profile.get("followers_count"),
+            "mediaCount": profile.get("media_count"),
+        },
+        "detail": "Conta profissional conectada.",
+    }
+
+
+@app.post("/api/instagram/publish")
+def instagram_publish(payload: InstagramPublishIn) -> dict:
+    """Publica um video pronto como Reel ou Story depois da confirmacao na UI."""
+    job = _job_store().get("video", payload.videoJobId)
+    if not job:
+        raise HTTPException(status_code=404, detail="Video nao encontrado.")
+    if job.get("status") != "pronto":
+        raise HTTPException(status_code=409, detail="O video precisa estar pronto antes de publicar.")
+    video_url = str(job.get("videoUrl") or "")
+    parsed = urlparse(video_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise HTTPException(
+            status_code=409,
+            detail="O Instagram exige uma URL HTTPS publica para buscar o video.",
+        )
+
+    client = InstagramClient()
+    if not client.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Configure META_ACCESS_TOKEN e INSTAGRAM_BUSINESS_ACCOUNT_ID no backend.",
+        )
+    try:
+        publication = client.publish_video(
+            video_url,
+            media_type=payload.mediaType,
+            caption=payload.caption.strip(),
+            share_to_feed=payload.shareToFeed,
+        )
+    except (RuntimeError, requests.RequestException) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    publication["publishedAt"] = _now()
+    history = job.get("instagramPublications")
+    if not isinstance(history, list):
+        history = []
+    job["instagramPublications"] = [*history, publication]
+    job["atualizadoEm"] = _now()
+    _job_store().upsert("video", job)
+    return {"ok": True, "publication": publication, "job": job}
 
 
 @app.get("/api/heygen/catalog")
@@ -1523,6 +1615,54 @@ class VideoCreateIn(BaseModel):
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
 
 
+SHORT_DIRECT_VIDEO_DURATIONS = frozenset({10, 15})
+SHORT_VIDEO_VOICE_SPEEDS = {
+    "fiel": 1.0,
+    "natural": 1.03,
+    "direto": 1.08,
+}
+
+
+def _direct_video_payload(
+    *,
+    script: dict[str, Any],
+    narration_text: str,
+    avatar_id: str,
+    voice_id: str,
+    orientation: str,
+    speech_mode: str,
+    captions: bool,
+    optimize_pronunciation: bool,
+) -> dict[str, Any]:
+    """Monta um video curto deterministico, sem impor duracao artificial."""
+    spoken_text = re.sub(r"\s+", " ", narration_text).strip()
+    if optimize_pronunciation:
+        spoken_text = prepare_script_for_heygen_voice(
+            spoken_text,
+            add_sentence_breaks=False,
+        )
+    speed = SHORT_VIDEO_VOICE_SPEEDS.get(speech_mode, SHORT_VIDEO_VOICE_SPEEDS["natural"])
+    payload: dict[str, Any] = {
+        "type": "avatar",
+        "avatar_id": avatar_id,
+        "title": str(script.get("titulo") or "AI Video Creator - video curto"),
+        "aspect_ratio": "9:16" if orientation == "portrait" else "16:9",
+        "resolution": "720p",
+        "output_format": "mp4",
+        "script": spoken_text,
+        "voice_id": voice_id,
+        "voice_settings": {
+            "speed": speed,
+            "pitch": 0,
+            "volume": 1,
+            "locale": "pt-BR",
+        },
+    }
+    if captions:
+        payload["caption"] = {"file_format": "srt", "style": "default"}
+    return payload
+
+
 class NaturalizeScriptIn(BaseModel):
     text: str = Field(min_length=20, max_length=6000)
     medicalCautions: str = Field(default="", max_length=2000)
@@ -1648,7 +1788,7 @@ _SCRIPT_GENERATION_SCHEMA = {
 }
 
 
-SCRIPT_GENERATION_PROMPT_VERSION = "2026-08-03-v3-duration-enforced"
+SCRIPT_GENERATION_PROMPT_VERSION = "2026-08-05-v4-claude-flow-validated"
 
 
 def _script_generation_system(tone: str, duration_seconds: int) -> str:
@@ -1783,6 +1923,7 @@ class GenerateScriptIn(BaseModel):
     editorialTone: Literal["positivo", "neutro", "apreensivo"] = "neutro"
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
     outro: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
+    requireClaude: bool = False
 
 
 def _script_risk_for_idea(idea: IdeaForScriptIn) -> str:
@@ -1916,6 +2057,11 @@ def generate_script(payload: GenerateScriptIn) -> dict:
     pelo usuario ANTES desta chamada, entao nunca geramos os tres tons de uma vez.
     """
     if not os.getenv("ANTHROPIC_API_KEY"):
+        if payload.requireClaude:
+            raise HTTPException(
+                status_code=503,
+                detail="Claude não está configurado. Nenhuma ideia ou roteiro foi salvo.",
+            )
         script = _manual_script_generation(payload)
         return {"ok": True, "provider": "fallback", "script": script}
 
@@ -1942,10 +2088,20 @@ def generate_script(payload: GenerateScriptIn) -> dict:
         )
         raw_text = "".join(getattr(block, "text", "") for block in message.content)
         script = json.loads(raw_text)
-    except anthropic.APIStatusError:
+    except anthropic.APIStatusError as exc:
+        if payload.requireClaude:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Claude respondeu {exc.status_code}. O roteiro não foi salvo.",
+            )
         script = _manual_script_generation(payload)
         return {"ok": True, "provider": "fallback", "script": script}
-    except Exception:
+    except Exception as exc:
+        if payload.requireClaude:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Falha ao gerar o roteiro com Claude: {exc}. Nenhum dado foi salvo.",
+            )
         script = _manual_script_generation(payload)
         return {"ok": True, "provider": "fallback", "script": script}
 
@@ -1957,6 +2113,19 @@ def generate_script(payload: GenerateScriptIn) -> dict:
     )
     if payload.durationSeconds == 10:
         script["cta"] = ""
+
+    quality_issues = _narration_quality_issues(
+        script["textoFalado"], payload.durationSeconds, payload.outro
+    )
+    if quality_issues:
+        detail = "; ".join(quality_issues)
+        if payload.requireClaude:
+            raise HTTPException(
+                status_code=502,
+                detail=f"O roteiro do Claude não passou pela validação de fala: {detail}. Nenhum dado foi salvo.",
+            )
+        script = _manual_script_generation(payload)
+        return {"ok": True, "provider": "fallback", "script": script}
 
     response = {"ok": True, "provider": "claude", "script": script}
     _record_anthropic_usage("scripts.generate", model, message)
@@ -2120,7 +2289,12 @@ def create_video(payload: VideoCreateIn) -> dict:
 def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
     command = _heygen_cli()
     script = _find_script(payload.scriptId)
-    _validate_final_narration(
+    if script.get("status") != "aprovado_clinicamente":
+        raise HTTPException(
+            status_code=409,
+            detail="O roteiro precisa concluir a revisão de fala e estar marcado como Pronto antes do HeyGen.",
+        )
+    final_narration = _validate_final_narration(
         script,
         payload.narrationText,
         payload.durationSeconds,
@@ -2141,50 +2315,78 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
     if avatar_id not in allowed_avatar_ids:
         raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
 
-    args = [
-        command,
-        "video-agent",
-        "create",
-        "--prompt",
-        _video_prompt(
-            script,
-            duration_seconds=payload.durationSeconds,
-            speech_mode=payload.speechMode,
-            captions=payload.captions,
-            optimize_pronunciation=payload.optimizePronunciation,
-            narration_text=payload.narrationText,
-            outro_text=payload.outroText,
-        ),
-        "--avatar-id",
-        avatar_id,
-        "--voice-id",
-        voice_id,
-        "--orientation",
-        payload.orientation,
-    ]
-    if payload.styleId and payload.durationSeconds != 10:
-        args.extend(["--style-id", payload.styleId])
     job["productionSettings"]["avatarId"] = avatar_id
+    job["productionSettings"]["voiceId"] = voice_id
     job["submissionState"] = "submitting"
     job["atualizadoEm"] = _now()
     _job_store().upsert("video", job)
-    try:
-        proc = subprocess.run(args, cwd=str(ROOT), capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="HeyGen demorou demais para aceitar o job.") from exc
-    if proc.returncode != 0:
-        raise HTTPException(status_code=502, detail=(proc.stderr or proc.stdout or "Falha ao criar video no HeyGen.")[-500:])
 
-    response = _read_json_output(proc)
-    session_id = _find_value(response, "session_id", "sessionId")
-    video_id = _find_value(response, "video_id", "videoId", "id")
-    if not session_id:
-        raise HTTPException(status_code=502, detail="HeyGen nao retornou o identificador da sessao.")
+    if payload.durationSeconds in SHORT_DIRECT_VIDEO_DURATIONS:
+        generation_mode = "direct"
+        voice_speed = SHORT_VIDEO_VOICE_SPEEDS.get(
+            payload.speechMode,
+            SHORT_VIDEO_VOICE_SPEEDS["natural"],
+        )
+        job["productionSettings"]["generationMode"] = generation_mode
+        job["productionSettings"]["voiceSpeed"] = voice_speed
+        _job_store().upsert("video", job)
+        direct_payload = _direct_video_payload(
+            script=script,
+            narration_text=final_narration,
+            avatar_id=avatar_id,
+            voice_id=voice_id,
+            orientation=payload.orientation,
+            speech_mode=payload.speechMode,
+            captions=payload.captions,
+            optimize_pronunciation=payload.optimizePronunciation,
+        )
+        response = _run_heygen_json(
+            command,
+            ["video", "create"],
+            payload=direct_payload,
+            timeout=60,
+        )
+        session_id = None
+        video_id = _find_value(response, "video_id", "videoId", "id")
+        if not video_id:
+            raise HTTPException(status_code=502, detail="HeyGen nao retornou o identificador do video.")
+    else:
+        generation_mode = "video_agent"
+        job["productionSettings"]["generationMode"] = generation_mode
+        _job_store().upsert("video", job)
+        args = [
+            "video-agent",
+            "create",
+            "--prompt",
+            _video_prompt(
+                script,
+                duration_seconds=payload.durationSeconds,
+                speech_mode=payload.speechMode,
+                captions=payload.captions,
+                optimize_pronunciation=payload.optimizePronunciation,
+                narration_text=final_narration,
+                outro_text=payload.outroText,
+            ),
+            "--avatar-id",
+            avatar_id,
+            "--voice-id",
+            voice_id,
+            "--orientation",
+            payload.orientation,
+        ]
+        if payload.styleId:
+            args.extend(["--style-id", payload.styleId])
+        response = _run_heygen_json(command, args, timeout=60)
+        session_id = _find_value(response, "session_id", "sessionId")
+        video_id = _find_value(response, "video_id", "videoId", "id")
+        if not session_id:
+            raise HTTPException(status_code=502, detail="HeyGen nao retornou o identificador da sessao.")
 
     job["status"] = "fila"
     job["submissionState"] = "submitted"
     job["atualizadoEm"] = _now()
-    job["remoteSessionId"] = session_id
+    if session_id:
+        job["remoteSessionId"] = session_id
     job["remoteVideoId"] = video_id or None
     _job_store().upsert("video", job)
     try:
@@ -2205,23 +2407,26 @@ def refresh_video(job_id: str) -> dict:
     job = _job_store().get("video", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job de video nao encontrado.")
+    settings = job.get("productionSettings") or {}
+    generation_mode = settings.get("generationMode")
     session_id = job.get("remoteSessionId")
-    if not session_id:
-        raise HTTPException(status_code=500, detail="Job sem sessao HeyGen.")
-    try:
-        proc = subprocess.run(
-            [command, "video-agent", "get", str(session_id)],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
+    video_id = job.get("remoteVideoId")
+    if generation_mode == "direct" or (not session_id and video_id):
+        if not video_id:
+            raise HTTPException(status_code=500, detail="Job sem video HeyGen.")
+        response = _run_heygen_json(
+            command,
+            ["video", "get", str(video_id)],
             timeout=45,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="HeyGen demorou demais para responder.") from exc
-    if proc.returncode != 0:
-        raise HTTPException(status_code=502, detail=(proc.stderr or proc.stdout or "Falha ao consultar video no HeyGen.")[-500:])
-
-    response = _read_json_output(proc)
+    else:
+        if not session_id:
+            raise HTTPException(status_code=500, detail="Job sem sessao HeyGen.")
+        response = _run_heygen_json(
+            command,
+            ["video-agent", "get", str(session_id)],
+            timeout=45,
+        )
     status, progress = _job_status(response)
     job["status"] = status
     job["progresso"] = progress
@@ -2229,20 +2434,35 @@ def refresh_video(job_id: str) -> dict:
     job["remoteVideoId"] = _find_value(response, "video_id", "videoId") or job.get("remoteVideoId")
     job["videoUrl"] = _find_value(response, "video_url", "videoUrl", "video_page_url", "videoPageUrl") or job.get("videoUrl")
     job["thumbnailUrl"] = _find_value(response, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
-    if job.get("remoteVideoId") and not job.get("videoUrl"):
-        video_proc = subprocess.run(
-            [command, "video", "get", str(job["remoteVideoId"])],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=45,
-        )
-        if video_proc.returncode == 0:
-            video_details = _read_json_output(video_proc)
-            job["videoUrl"] = _find_value(video_details, "video_url", "videoUrl") or job.get("videoUrl")
-            job["thumbnailUrl"] = _find_value(video_details, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
+    duration = _find_value(response, "duration", "duration_seconds", "durationSeconds")
+    if duration not in (None, ""):
+        try:
+            job["duracaoSegundos"] = round(float(duration), 2)
+        except (TypeError, ValueError):
+            pass
+    if job.get("remoteVideoId") and not job.get("videoUrl") and generation_mode != "direct":
+        try:
+            video_details = _run_heygen_json(
+                command,
+                ["video", "get", str(job["remoteVideoId"])],
+                timeout=45,
+            )
+        except HTTPException:
+            video_details = {}
+        job["videoUrl"] = _find_value(video_details, "video_url", "videoUrl") or job.get("videoUrl")
+        job["thumbnailUrl"] = _find_value(video_details, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
     if status == "erro":
-        job["erro"] = str(_find_value(response, "error", "message", "detail") or "HeyGen nao concluiu o video.")
+        job["erro"] = str(
+            _find_value(
+                response,
+                "failure_message",
+                "failureMessage",
+                "error",
+                "message",
+                "detail",
+            )
+            or "HeyGen nao concluiu o video."
+        )
     job["submissionState"] = "completed" if status == "pronto" else "processing"
     _job_store().upsert("video", job)
     return {"ok": True, "job": job}
@@ -2731,7 +2951,7 @@ def _hunt_partial_result(
 TAB_RANGE = {
     "radar": "'Radar Tendencias'!A:L",
     "ideias": "'Ideias'!A:M",
-    "roteiros": "'Roteiros'!A:T",
+    "roteiros": "'Roteiros'!A:V",
     "calendario": "'Calendario'!A:N",
 }
 TAB_TITLE = {
@@ -3000,6 +3220,9 @@ class CaptureHooksIn(BaseModel):
     prioridade: Literal["alta", "media", "baixa"] = "media"
     sourceUrl: str | None = Field(default=None, max_length=1000)
     durationSeconds: Literal[10, 15] = 10
+    editorialTone: Literal["positivo", "neutro", "apreensivo"] = "neutro"
+    outro: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
+    requireClaude: bool = False
 
 
 class TrendSummaryIn(BaseModel):
@@ -3037,6 +3260,8 @@ class ScriptIn(BaseModel):
     editorialTone: Literal["positivo", "neutro", "apreensivo"] | None = None
     textoFalado: str = ""
     outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
+    generationProvider: Literal["claude", "fallback", "manual"] | None = None
+    generationFlowVersion: str | None = Field(default=None, max_length=100)
 
 
 class CalendarIn(BaseModel):
@@ -3160,6 +3385,8 @@ SCRIPT_HEADERS = [
     "Tom editorial",
     "Texto falado",
     "Frase final",
+    "Gerado por",
+    "Versão do fluxo",
 ]
 
 
@@ -3184,7 +3411,7 @@ def _ensure_script_headers(client: Any) -> None:
     for index, value in enumerate(current[:16]):
         if value:
             merged[index] = value
-    client.update_values("'Roteiros'!A1:T1", [merged])
+    client.update_values("'Roteiros'!A1:V1", [merged])
 
 
 _EXPAND_IDEAS_SCHEMA = {
@@ -3240,8 +3467,6 @@ _CAPTURE_HOOKS_SCHEMA = {
         },
         "variants": {
             "type": "array",
-            "minItems": 3,
-            "maxItems": 3,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -3274,7 +3499,7 @@ _CAPTURE_HOOKS_SCHEMA = {
 }
 
 
-CAPTURE_HOOKS_PROMPT_VERSION = "2026-08-03-v3-duration"
+CAPTURE_HOOKS_PROMPT_VERSION = "2026-08-05-v4-claude-flow-validated"
 def _capture_topic(title: str) -> str:
     words = re.sub(r"\s+", " ", title).strip().split()
     return " ".join(words[:7]).rstrip(" ,:;.!?") or "essa tendência"
@@ -3319,7 +3544,7 @@ def _capture_hooks_fallback(payload: CaptureHooksIn) -> dict[str, Any]:
     ]
     if payload.durationSeconds == 15:
         for row in rows:
-            row["spokenText"] = f'{row["spokenText"]} {MANDATORY_VIDEO_OUTRO}'
+            row["spokenText"] = f'{row["spokenText"]} {payload.outro}'
     return {
         "analysis": {
             "capturePotential": 8,
@@ -3361,7 +3586,7 @@ def _normalize_capture_hooks(payload: CaptureHooksIn, raw: Any) -> dict[str, Any
                 flags=re.I,
             ).strip()
         else:
-            spoken_text = _normalize_generated_outro(spoken_text, MANDATORY_VIDEO_OUTRO)
+            spoken_text = _normalize_generated_outro(spoken_text, payload.outro)
         spoken_text = spoken_text if spoken_text else base["spokenText"]
         word_count = len(spoken_text.split())
         minimum_words, maximum_words = ((18, 24) if payload.durationSeconds == 10 else (25, 36))
@@ -3392,11 +3617,16 @@ def _normalize_capture_hooks(payload: CaptureHooksIn, raw: Any) -> dict[str, Any
     return {"analysis": analysis, "variants": variants}
 
 
-def _capture_hooks_system(duration_seconds: int) -> str:
+def _capture_hooks_system(duration_seconds: int, editorial_tone: str, outro: str) -> str:
+    tone_direction = {
+        "positivo": "Enquadre oportunidades de forma construtiva, sem prometer resultados.",
+        "neutro": "Use linguagem jornalística, equilibrando achado, contexto e limite.",
+        "apreensivo": "Destaque riscos reais e incertezas, sem alarmismo ou urgência falsa.",
+    }.get(editorial_tone, "Use linguagem jornalística e equilibrada.")
     duration_rule = (
         "Cada spokenText deve ter entre 18 e 24 palavras. Videos de 10 segundos nao usam frase final ou CTA falado."
         if duration_seconds == 10
-        else f'Cada spokenText deve ter entre 25 e 36 palavras e terminar exatamente com: "{MANDATORY_VIDEO_OUTRO}"'
+        else f'Cada spokenText deve ter entre 25 e 36 palavras e terminar exatamente com: "{outro}"'
     )
     return f"""Voce e um estrategista brasileiro de aquisicao para videos verticais.
 Avalie uma tendencia e crie EXATAMENTE 3 roteiros independentes de captura, cada um com cerca de {duration_seconds} segundos.
@@ -3409,6 +3639,7 @@ Objetivo:
 
 Regras obrigatorias:
 - Escreva em portugues brasileiro, direto e natural.
+- Tom editorial escolhido: {editorial_tone}. {tone_direction}
 - {duration_rule}
 - As tres estrategias precisam ser claramente diferentes: quebra de padrao, lacuna de informacao e contraste/pergunta.
 - Comece pelo impacto. Nao use saudacao, apresentacao ou contextualizacao lenta.
@@ -4388,6 +4619,11 @@ def generate_capture_hooks(payload: CaptureHooksIn) -> dict:
         return cached
 
     if not os.getenv("ANTHROPIC_API_KEY"):
+        if payload.requireClaude:
+            raise HTTPException(
+                status_code=503,
+                detail="Claude não está configurado. Nenhum roteiro de captura foi salvo.",
+            )
         return {
             "ok": True,
             "provider": "fallback",
@@ -4417,29 +4653,91 @@ def generate_capture_hooks(payload: CaptureHooksIn) -> dict:
         message = client.messages.create(
             model=model,
             max_tokens=1800,
-            system=_capture_hooks_system(payload.durationSeconds),
+            system=_capture_hooks_system(
+                payload.durationSeconds, payload.editorialTone, payload.outro
+            ),
             output_config={"format": {"type": "json_schema", "schema": _CAPTURE_HOOKS_SCHEMA}},
             messages=[{"role": "user", "content": prompt}],
         )
         raw_text = "".join(getattr(block, "text", "") for block in message.content)
         parsed = json.loads(raw_text)
-    except anthropic.APIStatusError:
+    except anthropic.APIStatusError as exc:
+        if payload.requireClaude:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Claude respondeu {exc.status_code}. Nenhum roteiro de captura foi salvo.",
+            )
         return {
             "ok": True,
             "provider": "fallback",
             **_normalize_capture_hooks(payload, _capture_hooks_fallback(payload)),
         }
-    except Exception:
+    except Exception as exc:
+        if payload.requireClaude:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Falha ao gerar capturas com Claude: {exc}. Nenhum dado foi salvo.",
+            )
         return {
             "ok": True,
             "provider": "fallback",
             **_normalize_capture_hooks(payload, _capture_hooks_fallback(payload)),
         }
 
+    raw_variants = parsed.get("variants") if isinstance(parsed, dict) else None
+    if payload.requireClaude and (
+        not isinstance(raw_variants, list)
+        or len(raw_variants) != 3
+        or any(not isinstance(item, dict) or not str(item.get("spokenText") or "").strip() for item in raw_variants)
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Claude não retornou exatamente três roteiros completos. Nenhum dado foi salvo.",
+        )
+
+    if payload.requireClaude:
+        raw_capture_issues: list[str] = []
+        for index, item in enumerate(raw_variants or []):
+            raw_spoken_text = re.sub(r"\s+", " ", str(item.get("spokenText") or "")).strip()
+            issues = _narration_quality_issues(
+                raw_spoken_text, payload.durationSeconds, payload.outro
+            )
+            if payload.durationSeconds == 10 and (
+                _strip_video_outros(raw_spoken_text) != raw_spoken_text
+                or re.search(r"\b(?:acesse|confira|siga|me siga|veja no perfil)\b", raw_spoken_text, re.I)
+            ):
+                issues.append("Vídeo de 10s não pode ter encerramento ou CTA falado")
+            if issues:
+                raw_capture_issues.append(f"Teste {index + 1}: {'; '.join(dict.fromkeys(issues))}")
+        if raw_capture_issues:
+            raise HTTPException(
+                status_code=502,
+                detail="Os roteiros do Claude não passaram pela validação de fala: "
+                + " | ".join(raw_capture_issues)
+                + ". Nenhum dado foi salvo.",
+            )
+
+    normalized = _normalize_capture_hooks(payload, parsed)
+    if payload.requireClaude:
+        capture_issues: list[str] = []
+        for item in normalized["variants"]:
+            issues = _narration_quality_issues(
+                item["spokenText"], payload.durationSeconds, payload.outro
+            )
+            if issues:
+                capture_issues.append(f'Teste {item["variant"]}: {"; ".join(issues)}')
+        if capture_issues:
+            raise HTTPException(
+                status_code=502,
+                detail="Os roteiros do Claude não passaram pela validação de fala: "
+                + " | ".join(capture_issues)
+                + ". Nenhum dado foi salvo.",
+            )
+
     response = {
         "ok": True,
         "provider": "claude",
-        **_normalize_capture_hooks(payload, parsed),
+        **normalized,
     }
     _record_anthropic_usage("trends.capture_hooks", model, message)
     _ai_cache_put("trends.capture_hooks", cache_payload, response)
@@ -4652,6 +4950,8 @@ def append_script(payload: ScriptIn) -> dict:
         payload.editorialTone or "",           # Tom editorial
         payload.textoFalado or "",             # Texto falado
         payload.outroText,                     # Frase final
+        payload.generationProvider or "",      # Gerado por
+        payload.generationFlowVersion or "",   # Versão do fluxo
     ]
     _append("roteiros", row)
     raw = dict(zip(SCRIPT_HEADERS, row))
@@ -4717,6 +5017,8 @@ def update_script(item_id: str, payload: ScriptIn) -> dict:
         payload.ideaId or "",
         payload.editorialTone or "", payload.textoFalado or "",
         payload.outroText,
+        payload.generationProvider or "",
+        payload.generationFlowVersion or "",
     ]
     try:
         client = GoogleSheetsRestClient()
@@ -4724,7 +5026,7 @@ def update_script(item_id: str, payload: ScriptIn) -> dict:
         _ensure_script_headers(client)
         values = client.get_values(TAB_RANGE["roteiros"])
         rownum = _sheet_row_number(values, item_id, "s")
-        client.update_values(f"'Roteiros'!A{rownum}:T{rownum}", [row])
+        client.update_values(f"'Roteiros'!A{rownum}:V{rownum}", [row])
     except HTTPException:
         raise
     except Exception as exc:

@@ -80,6 +80,10 @@ export interface Script {
   textoFalado?: string;
   /** Encerramento escolhido pelo usuario para este roteiro. */
   outroText?: string;
+  /** Provedor que efetivamente escreveu o texto; usado para auditoria do fluxo. */
+  generationProvider?: "claude" | "fallback" | "manual";
+  /** Versao do fluxo que criou o roteiro, preservada no Sheets. */
+  generationFlowVersion?: string;
 }
 
 export interface VideoJob {
@@ -96,6 +100,11 @@ export interface VideoJob {
   erro?: string;
   remoteSessionId?: string;
   remoteVideoId?: string;
+  productionSettings?: {
+    generationMode?: "direct" | "video_agent";
+    voiceSpeed?: number;
+    [key: string]: unknown;
+  };
 }
 
 export interface CalendarPost {

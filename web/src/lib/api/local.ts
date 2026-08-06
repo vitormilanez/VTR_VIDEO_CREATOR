@@ -132,6 +132,9 @@ export interface CaptureHooksInput {
   familia: Trend["familia"];
   prioridade: Trend["prioridade"];
   sourceUrl?: string | null;
+  editorialTone: EditorialTone;
+  outro: string;
+  requireClaude?: boolean;
 }
 
 export interface CaptureHookVariant {
@@ -243,6 +246,7 @@ export interface GenerateScriptInput {
   editorialTone: EditorialTone;
   durationSeconds?: 10 | 15 | 30 | 45 | 60;
   outro?: string;
+  requireClaude?: boolean;
 }
 
 export interface GeneratedScriptText {
@@ -708,6 +712,44 @@ export async function fetchAiCosts(): Promise<AiCosts> {
   if (!res.ok)
     throw new Error(await errorDetail(res, "Nao foi possivel consultar os custos de IA."));
   return (await res.json()) as AiCosts;
+}
+
+export interface InstagramStatus {
+  configured: boolean;
+  connected: boolean;
+  account: {
+    id: string;
+    username?: string;
+    name?: string;
+    profilePictureUrl?: string;
+    followersCount?: number;
+    mediaCount?: number;
+  } | null;
+  detail: string;
+}
+
+export interface InstagramPublication {
+  containerId: string;
+  mediaId: string;
+  mediaType: "REELS" | "STORIES";
+  publishedAt: string;
+}
+
+export async function fetchInstagramStatus(): Promise<InstagramStatus> {
+  return requestJson<InstagramStatus>("/api/instagram/status", { method: "GET" });
+}
+
+export async function publishVideoToInstagram(input: {
+  videoJobId: string;
+  mediaType: "REELS" | "STORIES";
+  caption?: string;
+  shareToFeed?: boolean;
+}): Promise<InstagramPublication> {
+  const response = await postJson<{ ok: boolean; publication: InstagramPublication }>(
+    "/api/instagram/publish",
+    input,
+  );
+  return response.publication;
 }
 
 async function errorDetail(res: Response, fallback: string): Promise<string> {

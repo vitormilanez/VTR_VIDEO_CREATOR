@@ -7,10 +7,23 @@ import {
   generateCaptureHooks,
   generateScript,
   type ArticleAnalysis,
+  type CaptureHooksResult,
 } from "@/lib/api/local";
-import { genId } from "@/lib/store";
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
 import type { EditorialTone, Idea, Script } from "@/lib/mock-data";
+
+export const SCRIPT_FLOW_VERSION = "social-to-script-v1";
+
+/** ID deterministico: repetir a mesma acao nao duplica linhas nem consome um novo fluxo. */
+function stableWorkflowId(prefix: string, ...parts: unknown[]): string {
+  const value = JSON.stringify(parts);
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${prefix}-${(hash >>> 0).toString(36)}`;
+}
 
 function isMedicationIdea(idea: Idea): boolean {
   return (
@@ -43,27 +56,44 @@ export interface GenerateScriptResult {
 }
 
 export async function generateAndPersistCaptureScripts(
-  options: Pick<GenerateScriptOptions, "idea" | "persistIdea"> & {
+  options: Pick<GenerateScriptOptions, "idea" | "persistIdea" | "editorialTone" | "outro"> & {
     durationSeconds: 10 | 15;
   },
-): Promise<{ idea: Idea; scripts: Script[]; provider: "claude" | "fallback" }> {
-  const persistedIdea = options.persistIdea ? await appendIdea(options.idea) : options.idea;
+): Promise<{
+  idea: Idea;
+  scripts: Script[];
+  provider: "claude" | "fallback";
+  analysis: CaptureHooksResult["analysis"];
+  variants: CaptureHooksResult["variants"];
+}> {
   const result = await generateCaptureHooks({
     durationSeconds: options.durationSeconds,
-    trendId: persistedIdea.trendId || persistedIdea.id,
-    titulo: persistedIdea.titulo,
-    subtema: persistedIdea.tipo,
-    sinal: persistedIdea.angulo,
-    dorPublico: persistedIdea.publicoDor,
-    notas: persistedIdea.observacaoCompliance,
-    familia: persistedIdea.familia,
-    prioridade: persistedIdea.prioridade,
-    sourceUrl: persistedIdea.linkOrigem || null,
+    trendId: options.idea.trendId || options.idea.id,
+    titulo: options.idea.titulo,
+    subtema: options.idea.tipo,
+    sinal: options.idea.angulo,
+    dorPublico: options.idea.publicoDor,
+    notas: options.idea.observacaoCompliance,
+    familia: options.idea.familia,
+    prioridade: options.idea.prioridade,
+    sourceUrl: options.idea.linkOrigem || null,
+    editorialTone: options.editorialTone,
+    outro: options.durationSeconds === 10 ? "" : options.outro || DEFAULT_OUTRO,
+    requireClaude: true,
   });
+  // Persistencia somente depois de o Claude responder e o backend validar as falas.
+  const persistedIdea = options.persistIdea ? await appendIdea(options.idea) : options.idea;
   const scripts: Script[] = [];
   for (const variant of result.variants) {
     const saved = await appendScript({
-      id: genId("s"),
+      id: stableWorkflowId(
+        "s-capture",
+        persistedIdea.id,
+        options.editorialTone,
+        options.durationSeconds,
+        variant.variant,
+        variant.spokenText,
+      ),
       ideaId: persistedIdea.id,
       categoria: persistedIdea.familia,
       tema: persistedIdea.titulo,
@@ -80,13 +110,21 @@ export async function generateAndPersistCaptureScripts(
       status: "aguardando_validacao",
       criadoEm: new Date().toISOString(),
       link: persistedIdea.linkOrigem || undefined,
-      editorialTone: "neutro",
+      editorialTone: options.editorialTone,
       textoFalado: variant.spokenText,
-      outroText: options.durationSeconds === 10 ? "" : DEFAULT_OUTRO,
+      outroText: options.durationSeconds === 10 ? "" : options.outro || DEFAULT_OUTRO,
+      generationProvider: result.provider,
+      generationFlowVersion: SCRIPT_FLOW_VERSION,
     });
     scripts.push(saved);
   }
-  return { idea: persistedIdea, scripts, provider: result.provider };
+  return {
+    idea: persistedIdea,
+    scripts,
+    provider: result.provider,
+    analysis: result.analysis,
+    variants: result.variants,
+  };
 }
 
 /**
@@ -122,6 +160,7 @@ export async function generateAndPersistScript(
     editorialTone,
     durationSeconds,
     outro: effectiveOutro,
+    requireClaude: true,
   });
 
   // A geracao e validada antes de qualquer escrita. Em uma repeticao com o
@@ -129,7 +168,16 @@ export async function generateAndPersistScript(
   const persistedIdea = options.persistIdea ? await appendIdea(idea) : idea;
 
   const script: Script = {
-    id: genId("s"),
+    id: stableWorkflowId(
+      "s",
+      persistedIdea.id,
+      persistedIdea.titulo,
+      persistedIdea.hook,
+      persistedIdea.angulo,
+      editorialTone,
+      durationSeconds,
+      effectiveOutro,
+    ),
     ideaId: persistedIdea.id,
     categoria: persistedIdea.familia,
     tema: persistedIdea.titulo,
@@ -149,6 +197,8 @@ export async function generateAndPersistScript(
     editorialTone,
     textoFalado: generated.textoFalado,
     outroText: effectiveOutro,
+    generationProvider: provider,
+    generationFlowVersion: SCRIPT_FLOW_VERSION,
   };
 
   const savedScript = await appendScript(script);

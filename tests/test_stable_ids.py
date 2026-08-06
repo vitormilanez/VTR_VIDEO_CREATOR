@@ -86,6 +86,7 @@ class StableIdTests(unittest.TestCase):
         assert_compatible(cut_service._clip_schema(None))
         assert_compatible(cut_service._clip_schema(3))
         assert_compatible(server._EXPAND_IDEAS_SCHEMA)
+        assert_compatible(server._CAPTURE_HOOKS_SCHEMA)
 
     def test_final_narration_compliance_warns_but_does_not_block_production(self) -> None:
         text = server._validate_final_narration(
@@ -166,6 +167,163 @@ class StableIdTests(unittest.TestCase):
         self.assertIn("Do not add burned-in captions", prompt)
         self.assertTrue(prompt.count(server.MANDATORY_VIDEO_OUTRO) >= 2)
         self.assertIn("This must be the final sentence", prompt)
+        self.assertIn("Let the narration determine the final duration", prompt)
+
+    def test_direct_short_video_payload_uses_continuous_speech_and_speed(self) -> None:
+        payload = server._direct_video_payload(
+            script={"titulo": "Sono e fígado"},
+            narration_text=(
+                "Dorme cinco horas ou menos? Saiba que dormir pouco está associado "
+                "a maior risco de acumular gordura no fígado."
+            ),
+            avatar_id="avatar-1",
+            voice_id="voice-1",
+            orientation="portrait",
+            speech_mode="direto",
+            captions=True,
+            optimize_pronunciation=True,
+        )
+
+        self.assertEqual(payload["aspect_ratio"], "9:16")
+        self.assertEqual(payload["voice_settings"]["speed"], 1.08)
+        self.assertEqual(payload["voice_settings"]["locale"], "pt-BR")
+        self.assertNotIn("\n", payload["script"])
+        self.assertNotIn("duration", payload)
+        self.assertEqual(payload["caption"]["style"], "default")
+
+    def test_ten_second_video_uses_direct_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original_database = server.OPERATIONAL_DB
+            original_jobs = server.VIDEO_JOBS
+            server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+            server.VIDEO_JOBS = Path(temporary) / "missing-video-jobs.json"
+            job = {
+                "id": "v-short",
+                "scriptId": "s-short",
+                "status": "fila",
+                "provider": "heygen",
+                "progresso": 0,
+                "criadoEm": "2026-08-05T12:00:00+00:00",
+                "atualizadoEm": "2026-08-05T12:00:00+00:00",
+                "submissionState": "reserved",
+                "productionSettings": {},
+            }
+            narration = (
+                "Dorme cinco horas ou menos? Saiba que dormir pouco está associado "
+                "a maior risco de acumular gordura no fígado."
+            )
+            payload = server.VideoCreateIn(
+                scriptId="s-short",
+                avatarId="avatar-1",
+                voiceId="voice-1",
+                durationSeconds=10,
+                speechMode="direto",
+                narrationText=narration,
+                outroText="",
+            )
+            try:
+                with (
+                    patch.object(server, "_heygen_cli", return_value="heygen"),
+                    patch.object(
+                        server,
+                        "_find_script",
+                        return_value={
+                            "id": "s-short",
+                            "titulo": "Sono e fígado",
+                            "status": "aprovado_clinicamente",
+                        },
+                    ),
+                    patch.object(
+                        server,
+                        "_private_avatar_library",
+                        return_value=([], [{"id": "avatar-1", "status": "completed"}], False),
+                    ),
+                    patch.object(server, "_heygen_wallet", return_value=(48.75, "usd")),
+                    patch.object(
+                        server,
+                        "_run_heygen_json",
+                        return_value={"data": {"video_id": "direct-video-1", "status": "pending"}},
+                    ) as run,
+                ):
+                    result = server._create_video_job(payload, job)
+
+                submitted_payload = run.call_args.kwargs["payload"]
+                self.assertEqual(run.call_args.args[1], ["video", "create"])
+                self.assertNotIn("\n", submitted_payload["script"])
+                self.assertEqual(submitted_payload["voice_settings"]["speed"], 1.08)
+                self.assertEqual(result["job"]["remoteVideoId"], "direct-video-1")
+                self.assertNotIn("remoteSessionId", result["job"])
+                self.assertEqual(
+                    result["job"]["productionSettings"]["generationMode"],
+                    "direct",
+                )
+            finally:
+                server.OPERATIONAL_DB = original_database
+                server.VIDEO_JOBS = original_jobs
+
+    def test_heygen_rejects_script_before_review_is_complete(self) -> None:
+        payload = server.VideoCreateIn(scriptId="s-em-revisao")
+        job = {"id": "v-bloqueado", "productionSettings": {}}
+        with patch.object(server, "_heygen_cli", return_value="heygen"), patch.object(
+            server,
+            "_find_script",
+            return_value={
+                "id": "s-em-revisao",
+                "status": "em_revisao",
+                "textoFalado": "Texto em revisão.",
+            },
+        ), patch.object(server, "_heygen_wallet") as wallet:
+            with self.assertRaises(server.HTTPException) as raised:
+                server._create_video_job(payload, job)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("marcado como Pronto", raised.exception.detail)
+        wallet.assert_not_called()
+
+    def test_refresh_direct_video_uses_video_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original_database = server.OPERATIONAL_DB
+            original_jobs = server.VIDEO_JOBS
+            server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+            server.VIDEO_JOBS = Path(temporary) / "missing-video-jobs.json"
+            job = {
+                "id": "v-direct-refresh",
+                "scriptId": "s-short",
+                "status": "fila",
+                "provider": "heygen",
+                "progresso": 0,
+                "criadoEm": "2026-08-05T12:00:00+00:00",
+                "atualizadoEm": "2026-08-05T12:00:00+00:00",
+                "submissionState": "submitted",
+                "remoteVideoId": "direct-video-1",
+                "productionSettings": {"generationMode": "direct", "voiceSpeed": 1.08},
+            }
+            try:
+                server._job_store().upsert("video", job)
+                with (
+                    patch.object(server, "_heygen_cli", return_value="heygen"),
+                    patch.object(
+                        server,
+                        "_run_heygen_json",
+                        return_value={
+                            "data": {
+                                "video_id": "direct-video-1",
+                                "status": "completed",
+                                "video_url": "https://files.heygen.ai/video/direct-video-1.mp4",
+                                "thumbnail_url": "https://files.heygen.ai/thumb/direct-video-1.jpg",
+                                "duration": 7.44,
+                            }
+                        },
+                    ) as run,
+                ):
+                    result = server.refresh_video("v-direct-refresh")
+
+                self.assertEqual(run.call_args.args[1], ["video", "get", "direct-video-1"])
+                self.assertEqual(result["job"]["status"], "pronto")
+                self.assertEqual(result["job"]["duracaoSegundos"], 7.44)
+                self.assertTrue(result["job"]["videoUrl"].endswith("direct-video-1.mp4"))
+            finally:
+                server.OPERATIONAL_DB = original_database
+                server.VIDEO_JOBS = original_jobs
 
     def test_short_video_durations_are_accepted(self) -> None:
         self.assertEqual(server.VideoCreateIn(scriptId="s-1", durationSeconds=10).durationSeconds, 10)
@@ -224,6 +382,33 @@ class StableIdTests(unittest.TestCase):
         self.assertTrue(result["script"]["textoFalado"].endswith(custom_outro))
         self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, result["script"]["textoFalado"])
         self.assertIn("cuidado", result["script"]["virada"].lower())
+
+    def test_script_generation_can_require_claude_without_silent_fallback(self) -> None:
+        payload = server.GenerateScriptIn(
+            idea=server.IdeaForScriptIn(titulo="Tendência social pronta para roteiro"),
+            editorialTone="neutro",
+            requireClaude=True,
+        )
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.generate_script(payload)
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIn("Nenhuma ideia ou roteiro foi salvo", raised.exception.detail)
+
+    def test_capture_generation_can_require_claude_without_silent_fallback(self) -> None:
+        payload = server.CaptureHooksIn(
+            trendId="social-tiktok-teste",
+            titulo="Tendência social pronta para captura",
+            familia="educativo",
+            requireClaude=True,
+        )
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False), patch.object(
+            server, "_fetch_article_context", return_value=""
+        ), patch.object(server, "_research_context_for_seed", return_value=""):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.generate_capture_hooks(payload)
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIn("Nenhum roteiro de captura foi salvo", raised.exception.detail)
 
     def test_script_generation_cache_avoids_new_paid_call(self) -> None:
         payload = server.GenerateScriptIn(
@@ -860,12 +1045,16 @@ class StableIdTests(unittest.TestCase):
                             editorialTone="positivo",
                             textoFalado="Texto falado inicial. Continue acompanhando.",
                             outroText="Continue acompanhando.",
+                            generationProvider="claude",
+                            generationFlowVersion="social-to-script-v1",
                         )
                     )["script"]
                     self.assertEqual(created["id"], "s-estavel")
                     self.assertEqual(created["ideaId"], "i-origem")
                     self.assertEqual(created["editorialTone"], "positivo")
                     self.assertEqual(created["outroText"], "Continue acompanhando.")
+                    self.assertEqual(created["generationProvider"], "claude")
+                    self.assertEqual(created["generationFlowVersion"], "social-to-script-v1")
                     self.assertEqual(server._find_script("s-estavel")["titulo"], "Roteiro inicial")
 
                     updated = server.update_script(

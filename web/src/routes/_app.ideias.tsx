@@ -8,8 +8,10 @@ import { NextStepBanner } from "@/components/next-step-banner";
 import { StatusChips } from "@/components/status-chips";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
+import { WeeklyArchiveSwitch } from "@/components/weekly-archive-switch";
 import { ToneSelectDialog } from "@/components/tone-select-dialog";
 import { CaptureScriptChoices } from "@/components/capture-script-choices";
+import { EditorialSignals } from "@/components/editorial-signals";
 import { evaluateIdeaQuality } from "@/lib/idea-quality";
 import {
   generateAndPersistCaptureScripts,
@@ -18,6 +20,7 @@ import {
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
+import { splitWeekly, type WeeklyView } from "@/lib/weekly-archive";
 import {
   analyzeArticle,
   expandIdeas,
@@ -119,6 +122,7 @@ export function IdeiasPage() {
   const [status, setStatus] = useState("todos");
   const [prioridade, setPrioridade] = useState("todas");
   const [busca, setBusca] = useState("");
+  const [weeklyView, setWeeklyView] = useState<WeeklyView>("current");
   const [preview, setPreview] = useState<Idea | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualSeed, setManualSeed] = useState("");
@@ -147,7 +151,10 @@ export function IdeiasPage() {
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
   const [captureChoices, setCaptureChoices] = useState<Script[]>([]);
 
-  const filtered = ideas.filter((i) => {
+  const weekly = splitWeekly(ideas, (idea) => idea.criadoEm);
+  const weeklyIdeas = weeklyView === "current" ? weekly.current : weekly.archive;
+
+  const filtered = weeklyIdeas.filter((i) => {
     if (familia !== "todas" && i.familia !== familia) return false;
     if (status !== "todos" && i.status !== status) return false;
     if (prioridade !== "todas" && i.prioridade !== prioridade) return false;
@@ -161,7 +168,7 @@ export function IdeiasPage() {
   );
 
   const counts: Record<IdeaStatus, number> = { novo: 0, em_analise: 0, aprovado: 0, descartado: 0 };
-  ideas.forEach((i) => (counts[i.status] += 1));
+  weeklyIdeas.forEach((i) => (counts[i.status] += 1));
 
   function scriptForIdea(idea: Idea) {
     const normalizedHook = idea.hook.trim().toLowerCase();
@@ -176,7 +183,7 @@ export function IdeiasPage() {
     return videoJobs.find((job) => job.scriptId === scriptId && job.status !== "erro");
   }
 
-  const usedIdeas = ideas.filter((idea) => Boolean(scriptForIdea(idea)));
+  const usedIdeas = weeklyIdeas.filter((idea) => Boolean(scriptForIdea(idea)));
   const pendingIdeas = ordered.filter(
     (idea) => !scriptForIdea(idea) && idea.status !== "descartado",
   );
@@ -213,34 +220,31 @@ export function IdeiasPage() {
     setIsGeneratingScript(true);
     try {
       if (scriptDuration <= 15) {
-        const {
-          idea: savedIdea,
-          scripts: captureScripts,
-          provider,
-        } = await generateAndPersistCaptureScripts({
-          idea: tonePending.idea,
-          persistIdea: tonePending.persistIdea,
-          durationSeconds: scriptDuration as 10 | 15,
-        });
+        const { idea: savedIdea, scripts: captureScripts } = await generateAndPersistCaptureScripts(
+          {
+            idea: tonePending.idea,
+            persistIdea: tonePending.persistIdea,
+            durationSeconds: scriptDuration as 10 | 15,
+            editorialTone,
+            outro: scriptDuration === 10 ? "" : scriptOutro.trim() || DEFAULT_OUTRO,
+          },
+        );
         if (tonePending.persistIdea) addIdea(savedIdea);
         captureScripts.forEach(addScript);
         updateIdea(savedIdea.id, { status: "aprovado" });
+        try {
+          await setSheetStatus("ideias", savedIdea.id, "aprovado");
+        } catch {
+          toast.warning("Roteiros salvos, mas o status da ideia não foi atualizado.");
+        }
         setTonePending(null);
         setManualOpen(false);
         setArticleOpen(false);
         setCaptureChoices(captureScripts);
-        toast[provider === "fallback" ? "warning" : "success"](
-          provider === "fallback"
-            ? "Claude indisponível. Três hooks locais foram salvos."
-            : `Claude gerou e salvou os 3 hooks de ${scriptDuration} segundos.`,
-        );
+        toast.success(`Claude gerou e salvou os 3 hooks de ${scriptDuration} segundos.`);
         return;
       }
-      const {
-        idea: savedIdea,
-        script,
-        provider,
-      } = await generateAndPersistScript({
+      const { idea: savedIdea, script } = await generateAndPersistScript({
         idea: tonePending.idea,
         articleAnalysis: tonePending.analysis,
         editorialTone,
@@ -263,11 +267,7 @@ export function IdeiasPage() {
       setArticleOpen(false);
       setManualSeed("");
       setManualIdeas([]);
-      if (provider === "fallback") {
-        toast.warning("Claude indisponível. Roteiro local criado sem consumo de tokens.");
-      } else {
-        toast.success("Roteiro gerado com IA e salvo no Sheets.");
-      }
+      toast.success("Roteiro gerado pelo Claude e salvo no Sheets.");
       navigate({ to: "/roteiros/$id", params: { id: script.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar o roteiro.");
@@ -284,7 +284,7 @@ export function IdeiasPage() {
       updated.forEach((script) => updateScript(script.id, script));
       setCaptureChoices([]);
       toast.success(
-        `${updated.length} ${updated.length === 1 ? "roteiro selecionado" : "roteiros selecionados"} para produção.`,
+        `${updated.length} ${updated.length === 1 ? "roteiro selecionado" : "roteiros selecionados"} para revisão de fala.`,
       );
       navigate({ to: "/roteiros/$id", params: { id: updated[0].id } });
     } catch (err) {
@@ -433,34 +433,43 @@ export function IdeiasPage() {
         </div>
       }
     >
-      <NextStepBanner
+      <WeeklyArchiveSwitch
         className="mb-3"
-        title={
-          nextIdea
-            ? `Transformar "${nextIdea.titulo}" em roteiro`
-            : "Criar uma nova ideia para alimentar a esteira"
-        }
-        description={
-          nextIdea
-            ? "Esta é a ideia mais recente ainda sem roteiro. Gere o roteiro ou abra a ideia para revisar antes."
-            : "Importe um artigo, cole uma ideia bruta ou volte ao Radar para capturar novos temas."
-        }
-        actionLabel={nextIdea ? "Criar roteiro" : "Importar artigo"}
-        onAction={nextIdea ? () => void gerarRoteiro(nextIdea) : () => setArticleOpen(true)}
-        meta={
-          <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-            <span className="rounded-full bg-background px-2.5 py-1">
-              {pendingIdeas.length} sem roteiro
-            </span>
-            <span className="rounded-full bg-background px-2.5 py-1">
-              {usedIdeas.length} já viraram roteiro
-            </span>
-            <span className="rounded-full bg-background px-2.5 py-1">
-              {ideas.length} ideias no total
-            </span>
-          </div>
-        }
+        value={weeklyView}
+        onChange={setWeeklyView}
+        currentCount={weekly.current.length}
+        archiveCount={weekly.archive.length}
       />
+      {weeklyView === "current" ? (
+        <NextStepBanner
+          className="mb-3"
+          title={
+            nextIdea
+              ? `Transformar "${nextIdea.titulo}" em roteiro`
+              : "Criar uma nova ideia para alimentar a esteira"
+          }
+          description={
+            nextIdea
+              ? "Esta é a ideia mais recente ainda sem roteiro. Gere o roteiro ou abra a ideia para revisar antes."
+              : "Importe um artigo, cole uma ideia bruta ou volte ao Radar para capturar novos temas."
+          }
+          actionLabel={nextIdea ? "Criar roteiro" : "Importar artigo"}
+          onAction={nextIdea ? () => void gerarRoteiro(nextIdea) : () => setArticleOpen(true)}
+          meta={
+            <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+              <span className="rounded-full bg-background px-2.5 py-1">
+                {pendingIdeas.length} sem roteiro
+              </span>
+              <span className="rounded-full bg-background px-2.5 py-1">
+                {usedIdeas.length} já viraram roteiro
+              </span>
+              <span className="rounded-full bg-background px-2.5 py-1">
+                {weeklyIdeas.length} ideias nesta visão
+              </span>
+            </div>
+          }
+        />
+      ) : null}
       {usedIdeas.length > 0 ? (
         <div className="mb-3 flex items-center gap-2 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs">
           <CircleCheck className="h-4 w-4 shrink-0 text-status-info" />
@@ -512,8 +521,20 @@ export function IdeiasPage() {
       {filtered.length === 0 ? (
         <EmptyState
           icon={<Lightbulb className="h-4 w-4" />}
-          title="Nenhuma ideia encontrada"
-          description="Capture tendencias no Radar para gerar novas ideias."
+          title={
+            weeklyIdeas.length === 0
+              ? weeklyView === "current"
+                ? "Nenhuma ideia criada nesta semana"
+                : "O arquivo de ideias está vazio"
+              : "Nenhuma ideia encontrada"
+          }
+          description={
+            weeklyIdeas.length === 0
+              ? weeklyView === "current"
+                ? "As próximas ideias geradas a partir do Radar aparecerão aqui."
+                : "Ideias de semanas anteriores serão arquivadas aqui automaticamente."
+              : "Ajuste os filtros para ampliar os resultados."
+          }
           action={
             <Button asChild size="sm" variant="secondary">
               <Link to="/radar">Ir para Radar</Link>
@@ -521,16 +542,15 @@ export function IdeiasPage() {
           }
         />
       ) : (
-        <div className="rounded-xl border bg-card shadow-sm">
-          <Table>
+        <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
+          <Table className="min-w-[620px] table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[24%]">Tema</TableHead>
-                <TableHead className="w-[28%]">Hook</TableHead>
-                <TableHead>Publico / Dor</TableHead>
-                <TableHead>Prioridade</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Acoes</TableHead>
+                <TableHead className="w-[34%] lg:w-[31%]">Tema</TableHead>
+                <TableHead className="w-[34%] lg:w-[32%]">Resumo</TableHead>
+                <TableHead className="w-[12%] text-center lg:w-[11%]">Sinais</TableHead>
+                <TableHead className="hidden w-[11%] lg:table-cell">Status</TableHead>
+                <TableHead className="w-[20%] text-right lg:w-[15%]">Ações</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -538,18 +558,17 @@ export function IdeiasPage() {
                 const usedScript = scriptForIdea(i);
                 const producedVideo = usedScript ? videoForScript(usedScript.id) : undefined;
                 return (
-                  <TableRow key={i.id} className="cursor-pointer" onClick={() => setPreview(i)}>
-                    <TableCell>
-                      <div className="font-medium">{i.titulo}</div>
-                      <div className="mt-1 flex flex-wrap items-center gap-1">
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  <TableRow
+                    key={i.id}
+                    className="group cursor-pointer"
+                    onClick={() => setPreview(i)}
+                  >
+                    <TableCell className="align-top py-4">
+                      <div className="line-clamp-2 font-semibold leading-5">{i.titulo}</div>
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
                           {familiaLabel[i.familia]}
                         </span>
-                        {i.tipo ? (
-                          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                            {i.tipo}
-                          </span>
-                        ) : null}
                         {index === 0 ? (
                           <Badge
                             variant="outline"
@@ -573,23 +592,42 @@ export function IdeiasPage() {
                         ) : null}
                       </div>
                     </TableCell>
-                    <TableCell className="text-sm">{i.hook}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {i.publicoDor || "—"}
+                    <TableCell className="align-top py-4">
+                      <div className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+                        {i.hook || i.angulo || "Resumo não informado."}
+                      </div>
+                      <span className="mt-1 block text-[10px] font-medium text-status-info opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                        Ver completo
+                      </span>
                     </TableCell>
-                    <TableCell>
-                      <StatusBadge {...prioridadeLabel[i.prioridade]} />
+                    <TableCell
+                      className="align-top py-3 text-center"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <EditorialSignals
+                        priority={i.prioridade}
+                        note={i.observacaoCompliance}
+                        noteLabel="Compliance"
+                      />
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden align-top py-4 lg:table-cell">
                       <StatusBadge {...ideaStatusLabel[i.status]} />
                     </TableCell>
-                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                    <TableCell
+                      className="align-top py-3 text-right"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       <div className="flex justify-end gap-1">
                         {usedScript ? (
                           <WithTooltip label="Abrir roteiro já criado">
                             <Button size="sm" variant="secondary" asChild>
-                              <Link to="/roteiros/$id" params={{ id: usedScript.id }}>
-                                <ExternalLink className="mr-1 h-3.5 w-3.5" /> Ver roteiro
+                              <Link
+                                to="/roteiros/$id"
+                                params={{ id: usedScript.id }}
+                                aria-label="Abrir roteiro já criado"
+                              >
+                                <ExternalLink className="h-3.5 w-3.5 xl:mr-1" />
+                                <span className="hidden xl:inline">Ver roteiro</span>
                               </Link>
                             </Button>
                           </WithTooltip>
@@ -598,10 +636,12 @@ export function IdeiasPage() {
                             <Button
                               size="sm"
                               variant="secondary"
+                              aria-label="Gerar roteiro a partir da ideia"
                               disabled={i.status === "descartado" || !evaluateIdeaQuality(i).ready}
                               onClick={() => gerarRoteiro(i)}
                             >
-                              <Sparkles className="mr-1 h-3.5 w-3.5" /> Criar roteiro
+                              <Sparkles className="h-3.5 w-3.5 xl:mr-1" />
+                              <span className="hidden xl:inline">Criar roteiro</span>
                             </Button>
                           </WithTooltip>
                         )}
@@ -613,7 +653,7 @@ export function IdeiasPage() {
                           onConfirm={() => descartarIdeia(i)}
                           trigger={
                             <WithTooltip label="Descartar ideia">
-                              <Button size="sm" variant="ghost">
+                              <Button size="sm" variant="ghost" aria-label="Descartar ideia">
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
                             </WithTooltip>

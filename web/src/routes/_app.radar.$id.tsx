@@ -7,13 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   appendIdea,
-  appendScript,
   expandIdeas,
-  generateCaptureHooks,
   setSheetStatus,
   type CaptureHooksResult,
 } from "@/lib/api/local";
-import type { Idea, Script } from "@/lib/mock-data";
+import { generateAndPersistCaptureScripts } from "@/lib/script-generation";
 import { ArrowLeft, ExternalLink, Loader2, Sparkles, Target, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
@@ -111,66 +109,35 @@ function TendenciaDetalhe() {
     if (!trend) return;
     setGeneratingCaptures(true);
     try {
-      const result = await generateCaptureHooks({
-        durationSeconds: 10,
-        trendId: trend.id,
-        titulo: trend.titulo,
-        subtema: trend.subtema,
-        sinal: trend.sinal,
-        dorPublico: trend.dorPublico,
-        notas: trend.notas,
-        familia: trend.familia,
-        prioridade: trend.prioridade,
-        sourceUrl: trend.link || null,
-      });
-      setCaptureResult(result);
-
-      for (const variant of result.variants) {
-        const now = new Date().toISOString();
-        const idea: Idea = {
+      const result = await generateAndPersistCaptureScripts({
+        idea: {
           id: genId("i"),
           trendId: trend.id,
-          titulo: `Captura ${variant.variant}: ${variant.title}`,
+          titulo: trend.titulo,
           familia: trend.familia,
-          hook: variant.hook,
-          angulo: `${variant.strategy}. ${variant.rationale}`,
-          tipo: "Hook de captura 10s",
+          hook: trend.sinal || trend.titulo,
+          angulo: trend.sinal || trend.subtema || trend.titulo,
+          tipo: trend.subtema || "Hook de captura 10s",
           publicoDor: trend.dorPublico,
           cta: "",
           linkOrigem: trend.link,
-          observacaoCompliance: variant.complianceNotes,
+          observacaoCompliance: trend.notas || "",
           prioridade: trend.prioridade,
           status: "novo",
-          criadoEm: now,
-        };
-        const savedIdea = await appendIdea(idea);
-        addIdea(savedIdea);
-
-        const script: Script = {
-          id: genId("s"),
-          ideaId: savedIdea.id,
-          categoria: trend.familia,
-          tema: trend.titulo,
-          titulo: idea.titulo,
-          hook: variant.hook,
-          dorConflito: "",
-          explicacaoSimples: "",
-          virada: variant.turn,
-          cta: "",
-          cuidadosMedicos: variant.complianceNotes,
-          risco: trend.risco,
-          prioridade: trend.prioridade,
-          formatoSugerido: "Hook de captura · 10 segundos",
-          link: trend.link,
-          status: "aguardando_validacao",
-          criadoEm: now,
-          editorialTone: "neutro",
-          textoFalado: variant.spokenText,
-          outroText: "",
-        };
-        const savedScript = await appendScript(script);
-        addScript(savedScript);
-      }
+          criadoEm: new Date().toISOString(),
+        },
+        persistIdea: true,
+        durationSeconds: 10,
+        editorialTone: "neutro",
+        outro: "",
+      });
+      addIdea(result.idea);
+      result.scripts.forEach(addScript);
+      setCaptureResult({
+        provider: result.provider,
+        analysis: result.analysis,
+        variants: result.variants,
+      });
 
       updateTrend(trend.id, { status: "em_analise" });
       try {

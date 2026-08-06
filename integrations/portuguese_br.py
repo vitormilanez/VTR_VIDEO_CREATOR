@@ -89,7 +89,11 @@ VOICE_PHRASE_REPLACEMENTS = {
 }
 
 
-def prepare_script_for_heygen_voice(text: str) -> str:
+def prepare_script_for_heygen_voice(
+    text: str,
+    *,
+    add_sentence_breaks: bool = True,
+) -> str:
     """Prepara texto para a voz do HeyGen sem depender de interpretação livre."""
     if not text:
         return text
@@ -101,6 +105,7 @@ def prepare_script_for_heygen_voice(text: str) -> str:
     voice_text = re.sub(r"\b30s\b", "trinta segundos", voice_text)
     voice_text = re.sub(r"\b(\d+)\s*%", r"\1 por cento", voice_text)
     voice_text = re.sub(r"\s+", " ", voice_text).strip()
-    voice_text = re.sub(r"([.!?])\s+", r"\1\n", voice_text)
+    if add_sentence_breaks:
+        voice_text = re.sub(r"([.!?])\s+", r"\1\n", voice_text)
 
     return voice_text

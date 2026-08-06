@@ -118,23 +118,26 @@ function IdeiaDetalhe() {
     setIsGeneratingScript(true);
     try {
       if (scriptDuration <= 15) {
-        const { scripts, provider } = await generateAndPersistCaptureScripts({
+        const { scripts } = await generateAndPersistCaptureScripts({
           idea: draft,
           persistIdea: false,
           durationSeconds: scriptDuration as 10 | 15,
+          editorialTone,
+          outro: scriptDuration === 10 ? "" : scriptOutro.trim() || DEFAULT_OUTRO,
         });
         scripts.forEach(addScript);
         updateIdea(idea.id, { status: "aprovado" });
+        try {
+          await setSheetStatus("ideias", idea.id, "aprovado");
+        } catch {
+          toast.warning("Roteiros salvos, mas o status da ideia não foi atualizado.");
+        }
         setToneOpen(false);
         setCaptureChoices(scripts);
-        toast[provider === "fallback" ? "warning" : "success"](
-          provider === "fallback"
-            ? "Claude indisponível. Três hooks locais foram salvos."
-            : `Claude gerou e salvou os 3 hooks de ${scriptDuration} segundos.`,
-        );
+        toast.success(`Claude gerou e salvou os 3 hooks de ${scriptDuration} segundos.`);
         return;
       }
-      const { script, provider } = await generateAndPersistScript({
+      const { script } = await generateAndPersistScript({
         idea: draft,
         editorialTone,
         durationSeconds: scriptDuration,
@@ -149,11 +152,7 @@ function IdeiaDetalhe() {
         toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
       }
       setToneOpen(false);
-      if (provider === "fallback") {
-        toast.warning("Claude indisponível. Roteiro local criado sem consumo de tokens.");
-      } else {
-        toast.success("Roteiro gerado com IA e salvo no Sheets.");
-      }
+      toast.success("Roteiro gerado pelo Claude e salvo no Sheets.");
       navigate({ to: "/roteiros/$id", params: { id: script.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar o roteiro.");
@@ -170,7 +169,7 @@ function IdeiaDetalhe() {
       updated.forEach((candidate) => updateScript(candidate.id, candidate));
       setCaptureChoices([]);
       toast.success(
-        `${updated.length} ${updated.length === 1 ? "roteiro selecionado" : "roteiros selecionados"} para produção.`,
+        `${updated.length} ${updated.length === 1 ? "roteiro selecionado" : "roteiros selecionados"} para revisão de fala.`,
       );
       navigate({ to: "/roteiros/$id", params: { id: updated[0].id } });
     } catch (err) {

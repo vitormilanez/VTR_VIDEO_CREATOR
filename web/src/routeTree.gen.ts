@@ -16,6 +16,7 @@ import { Route as AppCalendarioRouteImport } from './routes/_app.calendario'
 import { Route as AppConfiguracoesRouteImport } from './routes/_app.configuracoes'
 import { Route as AppCortesRouteImport } from './routes/_app.cortes'
 import { Route as AppIdeiasRouteImport } from './routes/_app.ideias'
+import { Route as AppNoticiasRouteImport } from './routes/_app.noticias'
 import { Route as AppPacksRouteImport } from './routes/_app.packs'
 import { Route as AppPerformanceRouteImport } from './routes/_app.performance'
 import { Route as AppProducaoRouteImport } from './routes/_app.producao'
@@ -62,6 +63,11 @@ const AppCortesRoute = AppCortesRouteImport.update({
 const AppIdeiasRoute = AppIdeiasRouteImport.update({
   id: '/ideias',
   path: '/ideias',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppNoticiasRoute = AppNoticiasRouteImport.update({
+  id: '/noticias',
+  path: '/noticias',
   getParentRoute: () => AppRoute,
 } as any)
 const AppPacksRoute = AppPacksRouteImport.update({
@@ -137,6 +143,7 @@ export interface FileRoutesByFullPath {
   '/configuracoes': typeof AppConfiguracoesRoute
   '/cortes': typeof AppCortesRoute
   '/ideias': typeof AppIdeiasRouteWithChildren
+  '/noticias': typeof AppNoticiasRoute
   '/packs': typeof AppPacksRoute
   '/performance': typeof AppPerformanceRoute
   '/producao': typeof AppProducaoRouteWithChildren
@@ -156,6 +163,7 @@ export interface FileRoutesByTo {
   '/calendario': typeof AppCalendarioRoute
   '/configuracoes': typeof AppConfiguracoesRoute
   '/cortes': typeof AppCortesRoute
+  '/noticias': typeof AppNoticiasRoute
   '/packs': typeof AppPacksRoute
   '/performance': typeof AppPerformanceRoute
   '/': typeof AppIndexRoute
@@ -176,6 +184,7 @@ export interface FileRoutesById {
   '/_app/configuracoes': typeof AppConfiguracoesRoute
   '/_app/cortes': typeof AppCortesRoute
   '/_app/ideias': typeof AppIdeiasRouteWithChildren
+  '/_app/noticias': typeof AppNoticiasRoute
   '/_app/packs': typeof AppPacksRoute
   '/_app/performance': typeof AppPerformanceRoute
   '/_app/producao': typeof AppProducaoRouteWithChildren
@@ -200,6 +209,7 @@ export interface FileRouteTypes {
     | '/configuracoes'
     | '/cortes'
     | '/ideias'
+    | '/noticias'
     | '/packs'
     | '/performance'
     | '/producao'
@@ -219,6 +229,7 @@ export interface FileRouteTypes {
     | '/calendario'
     | '/configuracoes'
     | '/cortes'
+    | '/noticias'
     | '/packs'
     | '/performance'
     | '/'
@@ -238,6 +249,7 @@ export interface FileRouteTypes {
     | '/_app/configuracoes'
     | '/_app/cortes'
     | '/_app/ideias'
+    | '/_app/noticias'
     | '/_app/packs'
     | '/_app/performance'
     | '/_app/producao'
@@ -307,6 +319,13 @@ declare module '@tanstack/react-router' {
       path: '/ideias'
       fullPath: '/ideias'
       preLoaderRoute: typeof AppIdeiasRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/noticias': {
+      id: '/_app/noticias'
+      path: '/noticias'
+      fullPath: '/noticias'
+      preLoaderRoute: typeof AppNoticiasRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/packs': {
@@ -465,6 +484,7 @@ interface AppRouteChildren {
   AppConfiguracoesRoute: typeof AppConfiguracoesRoute
   AppCortesRoute: typeof AppCortesRoute
   AppIdeiasRoute: typeof AppIdeiasRouteWithChildren
+  AppNoticiasRoute: typeof AppNoticiasRoute
   AppPacksRoute: typeof AppPacksRoute
   AppPerformanceRoute: typeof AppPerformanceRoute
   AppProducaoRoute: typeof AppProducaoRouteWithChildren
@@ -479,6 +499,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppConfiguracoesRoute: AppConfiguracoesRoute,
   AppCortesRoute: AppCortesRoute,
   AppIdeiasRoute: AppIdeiasRouteWithChildren,
+  AppNoticiasRoute: AppNoticiasRoute,
   AppPacksRoute: AppPacksRoute,
   AppPerformanceRoute: AppPerformanceRoute,
   AppProducaoRoute: AppProducaoRouteWithChildren,
