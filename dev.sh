@@ -19,7 +19,11 @@ if [ ! -d "$ROOT/.venv" ]; then
   "$ROOT/.venv/bin/python" -m pip install -q -r "$ROOT/api/requirements.txt"
 fi
 echo "Iniciando API em http://127.0.0.1:8000 ..."
-"$ROOT/.venv/bin/python" -m uvicorn api.server:app --reload --port 8000 &
+"$ROOT/.venv/bin/python" -m uvicorn api.server:app \
+  --reload \
+  --reload-dir "$ROOT/api" \
+  --reload-dir "$ROOT/integrations" \
+  --port 8000 &
 API_PID=$!
 
 # --- Frontend ---
@@ -28,7 +32,7 @@ if [ ! -d "$ROOT/web/node_modules" ]; then
   (cd "$ROOT/web" && npm install --no-audit --no-fund)
 fi
 echo "Iniciando frontend em http://localhost:8080 ..."
-(cd "$ROOT/web" && npm run dev) &
+(cd "$ROOT/web" && npm run dev -- --force) &
 WEB_PID=$!
 
 trap 'echo; echo "Parando..."; kill $API_PID $WEB_PID 2>/dev/null || true' INT TERM
