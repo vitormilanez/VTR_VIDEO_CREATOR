@@ -2893,6 +2893,42 @@ def _fit_text_to_duration(text: str, duration_seconds: int, outro: str) -> str:
     return fit_text_to_duration(text, duration_seconds, outro)
 
 
+_SAFE_NARRATION_PADDING = (
+    "Esse resultado precisa ser interpretado com calma, porque uma associação não prova causa.",
+    "Pessoas diferentes podem ter contextos e respostas diferentes, então um número não representa automaticamente cada indivíduo.",
+    "O mais importante é entender os limites da informação antes de tomar uma decisão.",
+    "Uma conversa com um profissional de saúde ajuda a colocar o achado no contexto da sua história.",
+)
+
+
+def _repair_script_narration(script: dict[str, Any], payload: GenerateScriptIn) -> tuple[str, bool]:
+    """Recompõe uma fala curta usando o conteúdo estruturado já retornado pelo Claude."""
+    original = str(script.get("textoFalado") or "").strip()
+    candidate = _fit_text_to_duration(original, payload.durationSeconds, payload.outro)
+    issues = _narration_quality_issues(candidate, payload.durationSeconds, payload.outro)
+    if not any("Texto muito curto" in issue for issue in issues):
+        return candidate, candidate != original
+
+    parts = [
+        original,
+        str(script.get("hook") or ""),
+        str(script.get("dorConflito") or ""),
+        str(script.get("explicacaoSimples") or ""),
+        str(script.get("virada") or ""),
+        str(script.get("cta") or ""),
+    ]
+    expanded = " ".join(part.strip() for part in parts if part.strip())
+    candidate = _fit_text_to_duration(expanded, payload.durationSeconds, payload.outro)
+    for padding in _SAFE_NARRATION_PADDING:
+        issues = _narration_quality_issues(candidate, payload.durationSeconds, payload.outro)
+        if not any("Texto muito curto" in issue for issue in issues):
+            break
+        candidate = _fit_text_to_duration(
+            f"{candidate} {padding}", payload.durationSeconds, payload.outro
+        )
+    return candidate, candidate != original
+
+
 _SCRIPT_GENERATION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -2919,7 +2955,7 @@ _SCRIPT_GENERATION_SCHEMA = {
 }
 
 
-SCRIPT_GENERATION_PROMPT_VERSION = "2026-08-05-v4-claude-flow-validated"
+SCRIPT_GENERATION_PROMPT_VERSION = "2026-08-07-v5-duration-repair"
 
 
 def _script_generation_system(tone: str, duration_seconds: int) -> str:
@@ -2964,6 +3000,8 @@ REGRAS OBRIGATORIAS PARA TODO TOM:
 - Quando houver dado numerico, trate como "estudos sugerem/associam", nunca como verdade absoluta.
 - Respeite a observacaoCompliance da ideia.
 - O texto falado deve ser portugues brasileiro falado, espontaneo, humano, com frases curtas.
+- Para {duration_seconds} segundos, escreva textoFalado entre {_duration_word_limits(duration_seconds)[0]} e {_duration_word_limits(duration_seconds)[1]} palavras.
+- Nunca devolva um resumo curto: desenvolva hook, contexto, explicacao, virada e encerramento.
 {ending_rule}
 - Responda somente no JSON solicitado."""
 
@@ -3241,12 +3279,7 @@ def generate_script(payload: GenerateScriptIn) -> dict:
         script = _manual_script_generation(payload)
         return {"ok": True, "provider": "fallback", "script": script}
 
-    raw_spoken_text = str(script.get("textoFalado") or "")
-    script["textoFalado"] = _fit_text_to_duration(
-        raw_spoken_text,
-        payload.durationSeconds,
-        payload.outro,
-    )
+    script["textoFalado"], narration_repaired = _repair_script_narration(script, payload)
     if payload.durationSeconds == 10:
         script["cta"] = ""
 
@@ -3263,7 +3296,12 @@ def generate_script(payload: GenerateScriptIn) -> dict:
         script = _manual_script_generation(payload)
         return {"ok": True, "provider": "fallback", "script": script}
 
-    response = {"ok": True, "provider": "claude", "script": script}
+    response = {
+        "ok": True,
+        "provider": "claude",
+        "script": script,
+        "repairApplied": narration_repaired,
+    }
     _record_anthropic_usage("scripts.generate", model, message)
     _ai_cache_put("scripts.generate", cache_payload, response)
     return response
