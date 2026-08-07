@@ -19,12 +19,18 @@ import { useStore } from "@/lib/store";
 import {
   createHeyGenPreview,
   createHeyGenVideo,
+  deleteAvatarSet,
+  fetchAvatarSets,
   fetchHeyGenCatalog,
   fetchHeyGenStyles,
   fetchProductionProfile,
   naturalizeScript,
+  saveAvatarSet,
   saveProductionProfile,
   saveScript,
+  type AvatarSet,
+  type AvatarSetLook,
+  type AvatarSetRole,
   type HeyGenCatalog,
   type HeyGenStyle,
 } from "@/lib/api/local";
@@ -57,10 +63,13 @@ import {
   Circle,
   Film,
   History,
+  Pencil,
+  Plus,
   RotateCcw,
   Save,
   ShieldCheck,
   Sparkles,
+  Trash2,
   TriangleAlert,
   UserRound,
 } from "lucide-react";
@@ -118,6 +127,13 @@ function RoteiroDetalhe() {
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [avatarId, setAvatarId] = useState("");
   const [voiceId, setVoiceId] = useState("");
+  const [avatarMode, setAvatarMode] = useState<"single" | "set">("single");
+  const [avatarSetId, setAvatarSetId] = useState<string | null>(null);
+  const [primaryAvatarId, setPrimaryAvatarId] = useState("");
+  const [avatarSets, setAvatarSets] = useState<AvatarSet[]>([]);
+  const [avatarSetsLoading, setAvatarSetsLoading] = useState(true);
+  const [avatarSetDialogOpen, setAvatarSetDialogOpen] = useState(false);
+  const [editingAvatarSet, setEditingAvatarSet] = useState<AvatarSet | null>(null);
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(
     initialCaptureDuration ?? 45,
@@ -175,7 +191,6 @@ function RoteiroDetalhe() {
   );
   const hasHighCreditConsumption = durationSeconds >= 45;
   const approvalReady = draft?.status === "aprovado_clinicamente";
-  const canSendToProduction = qualityIssues.length === 0 && approvalReady;
   const narrationWords = displayText.trim().split(/\s+/).filter(Boolean).length;
   const estimatedSpeechSeconds = Math.max(1, Math.round(narrationWords / 2.4));
 
@@ -201,6 +216,9 @@ function RoteiroDetalhe() {
     setProfileLoaded(false);
     setAvatarId("");
     setVoiceId("");
+    setAvatarMode("single");
+    setAvatarSetId(null);
+    setPrimaryAvatarId("");
     lastSavedProfileKey.current = "";
     fetchProductionProfile(id)
       .then((profile) => {
@@ -208,6 +226,9 @@ function RoteiroDetalhe() {
         if (profile) {
           setAvatarId(profile.avatarId);
           setVoiceId(profile.voiceId);
+          setAvatarMode(profile.avatarMode === "set" && profile.avatarSetId ? "set" : "single");
+          setAvatarSetId(profile.avatarSetId || null);
+          setPrimaryAvatarId(profile.primaryAvatarId || profile.avatarId);
           setSpeechMode(profile.speechMode);
           setGenerationMode(profile.generationMode);
           lastSavedProfileKey.current = [
@@ -215,6 +236,9 @@ function RoteiroDetalhe() {
             profile.voiceId,
             profile.speechMode,
             profile.generationMode,
+            profile.avatarMode || "single",
+            profile.avatarSetId || "",
+            profile.primaryAvatarId || profile.avatarId,
           ].join("|");
         }
       })
@@ -260,6 +284,11 @@ function RoteiroDetalhe() {
 
   useEffect(() => {
     loadCatalog();
+    setAvatarSetsLoading(true);
+    fetchAvatarSets()
+      .then((sets) => setAvatarSets(sets))
+      .catch(() => toast.error("Nao consegui carregar os Avatar Sets salvos."))
+      .finally(() => setAvatarSetsLoading(false));
     fetchHeyGenStyles("cinematic")
       .then((data) => setStyles(data.styles))
       .catch(() => setStyles([]));
@@ -291,11 +320,46 @@ function RoteiroDetalhe() {
       (selectedAvatar ? `Voz de ${selectedAvatar.name}` : "Voz do avatar"),
     [catalog?.voices, selectedAvatar, voiceId],
   );
+  const selectedAvatarSet = useMemo(
+    () => avatarSets.find((avatarSet) => avatarSet.id === avatarSetId) || null,
+    [avatarSetId, avatarSets],
+  );
+  const selectedSetLooks = useMemo(
+    () =>
+      selectedAvatarSet?.looks
+        .map((look) => ({
+          look,
+          avatar: catalog?.avatars.find((candidate) => candidate.id === look.avatarId),
+        }))
+        .filter(
+          (item): item is { look: AvatarSetLook; avatar: HeyGenCatalog["avatars"][number] } =>
+            Boolean(item.avatar),
+        ) || [],
+    [catalog?.avatars, selectedAvatarSet],
+  );
+  const avatarSetReady = Boolean(selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId);
+  const productionModeReady = avatarMode === "single";
+  const selectedAvatarReady = avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
+  const canSendToProduction =
+    qualityIssues.length === 0 && approvalReady && selectedAvatarReady && productionModeReady;
 
   function chooseAvatar(nextAvatarId: string) {
+    setAvatarMode("single");
+    setAvatarSetId(null);
     setAvatarId(nextAvatarId);
+    setPrimaryAvatarId(nextAvatarId);
     const nextAvatar = catalog?.avatars.find((avatar) => avatar.id === nextAvatarId);
     if (nextAvatar?.defaultVoiceId) setVoiceId(nextAvatar.defaultVoiceId);
+  }
+
+  function chooseAvatarSet(nextAvatarSet: AvatarSet) {
+    const primaryLook =
+      nextAvatarSet.looks.find((look) => look.role === "primary") || nextAvatarSet.looks[0];
+    setAvatarMode("set");
+    setAvatarSetId(nextAvatarSet.id);
+    setPrimaryAvatarId(primaryLook.avatarId);
+    setAvatarId(primaryLook.avatarId);
+    setVoiceId(nextAvatarSet.voiceId);
   }
 
   useEffect(() => {
@@ -309,23 +373,67 @@ function RoteiroDetalhe() {
   }, [generationMode, selectedAvatar]);
 
   useEffect(() => {
-    if (!profileLoaded || !avatarId || !voiceId) return;
-    const key = [avatarId, voiceId, speechMode, generationMode].join("|");
+    if (!profileLoaded || !avatarId || !voiceId || (avatarMode === "set" && !avatarSetReady)) return;
+    const key = [
+      avatarId,
+      voiceId,
+      speechMode,
+      generationMode,
+      avatarMode,
+      avatarSetId || "",
+      primaryAvatarId,
+    ].join("|");
     if (key === lastSavedProfileKey.current) return;
     const timeout = window.setTimeout(() => {
-      saveProductionProfile(id, { avatarId, voiceId, speechMode, generationMode })
+      saveProductionProfile(id, {
+        avatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
+        voiceId,
+        speechMode,
+        generationMode,
+        avatarMode,
+        avatarSetId: avatarMode === "set" ? avatarSetId : null,
+        primaryAvatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
+      })
         .then((profile) => {
           lastSavedProfileKey.current = [
             profile.avatarId,
             profile.voiceId,
             profile.speechMode,
             profile.generationMode,
+            profile.avatarMode || "single",
+            profile.avatarSetId || "",
+            profile.primaryAvatarId || profile.avatarId,
           ].join("|");
         })
         .catch(() => toast.error("Nao consegui salvar o perfil de producao."));
     }, 500);
     return () => window.clearTimeout(timeout);
-  }, [avatarId, generationMode, id, profileLoaded, speechMode, voiceId]);
+  }, [avatarId, avatarMode, avatarSetId, avatarSetReady, generationMode, id, primaryAvatarId, profileLoaded, speechMode, voiceId]);
+
+  async function handleAvatarSetSaved(saved: AvatarSet) {
+    setAvatarSets((current) => {
+      const withoutSaved = current.filter((avatarSet) => avatarSet.id !== saved.id);
+      return [...withoutSaved, saved].sort((left, right) => left.name.localeCompare(right.name));
+    });
+    setAvatarSetDialogOpen(false);
+    chooseAvatarSet(saved);
+    toast.success("Avatar Set salvo com duas posições.");
+  }
+
+  async function handleDeleteAvatarSet(avatarSetToDelete: AvatarSet) {
+    try {
+      await deleteAvatarSet(avatarSetToDelete.id);
+      setAvatarSets((current) => current.filter((avatarSet) => avatarSet.id !== avatarSetToDelete.id));
+      if (avatarSetId === avatarSetToDelete.id) {
+        setAvatarMode("single");
+        setAvatarSetId(null);
+        setPrimaryAvatarId(avatarId);
+      }
+      toast.success("Avatar Set excluído.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel excluir o Avatar Set.");
+    }
+  }
 
   if (!script || !draft) {
     return (
@@ -366,8 +474,14 @@ function RoteiroDetalhe() {
         ? "Carregando avatares e vozes da HeyGen."
         : !profileLoaded
           ? "Carregando perfil de producao do roteiro."
-          : !avatarId
-            ? "Selecione um avatar pronto."
+          : avatarMode === "set" && !selectedAvatarSet
+            ? "Selecione um Avatar Set."
+            : avatarMode === "set" && !avatarSetReady
+              ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
+              : avatarMode === "set"
+                ? "Scene Plan ainda não está implementado para gerar vídeos com duas posições."
+                : !avatarId
+                  ? "Selecione um avatar pronto."
             : !voiceId
               ? "Selecione uma voz."
               : saving
@@ -376,6 +490,10 @@ function RoteiroDetalhe() {
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
+    if (avatarMode === "set") {
+      toast.error("A geração com duas posições será habilitada após o Scene Plan.");
+      return;
+    }
     if (!canSendToProduction) {
       toast.error(
         qualityIssues[0]
@@ -476,6 +594,10 @@ function RoteiroDetalhe() {
 
   async function gerarPrevia() {
     if (!draft || !script) return;
+    if (avatarMode === "set") {
+      toast.error("A prévia de Avatar Set será habilitada após o Scene Plan.");
+      return;
+    }
     if (!approvalReady) {
       toast.error('Conclua a revisão e altere o status do roteiro para "Pronto".');
       return;
@@ -559,7 +681,9 @@ function RoteiroDetalhe() {
                           ? "Salvar alteracoes e gerar outra versao"
                           : "Gerar outra versão deste roteiro"
                     }
-                    disabled={saving || sending || !avatarId || !voiceId || !canSendToProduction}
+                    disabled={
+                      saving || sending || !selectedAvatarReady || !voiceId || !canSendToProduction
+                    }
                   >
                     <History className="mr-1 h-4 w-4" /> Refazer vídeo
                   </Button>
@@ -577,7 +701,14 @@ function RoteiroDetalhe() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={saving || previewing || !avatarId || !voiceId || !approvalReady}
+                    disabled={
+                      saving ||
+                      previewing ||
+                      !selectedAvatarReady ||
+                      !voiceId ||
+                      !approvalReady ||
+                      !productionModeReady
+                    }
                   >
                     <Film className="mr-1 h-4 w-4" /> Gerar prévia
                   </Button>
@@ -603,7 +734,9 @@ function RoteiroDetalhe() {
                           ? "Salvar alteracoes e enviar roteiro ao HeyGen"
                           : "Enviar roteiro ao HeyGen"
                     }
-                    disabled={saving || sending || !avatarId || !voiceId || !canSendToProduction}
+                    disabled={
+                      saving || sending || !selectedAvatarReady || !voiceId || !canSendToProduction
+                    }
                   >
                     <Film className="mr-1 h-4 w-4" />{" "}
                     {dirty ? "Salvar e gerar" : "Gerar vídeo final"}
@@ -855,9 +988,14 @@ function RoteiroDetalhe() {
               </div>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-1">
+              <div className="space-y-3 md:col-span-2">
                 <div className="flex items-center justify-between gap-2">
-                  <Label className="text-xs">Avatar</Label>
+                  <div>
+                    <Label className="text-xs">Avatar e posições</Label>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      Escolha um look único ou duas posições da mesma identidade.
+                    </p>
+                  </div>
                   {(catalogError || (!catalogLoading && !catalog?.avatars.length)) && (
                     <Button
                       type="button"
@@ -871,12 +1009,82 @@ function RoteiroDetalhe() {
                     </Button>
                   )}
                 </div>
-                <AvatarPicker
-                  value={avatarId}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <button
+                    type="button"
+                    aria-pressed={avatarMode === "single"}
+                    onClick={() => {
+                      setAvatarMode("single");
+                      setAvatarSetId(null);
+                      setPrimaryAvatarId(avatarId);
+                    }}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40",
+                      avatarMode === "single" && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                    )}
+                  >
+                    <span className="block text-xs font-semibold">Look único</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      Uma posição contínua para o avatar.
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={avatarMode === "set"}
+                    onClick={() => {
+                      if (avatarSets[0]) chooseAvatarSet(selectedAvatarSet || avatarSets[0]);
+                      else setAvatarSetDialogOpen(true);
+                    }}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40",
+                      avatarMode === "set" && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                    )}
+                  >
+                    <span className="block text-xs font-semibold">Conjunto de looks</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      Duas posições para cortes naturais entre cenas.
+                    </span>
+                  </button>
+                </div>
+                {avatarMode === "single" ? (
+                  <AvatarPicker
+                    value={avatarId}
+                    avatars={catalog?.avatars || []}
+                    loading={catalogLoading}
+                    error={catalogError}
+                    onChange={chooseAvatar}
+                  />
+                ) : (
+                  <AvatarSetSelector
+                    sets={avatarSets}
+                    selectedId={avatarSetId}
+                    selected={selectedAvatarSet}
+                    selectedLooks={selectedSetLooks}
+                    primaryAvatarId={primaryAvatarId}
+                    loading={avatarSetsLoading}
+                    onSelect={chooseAvatarSet}
+                    onCreate={() => {
+                      setEditingAvatarSet(null);
+                      setAvatarSetDialogOpen(true);
+                    }}
+                    onEdit={(setToEdit) => {
+                      setEditingAvatarSet(setToEdit);
+                      setAvatarSetDialogOpen(true);
+                    }}
+                    onDelete={(setToDelete) => void handleDeleteAvatarSet(setToDelete)}
+                    onPrimaryChange={(nextAvatarId) => {
+                      setPrimaryAvatarId(nextAvatarId);
+                      setAvatarId(nextAvatarId);
+                    }}
+                  />
+                )}
+                <AvatarSetEditorDialog
+                  open={avatarSetDialogOpen}
+                  initial={editingAvatarSet}
                   avatars={catalog?.avatars || []}
-                  loading={catalogLoading}
-                  error={catalogError}
-                  onChange={chooseAvatar}
+                  voices={catalog?.voices || HEYGEN_CATALOG_FALLBACK_VOICES}
+                  onOpenChange={setAvatarSetDialogOpen}
+                  onSaved={handleAvatarSetSaved}
                 />
                 {catalogError ? (
                   <p className="text-[11px] leading-4 text-status-danger">
@@ -1243,7 +1451,7 @@ function RoteiroDetalhe() {
           <ProductionReadinessCard
             catalogLoading={catalogLoading}
             catalogError={catalogError}
-            avatarReady={Boolean(avatarId)}
+            avatarReady={selectedAvatarReady}
             voiceReady={Boolean(voiceId)}
             speechReady={qualityIssues.length === 0}
             speechIssue={qualityIssues[0]}
@@ -1364,6 +1572,278 @@ function AvatarPicker({
             );
           })}
         </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const AVATAR_SET_ROLE_OPTIONS: Array<{ value: AvatarSetRole; label: string }> = [
+  { value: "primary", label: "Principal" },
+  { value: "front", label: "Frontal" },
+  { value: "close", label: "Close" },
+  { value: "three_quarter", label: "3/4" },
+  { value: "standing", label: "Em pé" },
+  { value: "wide", label: "Aberto" },
+];
+
+function avatarSetRoleLabel(role: AvatarSetRole) {
+  return AVATAR_SET_ROLE_OPTIONS.find((option) => option.value === role)?.label || role;
+}
+
+function AvatarSetSelector({
+  sets,
+  selectedId,
+  selected,
+  selectedLooks,
+  primaryAvatarId,
+  loading,
+  onSelect,
+  onCreate,
+  onEdit,
+  onDelete,
+  onPrimaryChange,
+}: {
+  sets: AvatarSet[];
+  selectedId: string | null;
+  selected: AvatarSet | null;
+  selectedLooks: Array<{ look: AvatarSetLook; avatar: HeyGenCatalog["avatars"][number] }>;
+  primaryAvatarId: string;
+  loading: boolean;
+  onSelect: (avatarSet: AvatarSet) => void;
+  onCreate: () => void;
+  onEdit: (avatarSet: AvatarSet) => void;
+  onDelete: (avatarSet: AvatarSet) => void;
+  onPrimaryChange: (avatarId: string) => void;
+}) {
+  if (loading) {
+    return <div className="rounded-lg border bg-muted/25 p-3 text-xs text-muted-foreground">Carregando Avatar Sets...</div>;
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        {sets.length ? (
+          <Select
+            value={selectedId || undefined}
+            onValueChange={(value) => {
+              const next = sets.find((avatarSet) => avatarSet.id === value);
+              if (next) onSelect(next);
+            }}
+          >
+            <SelectTrigger className="min-w-56 flex-1 bg-background">
+              <SelectValue placeholder="Selecione um Avatar Set" />
+            </SelectTrigger>
+            <SelectContent>
+              {sets.map((avatarSet) => (
+                <SelectItem key={avatarSet.id} value={avatarSet.id}>
+                  {avatarSet.name} · {avatarSet.looks.length} looks
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <p className="flex-1 text-xs text-muted-foreground">Nenhum Avatar Set criado ainda.</p>
+        )}
+        <Button type="button" size="sm" variant="outline" onClick={onCreate}>
+          <Plus className="h-3.5 w-3.5" /> Criar conjunto
+        </Button>
+      </div>
+
+      {selected ? (
+        <>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {selected.looks.map((look) => {
+              const item = selectedLooks.find((candidate) => candidate.look.avatarId === look.avatarId);
+              const primary = look.avatarId === primaryAvatarId;
+              return (
+                <button
+                  key={`${look.role}-${look.avatarId}`}
+                  type="button"
+                  onClick={() => onPrimaryChange(look.avatarId)}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md border bg-background p-2 text-left transition-colors hover:border-primary/50",
+                    primary && "border-primary ring-1 ring-primary/30",
+                  )}
+                >
+                  {item?.avatar ? <AvatarThumbnail avatar={item.avatar} className="h-12 w-12" /> : <UserRound className="h-8 w-8 text-muted-foreground" />}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-semibold">{look.label}</span>
+                    <span className="block truncate text-[11px] text-muted-foreground">
+                      {avatarSetRoleLabel(look.role)} · {item?.avatar?.name || "Look não carregado"}
+                    </span>
+                    {primary ? <span className="mt-0.5 block text-[10px] font-medium text-primary">Posição principal</span> : null}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[11px] leading-4 text-muted-foreground">
+              Para preservar continuidade, use looks da mesma pessoa, roupa e sessão visual sempre que possível.
+            </p>
+            <div className="flex gap-1">
+              <Button type="button" size="sm" variant="ghost" onClick={() => onEdit(selected)}>
+                <Pencil className="h-3.5 w-3.5" /> Editar
+              </Button>
+              <ConfirmAction
+                title="Excluir este Avatar Set?"
+                description="O conjunto será removido apenas da configuração local. Os looks da HeyGen não serão apagados."
+                confirmLabel="Excluir conjunto"
+                destructive
+                onConfirm={() => onDelete(selected)}
+                trigger={
+                  <Button type="button" size="sm" variant="ghost" className="text-status-danger">
+                    <Trash2 className="h-3.5 w-3.5" /> Excluir
+                  </Button>
+                }
+              />
+            </div>
+          </div>
+        </>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Crie um conjunto com pelo menos duas posições reais para habilitar a direção multicâmera.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function AvatarSetEditorDialog({
+  open,
+  initial,
+  avatars,
+  voices,
+  onOpenChange,
+  onSaved,
+}: {
+  open: boolean;
+  initial: AvatarSet | null;
+  avatars: HeyGenCatalog["avatars"];
+  voices: HeyGenCatalog["voices"];
+  onOpenChange: (open: boolean) => void;
+  onSaved: (avatarSet: AvatarSet) => void | Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [voiceId, setVoiceId] = useState("");
+  const [looks, setLooks] = useState<AvatarSetLook[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const fallbackLooks: AvatarSetLook[] = avatars.slice(0, 2).map((avatar, index) => ({
+      avatarId: avatar.id,
+      role: index === 0 ? "close" : "front",
+      label: index === 0 ? "Close" : "Frontal",
+    }));
+    setName(initial?.name || "");
+    setVoiceId(initial?.voiceId || avatars[0]?.defaultVoiceId || voices[0]?.id || "");
+    setLooks(initial?.looks?.length ? initial.looks : fallbackLooks);
+    setError(null);
+  }, [avatars, initial, open, voices]);
+
+  function updateLook(index: number, patch: Partial<AvatarSetLook>) {
+    setLooks((current) => current.map((look, lookIndex) => (lookIndex === index ? { ...look, ...patch } : look)));
+  }
+
+  function addLook() {
+    const nextAvatar = avatars.find((avatar) => !looks.some((look) => look.avatarId === avatar.id));
+    const nextRole = AVATAR_SET_ROLE_OPTIONS.find((option) => !looks.some((look) => look.role === option.value));
+    if (!nextAvatar || !nextRole) {
+      setError("Não há outro look ou role disponível no catálogo atual.");
+      return;
+    }
+    setLooks((current) => [...current, { avatarId: nextAvatar.id, role: nextRole.value, label: nextRole.label }]);
+    setError(null);
+  }
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (looks.length < 2 || new Set(looks.map((look) => look.avatarId)).size < 2) {
+      setError("Escolha pelo menos dois looks diferentes para criar duas posições.");
+      return;
+    }
+    if (new Set(looks.map((look) => look.role)).size !== looks.length) {
+      setError("Cada posição precisa ter um role diferente.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await saveAvatarSet({ name: name.trim(), voiceId, looks }, initial?.id);
+      await onSaved(saved);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "Nao foi possivel salvar o Avatar Set.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] max-w-3xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{initial ? "Editar Avatar Set" : "Criar Avatar Set"}</DialogTitle>
+          <DialogDescription>
+            Cadastre looks reais da mesma pessoa para alternar entre duas posições com cortes entre cenas.
+          </DialogDescription>
+        </DialogHeader>
+        <form className="space-y-4" onSubmit={submit}>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Nome do conjunto">
+              <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Guilherme — Casual Azul" required />
+            </Field>
+            <Field label="Voz">
+              <Select value={voiceId} onValueChange={setVoiceId}>
+                <SelectTrigger><SelectValue placeholder="Selecione uma voz" /></SelectTrigger>
+                <SelectContent>
+                  {voices.map((voice) => <SelectItem key={voice.id} value={voice.id}>{voice.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <Label className="text-xs">Looks e posições</Label>
+                <p className="text-[11px] text-muted-foreground">Use pelo menos dois looks diferentes.</p>
+              </div>
+              <Button type="button" size="sm" variant="outline" onClick={addLook} disabled={looks.length >= 6}>
+                <Plus className="h-3.5 w-3.5" /> Adicionar look
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {looks.map((look, index) => (
+                <div key={`${index}-${look.avatarId}`} className="grid gap-2 rounded-lg border bg-muted/20 p-2 sm:grid-cols-[1.2fr_0.8fr_1fr_auto]">
+                  <Select value={look.avatarId} onValueChange={(value) => updateLook(index, { avatarId: value })}>
+                    <SelectTrigger><SelectValue placeholder="Look do catálogo" /></SelectTrigger>
+                    <SelectContent>
+                      {avatars.map((avatar) => <SelectItem key={avatar.id} value={avatar.id}>{avatar.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <Select value={look.role} onValueChange={(value) => updateLook(index, { role: value as AvatarSetRole, label: avatarSetRoleLabel(value as AvatarSetRole) })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {AVATAR_SET_ROLE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <Input value={look.label} onChange={(event) => updateLook(index, { label: event.target.value })} placeholder="Rótulo" />
+                  <Button type="button" size="icon" variant="ghost" onClick={() => setLooks((current) => current.filter((_, lookIndex) => lookIndex !== index))} disabled={looks.length <= 2} aria-label="Remover look">
+                    <Trash2 className="h-4 w-4 text-status-danger" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+          {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancelar</Button>
+            <Button type="submit" disabled={saving || avatars.length < 2 || looks.length < 2}>
+              {saving ? "Salvando..." : "Salvar Avatar Set"}
+            </Button>
+          </div>
+        </form>
       </DialogContent>
     </Dialog>
   );
