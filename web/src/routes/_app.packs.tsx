@@ -22,6 +22,7 @@ import {
   fetchPack,
   fetchPackPhotoAssets,
   generatePack,
+  refreshPackAvatar,
   updatePackCarouselPhoto,
   type GeneratedPack,
   type PackLayout,
@@ -39,6 +40,7 @@ import {
   Loader2,
   MessageSquareText,
   PanelsTopLeft,
+  RefreshCw,
   Video,
   Wand2,
 } from "lucide-react";
@@ -160,6 +162,7 @@ function PacksPage() {
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingPhotoIndex, setSavingPhotoIndex] = useState<number | null>(null);
+  const [outdatedAvatar, setOutdatedAvatar] = useState(false);
 
   const script = scripts.find((item) => item.id === selectedId);
   const videoJob = script ? jobs.find((job) => job.scriptId === script.id) : undefined;
@@ -168,13 +171,17 @@ function PacksPage() {
   useEffect(() => {
     if (!script) {
       setPack(null);
+      setOutdatedAvatar(false);
       return;
     }
     let cancelled = false;
     setLoadingPack(true);
     fetchPack(script.id)
       .then((data) => {
-        if (!cancelled) setPack(data.pack);
+        if (!cancelled) {
+          setPack(data.pack);
+          setOutdatedAvatar(data.outdatedIdentity ?? data.outdatedAvatar);
+        }
       })
       .catch((error) => {
         if (!cancelled) {
@@ -216,11 +223,28 @@ function PacksPage() {
     try {
       const response = await generatePack(script);
       setPack(response.pack);
+      setOutdatedAvatar(false);
       toast.success("Carrossel de 6 slides criado.", { id: notice });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar o Pack.", {
         id: notice,
       });
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function refreshIdentity() {
+    if (!script || !pack) return;
+    setGenerating(true);
+    const notice = toast.loading("Atualizando a identidade visual sem regenerar a copy...");
+    try {
+      const response = await refreshPackAvatar(script.id);
+      setPack(response.pack);
+      setOutdatedAvatar(false);
+      toast.success("Identidade do Pack atualizada sem nova chamada ao Claude.", { id: notice });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a identidade.", { id: notice });
     } finally {
       setGenerating(false);
     }
@@ -296,6 +320,11 @@ function PacksPage() {
             )}
             {pack ? "Gerar nova versao" : "Gerar Pack"}
           </Button>
+          {outdatedAvatar && pack ? (
+            <Button size="sm" variant="outline" onClick={() => void refreshIdentity()} disabled={generating}>
+              <RefreshCw className="mr-1 h-3.5 w-3.5" /> Atualizar identidade sem Claude
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="secondary"

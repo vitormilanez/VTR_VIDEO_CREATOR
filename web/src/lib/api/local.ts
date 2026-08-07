@@ -329,6 +329,10 @@ export interface GeneratedPack {
   checklist: string[];
   sourceScriptId?: string | null;
   sourceAvatarId?: string | null;
+  sourceAvatarSetId?: string | null;
+  sourcePrimaryAvatarId?: string | null;
+  sourceIdentityKey?: string | null;
+  packContextVersion?: string | null;
   avatarAsset?: {
     avatarId: string;
     avatarName: string;
@@ -565,17 +569,20 @@ export async function fetchPack(scriptId: string): Promise<{
   pack: GeneratedPack | null;
   productionProfile: ProductionProfile | null;
   outdatedAvatar: boolean;
+  outdatedIdentity?: boolean;
 }> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack | null;
     productionProfile: ProductionProfile | null;
     outdatedAvatar: boolean;
+    outdatedIdentity?: boolean;
   }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
   return {
     pack: response.pack,
     productionProfile: response.productionProfile,
     outdatedAvatar: response.outdatedAvatar,
+    outdatedIdentity: response.outdatedIdentity,
   };
 }
 
@@ -584,6 +591,7 @@ export async function refreshPackAvatar(scriptId: string): Promise<{
   compliance: PackCompliance;
   productionProfile: ProductionProfile | null;
   outdatedAvatar: boolean;
+  outdatedIdentity?: boolean;
 }> {
   const response = await requestJson<{
     ok: boolean;
@@ -591,6 +599,7 @@ export async function refreshPackAvatar(scriptId: string): Promise<{
     compliance: PackCompliance;
     productionProfile: ProductionProfile | null;
     outdatedAvatar: boolean;
+    outdatedIdentity?: boolean;
   }>(`/api/packs/${encodeURIComponent(scriptId)}/refresh-avatar`, { method: "POST" });
   return response;
 }
@@ -648,6 +657,10 @@ export interface PackForExport {
   checklist: string[];
   sourceScriptId?: string | null;
   sourceAvatarId?: string | null;
+  sourceAvatarSetId?: string | null;
+  sourcePrimaryAvatarId?: string | null;
+  sourceIdentityKey?: string | null;
+  packContextVersion?: string | null;
   avatarAsset?: GeneratedPack["avatarAsset"];
   designPlan?: GeneratedPack["designPlan"];
 }

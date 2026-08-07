@@ -74,6 +74,7 @@ from api.services.video_generation import (
     normalize_caption_srt,
 )
 from api.services.scene_generation import build_scene_generation_result
+from api.services.pack_context import PACK_CONTEXT_VERSION, build_pack_context
 from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
@@ -6452,6 +6453,11 @@ _PACK_SYSTEM = """Voce e o editor de carrosseis do Instituto Guilherme Martins.
 Sua unica tarefa e transformar um roteiro medico em um carrossel de 6 slides,
 em portugues do Brasil, usando o schema estruturado fornecido.
 
+IDENTIDADE:
+- Use exclusivamente a identidade e o Avatar Set presentes no CONTEXTO COMPLETO.
+- Nunca invente, troque ou escolha outro avatarId; a identidade é anexada pelo backend.
+- Se houver Avatar Set, ele representa a mesma pessoa em posições diferentes; mantenha essa continuidade também nas fotos.
+
 OBJETIVO DE COPY: leitura instantanea e entendimento na primeira passada.
 - Uma unica ideia por slide.
 - Headline curta, concreta e com no maximo 11 palavras.
@@ -6621,12 +6627,19 @@ def _attach_pack_metadata(
     *,
     script_id: str,
     avatar_asset: dict[str, Any] | None = None,
+    pack_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enriched = _normalize_pack_design(pack)
     enriched["sourceScriptId"] = script_id
     if avatar_asset:
         enriched["sourceAvatarId"] = avatar_asset.get("avatarId")
         enriched["avatarAsset"] = avatar_asset
+    if pack_context:
+        identity = pack_context.get("identity") if isinstance(pack_context.get("identity"), dict) else {}
+        enriched["packContextVersion"] = PACK_CONTEXT_VERSION
+        enriched["sourceIdentityKey"] = pack_context.get("identityKey")
+        enriched["sourceAvatarSetId"] = identity.get("avatarSetId")
+        enriched["sourcePrimaryAvatarId"] = identity.get("primaryAvatarId")
     enriched["designPlan"] = _pack_design_plan(enriched)
     return enriched
 
@@ -6666,6 +6679,35 @@ def _recent_pack_context(limit: int = 5) -> list[dict[str, Any]]:
     return context
 
 
+def _pack_generation_context(script_id: str, script: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    profile = _production_profile(script_id)
+    if not profile:
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes de gerar o Pack visual.")
+    avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    design_system = {
+        "version": PACK_SCHEMA_VERSION,
+        "canvas": "1080x1350",
+        "layouts": list(PACK_LAYOUTS),
+        "photoLibrary": list(PHOTO_LIBRARY),
+        "rules": [
+            "Claude escolhe copy, narrativa, layout e photoId; o renderer controla HTML/CSS.",
+            "Exatamente 6 slides, sem layouts repetidos.",
+            "O Pack herda a identidade do Roteiro e não escolhe outro avatar.",
+        ],
+    }
+    context = build_pack_context(
+        script=script,
+        profile=profile,
+        avatar_set=avatar_set,
+        design_system=design_system,
+        compliance_rules=MEDICAL_COMPLIANCE_RULES,
+    )
+    identity = context.get("identity") if isinstance(context.get("identity"), dict) else {}
+    if not identity.get("primaryAvatarId") or not profile.get("voiceId"):
+        raise HTTPException(status_code=409, detail="Defina avatar principal e voz no perfil de produção.")
+    return context, profile
+
+
 @app.get("/api/packs/photo-assets")
 def list_pack_photo_assets() -> dict:
     return {"ok": True, "assets": _pack_photo_assets()}
@@ -6686,7 +6728,8 @@ def generate_pack(payload: PackIn) -> dict:
     script_id = payload.scriptId
     if not script_id:
         raise HTTPException(status_code=422, detail="Informe scriptId para gerar o Pack visual.")
-    _find_script(script_id)
+    script = _find_script(script_id)
+    pack_context, _profile = _pack_generation_context(script_id, script)
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise HTTPException(
             status_code=503,
@@ -6694,7 +6737,9 @@ def generate_pack(payload: PackIn) -> dict:
         )
     recent_context = _recent_pack_context()
     cache_payload = {
-        **payload.model_dump(),
+        "request": payload.model_dump(),
+        "context": pack_context,
+        "identityKey": pack_context["identityKey"],
         "recentPackContext": recent_context,
         "schemaVersion": PACK_SCHEMA_VERSION,
     }
@@ -6702,24 +6747,21 @@ def generate_pack(payload: PackIn) -> dict:
     if cached:
         pack = cached.get("pack") if isinstance(cached, dict) else None
         if isinstance(pack, dict):
-            pack = _attach_pack_metadata(pack, script_id=script_id)
+            avatar_asset = pack.get("avatarAsset") if isinstance(pack.get("avatarAsset"), dict) else None
+            if not avatar_asset:
+                avatar_asset = _find_pack_avatar_asset(str(pack_context["identity"]["primaryAvatarId"]))
+            pack = _attach_pack_metadata(
+                pack,
+                script_id=script_id,
+                avatar_asset=avatar_asset,
+                pack_context=pack_context,
+            )
             _save_visual_pack(script_id, pack)
             cached["pack"] = pack
         return cached
     import anthropic
 
-    roteiro = (
-        f"Titulo: {payload.titulo}\n"
-        f"Tema: {payload.tema}\n"
-        f"Categoria: {payload.categoria}\n"
-        f"Hook: {payload.hook}\n"
-        f"Dor/Conflito: {payload.dorConflito}\n"
-        f"Explicacao simples: {payload.explicacaoSimples}\n"
-        f"Virada/Provocacao: {payload.virada}\n"
-        f"CTA: {payload.cta}\n"
-        f"Cuidados medicos: {payload.cuidadosMedicos}\n"
-        f"Formato do video: {payload.formatoSugerido}"
-    )
+    avatar_asset = _find_pack_avatar_asset(str(pack_context["identity"]["primaryAvatarId"]))
     diversity = json.dumps(recent_context, ensure_ascii=False, indent=2)
     photo_context = json.dumps(
         [
@@ -6749,7 +6791,8 @@ def generate_pack(payload: PackIn) -> dict:
         indent=2,
     )
     base_prompt = (
-        f"ROTEIRO DE ORIGEM:\n{roteiro}\n\n"
+        "CONTEXTO COMPLETO DO ROTEIRO, PERFORMANCE, IDENTIDADE E COMPLIANCE:\n"
+        f"{json.dumps(pack_context, ensure_ascii=False, indent=2)}\n\n"
         f"BIBLIOTECA DE FOTOS (use somente estes IDs):\n{photo_context}\n\n"
         f"VOCABULARIO E LIMITES:\n{layout_context}\n\n"
         f"ULTIMOS CARROSSEIS — evite repetir a mesma sequencia e os mesmos ganchos:\n{diversity}\n\n"
@@ -6807,7 +6850,12 @@ def generate_pack(payload: PackIn) -> dict:
     except Exception as exc:  # rede / credencial
         raise HTTPException(status_code=502, detail=f"Falha ao chamar o Claude: {exc}")
 
-    pack = _attach_pack_metadata(pack, script_id=script_id)
+    pack = _attach_pack_metadata(
+        pack,
+        script_id=script_id,
+        avatar_asset=avatar_asset,
+        pack_context=pack_context,
+    )
     _save_visual_pack(script_id, pack)
     response = {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
     _ai_cache_put("packs.generate", cache_payload, response)
@@ -6816,18 +6864,40 @@ def generate_pack(payload: PackIn) -> dict:
 
 @app.get("/api/packs/{script_id}")
 def get_pack(script_id: str) -> dict:
-    _find_script(script_id)
+    script = _find_script(script_id)
     pack = _get_visual_pack(script_id)
     profile = _production_profile(script_id)
+    current_identity_key = None
+    if profile:
+        try:
+            current_context, _ = _pack_generation_context(script_id, script)
+            current_identity_key = current_context.get("identityKey")
+        except HTTPException:
+            current_identity_key = None
     outdated = bool(
         pack
-        and pack.get("schemaVersion") != PACK_SCHEMA_VERSION
-        and profile
-        and pack.get("sourceAvatarId")
-        and profile.get("avatarId")
-        and pack.get("sourceAvatarId") != profile.get("avatarId")
+        and (
+            (
+                current_identity_key
+                and pack.get("sourceIdentityKey")
+                and pack.get("sourceIdentityKey") != current_identity_key
+            )
+            or (
+                pack.get("schemaVersion") != PACK_SCHEMA_VERSION
+                and profile
+                and pack.get("sourceAvatarId")
+                and profile.get("avatarId")
+                and pack.get("sourceAvatarId") != profile.get("avatarId")
+            )
+        )
     )
-    return {"ok": True, "pack": pack, "productionProfile": profile, "outdatedAvatar": outdated}
+    return {
+        "ok": True,
+        "pack": pack,
+        "productionProfile": profile,
+        "outdatedAvatar": outdated,
+        "outdatedIdentity": outdated,
+    }
 
 
 @app.put("/api/packs/{script_id}/carousel/{slide_index}/layout")
@@ -6900,33 +6970,36 @@ def update_pack_carousel_photo(
 
 @app.post("/api/packs/{script_id}/refresh-avatar")
 def refresh_pack_avatar(script_id: str) -> dict:
-    _find_script(script_id)
+    script = _find_script(script_id)
     pack = _get_visual_pack(script_id)
     if not pack:
         raise HTTPException(status_code=404, detail="Pack visual nao encontrado para este roteiro.")
-    if pack.get("schemaVersion") == PACK_SCHEMA_VERSION:
+    pack_context, _profile = _pack_generation_context(script_id, script)
+    current_key = pack_context.get("identityKey")
+    if pack.get("sourceIdentityKey") == current_key:
         return {
             "ok": True,
             "pack": pack,
             "compliance": _pack_compliance(pack),
-            "productionProfile": _production_profile(script_id),
+            "productionProfile": _profile,
             "outdatedAvatar": False,
+            "outdatedIdentity": False,
         }
-    profile = _production_profile(script_id)
-    if not profile or not profile.get("avatarId"):
-        raise HTTPException(
-            status_code=409,
-            detail="Escolha um avatar no Roteiro antes de gerar um Pack visual.",
-        )
-    avatar_asset = _find_pack_avatar_asset(str(profile["avatarId"]))
-    refreshed = _attach_pack_metadata(pack, script_id=script_id, avatar_asset=avatar_asset)
+    avatar_asset = _find_pack_avatar_asset(str(pack_context["identity"]["primaryAvatarId"]))
+    refreshed = _attach_pack_metadata(
+        pack,
+        script_id=script_id,
+        avatar_asset=avatar_asset,
+        pack_context=pack_context,
+    )
     _save_visual_pack(script_id, refreshed)
     return {
         "ok": True,
         "pack": refreshed,
         "compliance": _pack_compliance(refreshed),
-        "productionProfile": profile,
+        "productionProfile": _profile,
         "outdatedAvatar": False,
+        "outdatedIdentity": False,
     }
 
 
@@ -6973,6 +7046,10 @@ class PackBody(BaseModel):
     checklist: list[str] = Field(default_factory=list)
     sourceScriptId: str | None = None
     sourceAvatarId: str | None = None
+    sourceAvatarSetId: str | None = None
+    sourcePrimaryAvatarId: str | None = None
+    sourceIdentityKey: str | None = None
+    packContextVersion: str | None = None
     avatarAsset: dict[str, Any] | None = None
     designPlan: dict[str, Any] | None = None
     updatedAt: str | None = None
@@ -7065,6 +7142,10 @@ def export_pack(payload: PackExportIn) -> dict:
                 {
                     "sourceScriptId": pack.sourceScriptId or payload.scriptId,
                     "sourceAvatarId": pack.sourceAvatarId,
+                    "sourceAvatarSetId": pack.sourceAvatarSetId,
+                    "sourcePrimaryAvatarId": pack.sourcePrimaryAvatarId,
+                    "sourceIdentityKey": pack.sourceIdentityKey,
+                    "packContextVersion": pack.packContextVersion,
                     "avatarAsset": pack.avatarAsset,
                     "schemaVersion": pack.schemaVersion,
                     "designDirection": pack.designDirection,
