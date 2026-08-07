@@ -40,6 +40,19 @@ from pydantic import BaseModel, Field
 from api.cut_service import cancel_cut_job as cancel_cut_worker
 from api.cut_service import prepare_cut_job, process_cut_project
 from api.job_store import JobStore
+from api.pack_design import (
+    FALLBACK_LAYOUTS,
+    FIELD_NAMES,
+    PACK_LAYOUTS,
+    PACK_SCHEMA_VERSION,
+    PACK_SLIDE_COUNT,
+    PHOTO_LIBRARY,
+    empty_fields,
+    normalize_slide,
+    photo_asset,
+    slide_headline,
+    validate_pack_contract,
+)
 from api.services.heygen_catalog import build_catalog, default_voice_id, normalize_avatar_look
 from api.services.script_performance import (
     LEGACY_OUTRO,
@@ -5289,42 +5302,6 @@ def update_script(item_id: str, payload: ScriptIn) -> dict:
 # --------------------------------------------------------------------------- #
 # Geracao real do Pack de Conteudo com Claude (server-side)
 # --------------------------------------------------------------------------- #
-PACK_LAYOUTS = [
-    "hero_avatar",
-    "avatar_split",
-    "big_statement",
-    "myth_fact",
-    "number_stat",
-    "three_points",
-    "quote_card",
-    "editorial_photo",
-    "minimal_explainer",
-    "cta_avatar",
-]
-PACK_DESIGN_DIRECTIONS = [
-    "editorial_premium",
-    "medical_modern",
-    "dark_provocative",
-    "human_lifestyle",
-]
-PACK_VISUAL_INTENTS = [
-    "provocative",
-    "educational",
-    "reassuring",
-    "contrast",
-    "authority",
-    "action",
-]
-PACK_BACKGROUNDS = [
-    "dark_gradient",
-    "clinical_light",
-    "teal_soft",
-    "editorial_ink",
-    "warm_neutral",
-    "data_panel",
-]
-
-
 class PackIn(BaseModel):
     scriptId: str | None = Field(default=None, max_length=120)
     titulo: str
@@ -5517,122 +5494,88 @@ def _preview_configuration_key(payload: VideoPreviewCreateIn, display_text: str,
     return f"preview:{payload.scriptId}:{digest[:32]}"
 
 
-_PACK_AVATAR_SCHEMA = {
+_PACK_ITEM_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"title": {"type": "string"}, "text": {"type": "string"}},
+    "required": ["title", "text"],
+}
+
+_PACK_FIELDS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "show": {"type": "boolean"},
-        "position": {"type": "string", "enum": ["left", "right", "center", "none"]},
-        "crop": {"type": "string", "enum": ["head", "waist", "full"]},
-        # Numeric bounds are enforced by the controlled renderer. Claude's
-        # structured-output schema does not support minimum/maximum.
-        "scale": {"type": "number"},
+        **{
+            name: {"type": "string"}
+            for name in FIELD_NAMES
+            if name not in {"item1", "item2", "item3", "photoId"}
+        },
+        "item1": _PACK_ITEM_SCHEMA,
+        "item2": _PACK_ITEM_SCHEMA,
+        "item3": _PACK_ITEM_SCHEMA,
+        "photoId": {"type": "string", "enum": ["", *PHOTO_LIBRARY.keys()]},
     },
-    "required": ["show", "position", "crop", "scale"],
+    "required": list(FIELD_NAMES),
 }
 
 _PACK_SLIDE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "title": {"type": "string"},
-        "body": {"type": "string"},
-        "layout": {"type": "string", "enum": PACK_LAYOUTS},
-        "visualIntent": {"type": "string", "enum": PACK_VISUAL_INTENTS},
-        "highlight": {"type": "string"},
-        "avatar": _PACK_AVATAR_SCHEMA,
-        "background": {"type": "string", "enum": PACK_BACKGROUNDS},
+        "layoutId": {"type": "string", "enum": list(PACK_LAYOUTS)},
+        "variant": {
+            "type": "string",
+            "enum": ["dark", "deep", "light", "warm", "photo-left", "photo-right", "text-top", "text-bottom"],
+        },
+        "fields": _PACK_FIELDS_SCHEMA,
     },
-    "required": [
-        "title",
-        "body",
-        "layout",
-        "visualIntent",
-        "highlight",
-        "avatar",
-        "background",
-    ],
+    "required": ["layoutId", "variant", "fields"],
 }
 
 _PACK_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "designDirection": {"type": "string", "enum": PACK_DESIGN_DIRECTIONS},
-        "carousel": {
-            "type": "array",
-            # Slide counts are enforced in the prompt and validated after
-            # generation; array size constraints are not supported by Claude.
-            "items": _PACK_SLIDE_SCHEMA,
-        },
-        "staticPost": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "headline": {"type": "string"},
-                "subline": {"type": "string"},
-                "layout": {"type": "string", "enum": PACK_LAYOUTS},
-                "visualIntent": {"type": "string", "enum": PACK_VISUAL_INTENTS},
-                "background": {"type": "string", "enum": PACK_BACKGROUNDS},
-                "avatar": _PACK_AVATAR_SCHEMA,
-            },
-            "required": ["headline", "subline", "layout", "visualIntent", "background", "avatar"],
-        },
+        "schemaVersion": {"type": "string", "enum": [PACK_SCHEMA_VERSION]},
         "caption": {"type": "string"},
-        "stories": {
-            "type": "array",
-            "items": _PACK_SLIDE_SCHEMA,
-        },
-        "checklist": {"type": "array", "items": {"type": "string"}},
+        "hashtags": {"type": "array", "items": {"type": "string"}},
+        "slides": {"type": "array", "items": _PACK_SLIDE_SCHEMA},
     },
-    "required": ["designDirection", "carousel", "staticPost", "caption", "stories", "checklist"],
+    "required": ["schemaVersion", "caption", "hashtags", "slides"],
 }
 
-_PACK_SYSTEM = """Voce e um editor de conteudo medico do Dr. Guilherme, focado em \
-obesidade, GLP-1, Mounjaro, Ozempic, metabolismo e comportamento alimentar, em \
-portugues-BR.
+_PACK_SYSTEM = """Voce e o editor de carrosseis do Instituto Guilherme Martins.
+Sua unica tarefa e transformar um roteiro medico em um carrossel de 6 slides,
+em portugues do Brasil, usando o schema estruturado fornecido.
 
-Regras de compliance OBRIGATORIAS em TODAS as pecas:
-- Nao prescrever medicamentos nem citar doses (mg, ml, comprimidos).
-- Nao prometer resultado ("cura", "milagre", "garantido", "emagrece rapido").
-- Nao fazer sensacionalismo medico.
-- Reforcar avaliacao individual com profissional.
-- Tratar obesidade como condicao multifatorial, com linguagem acolhedora.
-- Conteudo educativo, nao prescritivo.
+OBJETIVO DE COPY: leitura instantanea e entendimento na primeira passada.
+- Uma unica ideia por slide.
+- Headline curta, concreta e com no maximo 11 palavras.
+- Frases ativas; prefira palavras comuns e verbos concretos.
+- Explique termos medicos em linguagem cotidiana.
+- Corte introducoes, adjetivos vazios, repeticoes e frases de efeito genericas.
+- Nao repita a headline no body.
+- Nao use emoji, markdown, rotulos como "Slide 1" ou texto sobre o design.
+- A pessoa precisa captar a mensagem central de cada tela em ate 3 segundos.
 
-A partir do roteiro fornecido, gere um pacote de conteudo para redes sociais:
-- designDirection: escolha UMA familia visual do vocabulario.
-- carousel: 5 a 7 slides educativos com title/body e direcao visual.
-- staticPost: headline forte + subline (1 frase).
-- caption: legenda pronta para Instagram/LinkedIn, com quebras de linha.
-- stories: 3 a 5 telas curtas com direcao visual, incluindo uma com pergunta/enquete.
-- checklist: 4 a 6 itens do que o pacote entrega.
+COMPLIANCE:
+- Nao prescreva medicamento, dose ou conduta individual.
+- Nao prometa resultado e nao use alarmismo.
+- Proibido: segredo, milagre, antes/depois, voce esta fazendo errado e julgamento sobre peso.
+- Trate obesidade como condicao multifatorial.
+- O CTA termina com disclaimer educativo e orienta avaliacao individual.
+- Nunca invente numero, estatistica, mito ou comparacao. Sem fonte real, escolha outro layout.
 
-Direcao de arte:
-- Voce NAO pode escrever HTML, CSS ou JavaScript.
-- Escolha layouts apenas deste vocabulario fechado: hero_avatar, avatar_split, big_statement,
-  myth_fact, number_stat, three_points, quote_card, editorial_photo, minimal_explainer, cta_avatar.
-- Escolha designDirection apenas entre: editorial_premium, medical_modern, dark_provocative,
-  human_lifestyle.
-- Use mais de 3 layouts diferentes no carrossel.
-- Nao repita mecanicamente o mesmo layout.
-- Avatar nao deve aparecer em todos os slides. Em geral, use na capa, em poucos intermediarios
-  e/ou no CTA. Alguns slides devem ser apenas tipografia/informacao.
-- background, visualIntent e avatar devem ser sempre preenchidos usando o schema.
-
-Ritmo e clareza do conteudo:
-- Cada slide deve carregar UMA ideia completa e levar naturalmente ao proximo.
-- Construa uma sequencia com: hook, tensao ou mito, explicacao simples, insight pratico,
-  fechamento e CTA. Adapte a ordem ao assunto sem parecer uma lista mecanica.
-- Escreva titles objetivos, com no maximo 10 palavras. Use body curto: uma ou duas frases
-  diretas, em linguagem falada e facil de escanear no celular.
-- Corte introducoes vagas, repeticoes e jargao desnecessario. Prefira frases ativas e concretas.
-- Nao use rotulos como "Slide 1", nem repita o titulo no body.
-- Escreva para qualquer pessoa entender na primeira leitura. Prefira palavras do dia a dia,
-  frases curtas e exemplos concretos. Explique siglas na primeira vez que aparecerem.
-- Evite termos tecnicos quando houver uma palavra comum equivalente. Nao escreva como artigo
-  cientifico, nem como anuncio; escreva como uma conversa clara e respeitosa.
-Responda apenas no formato JSON pedido."""
+COMPOSICAO:
+- Exatamente 6 slides, todos com layoutId diferente.
+- Slide 1: hero_photo ou photo_overlay. Slide 6: cta_photo.
+- Slides 2 a 5: escolha livre entre os 12 layouts conforme a funcao narrativa.
+- Maximo 3 slides com foto; nunca dois full bleed seguidos.
+- Maximo 2 fundos escuros consecutivos.
+- Sequencia: gancho -> tensao -> explicacao/evidencia -> ponto central -> aplicacao/autoridade -> CTA.
+- photoId deve vir apenas da biblioteca enviada no pedido.
+- Layout e texto devem obedecer aos limites descritos no pedido.
+- Voce nao gera HTML, CSS ou imagens."""
 
 
 def _find_pack_avatar_asset(avatar_id: str) -> dict[str, Any]:
@@ -5682,121 +5625,104 @@ def _cache_pack_avatar_asset(avatar: dict[str, Any], preview_url: str) -> dict[s
     }
 
 
-def _pack_photo_assets() -> list[dict[str, str]]:
-    """Lista fotos locais aprovadas para o Pack; nunca aponta para Downloads ou URLs remotas."""
-    if not PACK_PHOTO_ASSETS.exists():
-        return []
-    assets: list[dict[str, str]] = []
-    for path in sorted(PACK_PHOTO_ASSETS.iterdir()):
-        if not path.is_file() or path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+def _pack_photo_assets() -> list[dict[str, Any]]:
+    """Biblioteca aprovada, com IDs estaveis e metadados de enquadramento."""
+    assets: list[dict[str, Any]] = []
+    for photo_id, meta in PHOTO_LIBRARY.items():
+        path = ROOT / str(meta["file"])
+        if not path.is_file():
             continue
-        asset_id = f"photo-{hashlib.sha256(path.name.encode('utf-8')).hexdigest()[:16]}"
         assets.append(
             {
-                "id": asset_id,
-                "name": path.stem.upper(),
-                "cachedAssetPath": str(path.relative_to(ROOT)),
-                "url": f"/api/packs/photo-assets/{asset_id}",
+                "id": photo_id,
+                "name": meta["name"],
+                "description": meta["description"],
+                "cachedAssetPath": meta["file"],
+                "facePointX": meta["facePointX"],
+                "facePointY": meta["facePointY"],
+                "brightness": meta["brightness"],
+                "url": f"/api/packs/photo-assets/{photo_id}",
             }
         )
     return assets
 
 
-def _pack_photo_asset(asset_id: str) -> dict[str, str]:
-    for asset in _pack_photo_assets():
-        if asset["id"] == asset_id:
-            return asset
-    raise HTTPException(status_code=404, detail="Foto do Pack nao encontrada.")
+def _pack_photo_asset(asset_id: str) -> dict[str, Any]:
+    asset = photo_asset(asset_id)
+    if not asset or not (ROOT / str(asset["cachedAssetPath"])).is_file():
+        raise HTTPException(status_code=404, detail="Foto do Pack nao encontrada.")
+    return {**asset, "url": f"/api/packs/photo-assets/{asset_id}"}
 
 
 def _pack_design_plan(pack: dict[str, Any]) -> dict[str, Any]:
-    def slide_plan(slide: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "title": slide.get("title", ""),
-            "layout": slide.get("layout", "minimal_explainer"),
-            "visualIntent": slide.get("visualIntent", "educational"),
-            "highlight": slide.get("highlight", ""),
-            "avatar": slide.get("avatar", {}),
-            "background": slide.get("background", "clinical_light"),
-            "photoAsset": slide.get("photoAsset"),
-        }
-
     return {
-        "designDirection": pack.get("designDirection", "medical_modern"),
-        "carousel": [slide_plan(slide) for slide in pack.get("carousel", []) if isinstance(slide, dict)],
-        "stories": [slide_plan(slide) for slide in pack.get("stories", []) if isinstance(slide, dict)],
-        "staticPost": {
-            "layout": (pack.get("staticPost") or {}).get("layout", "big_statement"),
-            "visualIntent": (pack.get("staticPost") or {}).get("visualIntent", "educational"),
-            "avatar": (pack.get("staticPost") or {}).get("avatar", {}),
-            "background": (pack.get("staticPost") or {}).get("background", "clinical_light"),
-            "photoAsset": (pack.get("staticPost") or {}).get("photoAsset"),
-        },
+        "schemaVersion": pack.get("schemaVersion") or PACK_SCHEMA_VERSION,
+        "carousel": [
+            {
+                "layoutId": slide.get("layoutId") or slide.get("layout"),
+                "variant": slide.get("variant"),
+                "photoId": (slide.get("fields") or {}).get("photoId"),
+                "headline": slide_headline(slide),
+            }
+            for slide in pack.get("carousel", [])
+            if isinstance(slide, dict)
+        ],
     }
 
 
 def _normalize_pack_design(pack: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(pack)
-    carousel = [
-        dict(slide)
-        for slide in normalized.get("carousel", [])
-        if isinstance(slide, dict)
-    ]
-    if carousel:
-        unique_layouts = {
-            slide.get("layout")
-            for slide in carousel
-            if slide.get("layout") in PACK_LAYOUTS
-        }
-        if len(unique_layouts) < 4:
-            fallback_layouts = [
-                "hero_avatar",
-                "myth_fact",
-                "number_stat",
-                "three_points",
-                "minimal_explainer",
-                "cta_avatar",
-                "quote_card",
-            ]
-            for index, slide in enumerate(carousel):
-                slide["layout"] = fallback_layouts[index % len(fallback_layouts)]
-        if sum(1 for slide in carousel if (slide.get("avatar") or {}).get("show")) >= len(carousel):
-            for index, slide in enumerate(carousel):
-                if index not in {0, len(carousel) - 1}:
-                    avatar = dict(slide.get("avatar") or {})
-                    avatar["show"] = False
-                    avatar["position"] = "none"
-                    slide["avatar"] = avatar
+    raw_carousel = normalized.get("carousel")
+    if not isinstance(raw_carousel, list):
+        raw_carousel = normalized.get("slides") if isinstance(normalized.get("slides"), list) else []
+    carousel = [normalize_slide(slide, index) for index, slide in enumerate(raw_carousel) if isinstance(slide, dict)]
+    normalized["schemaVersion"] = normalized.get("schemaVersion") or PACK_SCHEMA_VERSION
+    normalized["designDirection"] = "institute_carousel_v1"
     normalized["carousel"] = carousel
+    normalized["slides"] = carousel
+    normalized.setdefault("hashtags", [])
+    normalized.setdefault("stories", [])
+    if carousel:
+        first_fields = carousel[0]["fields"]
+        normalized.setdefault(
+            "staticPost",
+            {
+                "headline": first_fields.get("headline", ""),
+                "subline": first_fields.get("subheadline", ""),
+                "layout": "big_statement",
+            },
+        )
+    else:
+        normalized.setdefault("staticPost", {"headline": "", "subline": "", "layout": "big_statement"})
+    normalized.setdefault(
+        "checklist",
+        [
+            "6 slides em sequencia narrativa",
+            "12 layouts de marca disponiveis",
+            "Copy curta e validada por campo",
+            "PNG 1080 x 1350 pronto para Instagram",
+        ],
+    )
     return normalized
 
 
 def _validate_pack_content_counts(pack: dict[str, Any]) -> None:
-    """Keep the product-level slide counts outside Claude's schema subset."""
-    carousel = pack.get("carousel")
-    stories = pack.get("stories")
-    if not isinstance(carousel, list) or not 5 <= len(carousel) <= 7:
-        raise HTTPException(
-            status_code=502,
-            detail="Claude retornou uma quantidade invalida de slides para o carrossel (esperado: 5 a 7).",
-        )
-    if not isinstance(stories, list) or not 3 <= len(stories) <= 5:
-        raise HTTPException(
-            status_code=502,
-            detail="Claude retornou uma quantidade invalida de stories (esperado: 3 a 5).",
-        )
+    errors = validate_pack_contract(pack)
+    if errors:
+        raise HTTPException(status_code=502, detail="; ".join(errors))
 
 
 def _attach_pack_metadata(
     pack: dict[str, Any],
     *,
     script_id: str,
-    avatar_asset: dict[str, Any],
+    avatar_asset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enriched = _normalize_pack_design(pack)
     enriched["sourceScriptId"] = script_id
-    enriched["sourceAvatarId"] = avatar_asset["avatarId"]
-    enriched["avatarAsset"] = avatar_asset
+    if avatar_asset:
+        enriched["sourceAvatarId"] = avatar_asset.get("avatarId")
+        enriched["avatarAsset"] = avatar_asset
     enriched["designPlan"] = _pack_design_plan(enriched)
     return enriched
 
@@ -5821,17 +5747,15 @@ def _recent_pack_context(limit: int = 5) -> list[dict[str, Any]]:
             continue
         context.append(
             {
-                "designDirection": pack.get("designDirection")
-                or (pack.get("designPlan") or {}).get("designDirection"),
                 "layouts": [
-                    slide.get("layout")
+                    slide.get("layoutId") or slide.get("layout")
                     for slide in carousel
-                    if isinstance(slide, dict) and slide.get("layout")
+                    if isinstance(slide, dict) and (slide.get("layoutId") or slide.get("layout"))
                 ],
                 "headlines": [
-                    slide.get("title")
+                    slide_headline(slide)
                     for slide in carousel[:3]
-                    if isinstance(slide, dict) and slide.get("title")
+                    if isinstance(slide, dict)
                 ],
             }
         )
@@ -5854,18 +5778,11 @@ def get_pack_photo_asset(asset_id: str) -> FileResponse:
 
 @app.post("/api/packs/generate")
 def generate_pack(payload: PackIn) -> dict:
-    """Gera o pack de conteudo real via Claude a partir de um roteiro."""
+    """Gera um carrossel de 6 slides com copy curta e layout deterministico."""
     script_id = payload.scriptId
     if not script_id:
         raise HTTPException(status_code=422, detail="Informe scriptId para gerar o Pack visual.")
     _find_script(script_id)
-    profile = _production_profile(script_id)
-    if not profile or not profile.get("avatarId"):
-        raise HTTPException(
-            status_code=409,
-            detail="Escolha um avatar no Roteiro antes de gerar um Pack visual.",
-        )
-    avatar_asset = _find_pack_avatar_asset(str(profile["avatarId"]))
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise HTTPException(
             status_code=503,
@@ -5874,15 +5791,14 @@ def generate_pack(payload: PackIn) -> dict:
     recent_context = _recent_pack_context()
     cache_payload = {
         **payload.model_dump(),
-        "sourceAvatarId": profile["avatarId"],
         "recentPackContext": recent_context,
-        "schemaVersion": "pack-design-plan-v1",
+        "schemaVersion": PACK_SCHEMA_VERSION,
     }
     cached = _ai_cache_get("packs.generate", cache_payload)
     if cached:
         pack = cached.get("pack") if isinstance(cached, dict) else None
         if isinstance(pack, dict):
-            pack = _attach_pack_metadata(pack, script_id=script_id, avatar_asset=avatar_asset)
+            pack = _attach_pack_metadata(pack, script_id=script_id)
             _save_visual_pack(script_id, pack)
             cached["pack"] = pack
         return cached
@@ -5901,45 +5817,95 @@ def generate_pack(payload: PackIn) -> dict:
         f"Formato do video: {payload.formatoSugerido}"
     )
     diversity = json.dumps(recent_context, ensure_ascii=False, indent=2)
-    try:
-        client = anthropic.Anthropic()
-        model = os.getenv("ANTHROPIC_PACK_MODEL", "claude-sonnet-4-5")
+    photo_context = json.dumps(
+        [
+            {"id": photo_id, "description": meta["description"]}
+            for photo_id, meta in PHOTO_LIBRARY.items()
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+    layout_context = json.dumps(
+        {
+            "layouts": list(PACK_LAYOUTS),
+            "fallback": list(FALLBACK_LAYOUTS),
+            "hardLimits": {
+                "eyebrow": 22,
+                "headline": "use o limite especifico do layout; nunca mais de 11 palavras",
+                "body": "110 a 200 caracteres conforme o layout",
+                "itemTitle": 24,
+                "itemText": 90,
+                "quote": 90,
+                "cta": 22,
+                "statistic": 6,
+                "disclaimer": 90,
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    base_prompt = (
+        f"ROTEIRO DE ORIGEM:\n{roteiro}\n\n"
+        f"BIBLIOTECA DE FOTOS (use somente estes IDs):\n{photo_context}\n\n"
+        f"VOCABULARIO E LIMITES:\n{layout_context}\n\n"
+        f"ULTIMOS CARROSSEIS — evite repetir a mesma sequencia e os mesmos ganchos:\n{diversity}\n\n"
+        "Entregue uma narrativa ultra eficiente. Cada tela deve ser entendida isoladamente e levar naturalmente a proxima. "
+        "Use fields irrelevantes ao layout como string vazia ou item vazio."
+    )
+
+    def request_pack(client: Any, model: str, correction_errors: list[str] | None = None) -> tuple[Any, dict[str, Any]]:
+        correction = ""
+        if correction_errors:
+            correction = (
+                "\n\nA PRIMEIRA RESPOSTA FOI REJEITADA. Corrija todos os erros abaixo sem alterar o fato central:\n- "
+                + "\n- ".join(correction_errors)
+            )
         message = client.messages.create(
             model=model,
-            max_tokens=2000,
-            system=_PACK_SYSTEM,
-            output_config={"format": {"type": "json_schema", "schema": _PACK_SCHEMA}},
-            messages=[
+            max_tokens=1400,
+            system=[
                 {
-                    "role": "user",
-                    "content": (
-                        f"ROTEIRO:\n{roteiro}\n\n"
-                        f"PERFIL DE PRODUCAO DO ROTEIRO:\n"
-                        f"- avatarId herdado: {profile['avatarId']}\n"
-                        f"- voiceId: {profile['voiceId']}\n"
-                        f"- speechMode: {profile['speechMode']}\n"
-                        f"- generationMode: {profile['generationMode']}\n\n"
-                        f"ULTIMOS PACKS PARA EVITAR REPETICAO VISUAL/TEXTUAL:\n{diversity}\n\n"
-                        "Gere variedade visual sem quebrar a identidade geral da marca."
-                    ),
+                    "type": "text",
+                    "text": _PACK_SYSTEM,
+                    "cache_control": {"type": "ephemeral"},
                 }
             ],
+            output_config={"format": {"type": "json_schema", "schema": _PACK_SCHEMA}},
+            messages=[{"role": "user", "content": base_prompt + correction}],
         )
+        text = "".join(getattr(block, "text", "") for block in message.content)
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail="Resposta do Claude nao veio em JSON valido.") from exc
+        return message, parsed
+
+    try:
+        client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_PACK_MODEL", "claude-haiku-4-5")
+        message, pack = request_pack(client, model)
+        _record_anthropic_usage("packs.generate", model, message)
+        validation_errors = validate_pack_contract(pack)
+        if validation_errors:
+            message, pack = request_pack(client, model, validation_errors)
+            _record_anthropic_usage("packs.generate.repair", model, message)
+            validation_errors = validate_pack_contract(pack)
+        if validation_errors:
+            raise HTTPException(
+                status_code=502,
+                detail="Claude nao respeitou o contrato do carrossel apos uma correcao: "
+                + "; ".join(validation_errors),
+            )
     except anthropic.APIStatusError as exc:
         raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
+    except HTTPException:
+        raise
     except Exception as exc:  # rede / credencial
         raise HTTPException(status_code=502, detail=f"Falha ao chamar o Claude: {exc}")
 
-    texto = "".join(getattr(b, "text", "") for b in message.content)
-    try:
-        pack = json.loads(texto)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="Resposta do Claude nao veio em JSON valido.")
-    _validate_pack_content_counts(pack)
-    pack = _attach_pack_metadata(pack, script_id=script_id, avatar_asset=avatar_asset)
+    pack = _attach_pack_metadata(pack, script_id=script_id)
     _save_visual_pack(script_id, pack)
     response = {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
-    _record_anthropic_usage("packs.generate", model, message)
     _ai_cache_put("packs.generate", cache_payload, response)
     return response
 
@@ -5951,6 +5917,7 @@ def get_pack(script_id: str) -> dict:
     profile = _production_profile(script_id)
     outdated = bool(
         pack
+        and pack.get("schemaVersion") != PACK_SCHEMA_VERSION
         and profile
         and pack.get("sourceAvatarId")
         and profile.get("avatarId")
@@ -5979,6 +5946,7 @@ def update_pack_carousel_layout(
     if not isinstance(slide, dict):
         raise HTTPException(status_code=422, detail="Slide do carrossel invalido.")
 
+    slide["layoutId"] = payload.layout
     slide["layout"] = payload.layout
     pack["designPlan"] = _pack_design_plan(pack)
     _save_visual_pack(script_id, pack)
@@ -6009,9 +5977,18 @@ def update_pack_carousel_photo(
             "id": asset["id"],
             "name": asset["name"],
             "cachedAssetPath": asset["cachedAssetPath"],
+            "facePointX": asset["facePointX"],
+            "facePointY": asset["facePointY"],
+            "brightness": asset["brightness"],
         }
+        fields = dict(slide.get("fields") or empty_fields())
+        fields["photoId"] = asset["id"]
+        slide["fields"] = fields
     else:
         slide.pop("photoAsset", None)
+        fields = dict(slide.get("fields") or empty_fields())
+        fields["photoId"] = ""
+        slide["fields"] = fields
     pack["designPlan"] = _pack_design_plan(pack)
     _save_visual_pack(script_id, pack)
     return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
@@ -6023,6 +6000,14 @@ def refresh_pack_avatar(script_id: str) -> dict:
     pack = _get_visual_pack(script_id)
     if not pack:
         raise HTTPException(status_code=404, detail="Pack visual nao encontrado para este roteiro.")
+    if pack.get("schemaVersion") == PACK_SCHEMA_VERSION:
+        return {
+            "ok": True,
+            "pack": pack,
+            "compliance": _pack_compliance(pack),
+            "productionProfile": _production_profile(script_id),
+            "outdatedAvatar": False,
+        }
     profile = _production_profile(script_id)
     if not profile or not profile.get("avatarId"):
         raise HTTPException(
@@ -6048,9 +6033,13 @@ PACKS_DIR = ROOT / "content" / "packs"
 
 
 class PackSlide(BaseModel):
+    layoutId: str | None = None
+    variant: str = "light"
+    fields: dict[str, Any] = Field(default_factory=empty_fields)
+    # Campos legados mantidos para abrir Packs salvos antes do novo renderer.
     title: str = ""
     body: str = ""
-    layout: str = "minimal_explainer"
+    layout: str = "explainer"
     visualIntent: str = "educational"
     highlight: str = ""
     avatar: dict[str, Any] = {}
@@ -6069,12 +6058,15 @@ class PackStaticPost(BaseModel):
 
 
 class PackBody(BaseModel):
-    designDirection: str = "medical_modern"
-    carousel: list[PackSlide] = []
-    staticPost: PackStaticPost = PackStaticPost()
+    schemaVersion: str = PACK_SCHEMA_VERSION
+    designDirection: str = "institute_carousel_v1"
+    carousel: list[PackSlide] = Field(default_factory=list)
+    slides: list[PackSlide] = Field(default_factory=list)
+    staticPost: PackStaticPost = Field(default_factory=PackStaticPost)
     caption: str = ""
-    stories: list[PackSlide] = []
-    checklist: list[str] = []
+    hashtags: list[str] = Field(default_factory=list)
+    stories: list[PackSlide] = Field(default_factory=list)
+    checklist: list[str] = Field(default_factory=list)
     sourceScriptId: str | None = None
     sourceAvatarId: str | None = None
     avatarAsset: dict[str, Any] | None = None
@@ -6129,7 +6121,16 @@ def export_pack(payload: PackExportIn) -> dict:
     img_root = folder / "1-imagens"
     txt_root = folder / "2-textos"
     pack = payload.pack
-    compliance = _pack_compliance(pack.model_dump())
+    pack_dump = pack.model_dump()
+    carousel_rows = [normalize_slide(slide, index) for index, slide in enumerate(pack_dump.get("carousel") or pack_dump.get("slides") or [])]
+    is_institute_pack = pack.schemaVersion == PACK_SCHEMA_VERSION
+    if is_institute_pack:
+        contract_errors = validate_pack_contract(
+            {"slides": carousel_rows, "caption": pack.caption, "hashtags": pack.hashtags}
+        )
+        if contract_errors:
+            raise HTTPException(status_code=422, detail="Pack bloqueado antes da exportacao: " + "; ".join(contract_errors))
+    compliance = _pack_compliance(pack_dump)
 
     try:
         folder.mkdir(parents=True, exist_ok=True)
@@ -6139,27 +6140,29 @@ def export_pack(payload: PackExportIn) -> dict:
 
         # --- 2-textos: um arquivo por peca, sem repeticao ---
         carrossel_txt = "\n\n".join(
-            f"── SLIDE {i:02d} ──\n{s.title}\n\n{s.body}"
-            for i, s in enumerate(pack.carousel, start=1)
+            f"── SLIDE {i:02d} · {slide['layoutId']} ──\n{slide_headline(slide)}\n\n{slide['fields'].get('body') or slide['fields'].get('subheadline') or ''}"
+            for i, slide in enumerate(carousel_rows, start=1)
         )
         (txt_root / "carrossel.txt").write_text(carrossel_txt + "\n", encoding="utf-8")
-
-        stories_txt = "\n\n".join(
-            f"── STORY {i:02d} · {s.title} ──\n{s.body}"
-            for i, s in enumerate(pack.stories, start=1)
-        )
-        (txt_root / "stories.txt").write_text(stories_txt + "\n", encoding="utf-8")
-
-        (txt_root / "legenda.txt").write_text(pack.caption + "\n", encoding="utf-8")
-        (txt_root / "post-fixo.txt").write_text(
-            f"{pack.staticPost.headline}\n\n{pack.staticPost.subline}\n", encoding="utf-8"
-        )
+        hashtags = " ".join(tag if tag.startswith("#") else f"#{tag}" for tag in pack.hashtags)
+        legenda = pack.caption.strip() + (f"\n\n{hashtags}" if hashtags else "")
+        (txt_root / "legenda.txt").write_text(legenda + "\n", encoding="utf-8")
+        if not is_institute_pack:
+            stories_txt = "\n\n".join(
+                f"── STORY {i:02d} · {s.title} ──\n{s.body}"
+                for i, s in enumerate(pack.stories, start=1)
+            )
+            (txt_root / "stories.txt").write_text(stories_txt + "\n", encoding="utf-8")
+            (txt_root / "post-fixo.txt").write_text(
+                f"{pack.staticPost.headline}\n\n{pack.staticPost.subline}\n", encoding="utf-8"
+            )
         (folder / "PACK.md").write_text(
             json.dumps(
                 {
                     "sourceScriptId": pack.sourceScriptId or payload.scriptId,
                     "sourceAvatarId": pack.sourceAvatarId,
                     "avatarAsset": pack.avatarAsset,
+                    "schemaVersion": pack.schemaVersion,
                     "designDirection": pack.designDirection,
                     "designPlan": pack.designPlan,
                     "compliance": compliance,
@@ -6170,7 +6173,7 @@ def export_pack(payload: PackExportIn) -> dict:
             + "\n",
             encoding="utf-8",
         )
-        textos = 5
+        textos = 3 if is_institute_pack else 5
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Falha ao salvar o pack: {exc}")
 
@@ -6180,16 +6183,14 @@ def export_pack(payload: PackExportIn) -> dict:
     try:
         from api.slides import render_pack_images
 
-        carrossel = [s.model_dump() for s in pack.carousel]
-        if carrossel:
-            carrossel[0]["tema"] = payload.tema or payload.categoria
         resultado = render_pack_images(
             img_root,
-            carrossel,
+            carousel_rows,
             [s.model_dump() for s in pack.stories],
-            pack.staticPost.model_dump(),
+            None if is_institute_pack else pack.staticPost.model_dump(),
             design_direction=pack.designDirection,
             avatar_asset=pack.avatarAsset,
+            render_extras=not is_institute_pack,
         )
         imagens = int(resultado.get("images", 0))
     except Exception as exc:  # playwright ausente / falha de render
@@ -6205,21 +6206,14 @@ def export_pack(payload: PackExportIn) -> dict:
         "",
         "## O que postar",
         "",
-        f"**1. Carrossel** — `1-imagens/carrossel/` ({len(pack.carousel)} imagens, 1080×1350)",
+        f"**1. Carrossel** — `1-imagens/carrossel/` ({len(carousel_rows)} imagens, 1080×1350)",
         "   Suba na ordem (carrossel-01 → carrossel-%02d) e use a legenda abaixo."
-        % len(pack.carousel),
+        % len(carousel_rows),
         "",
         "**2. Legenda** — `2-textos/legenda.txt`",
-        "   Copie e cole na publicação. Já vem com hashtags.",
+        "   Copie e cole na publicação. As hashtags ficam no final.",
         "",
-        f"**3. Stories** — `1-imagens/stories/` ({len(pack.stories)} imagens, 1080×1920)",
-        "   Publique no dia seguinte apontando para o post.",
-        "   Na tela de enquete, adicione o sticker de enquete do Instagram.",
-        "",
-        "**4. Post fixo (opcional)** — `1-imagens/post-fixo.png` (1080×1080)",
-        "   Peça única, para reforçar a mensagem principal.",
-        "",
-        f"**5. Vídeo** — gere na aba *Produção de vídeos* do app (formato: {payload.formatoSugerido}).",
+        f"**3. Vídeo** — gere na aba *Produção de vídeos* do app (formato: {payload.formatoSugerido}).",
         "",
         "## Pastas",
         "",

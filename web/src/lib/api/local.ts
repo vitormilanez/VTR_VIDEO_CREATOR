@@ -310,8 +310,10 @@ export async function saveCalendarPost(post: CalendarPost): Promise<CalendarPost
 }
 
 export interface GeneratedPack {
-  designDirection?: "editorial_premium" | "medical_modern" | "dark_provocative" | "human_lifestyle";
+  schemaVersion?: "institute-carousel-v1" | string;
+  designDirection?: "institute_carousel_v1" | string;
   carousel: PackSlide[];
+  slides?: PackSlide[];
   staticPost: {
     headline: string;
     subline: string;
@@ -322,6 +324,7 @@ export interface GeneratedPack {
     photoAsset?: Omit<PackPhotoAsset, "url"> | null;
   };
   caption: string;
+  hashtags?: string[];
   stories: PackSlide[];
   checklist: string[];
   sourceScriptId?: string | null;
@@ -336,16 +339,18 @@ export interface GeneratedPack {
 }
 
 export type PackLayout =
-  | "hero_avatar"
-  | "avatar_split"
+  | "hero_photo"
+  | "photo_split"
   | "big_statement"
+  | "question"
   | "myth_fact"
   | "number_stat"
   | "three_points"
-  | "quote_card"
-  | "editorial_photo"
-  | "minimal_explainer"
-  | "cta_avatar";
+  | "explainer"
+  | "doctor_quote"
+  | "photo_overlay"
+  | "do_dont"
+  | "cta_photo";
 
 export type PackVisualIntent =
   "provocative" | "educational" | "reassuring" | "contrast" | "authority" | "action";
@@ -368,13 +373,42 @@ export interface PackAvatarPlan {
 export interface PackPhotoAsset {
   id: string;
   name: string;
+  description?: string;
   cachedAssetPath: string;
+  facePointX?: number;
+  facePointY?: number;
+  brightness?: number;
   url?: string;
 }
 
-export interface PackSlide {
+export interface PackSlideItem {
   title: string;
+  text: string;
+}
+
+export interface PackSlideFields {
+  eyebrow: string;
+  headline: string;
+  subheadline: string;
   body: string;
+  statistic: string;
+  item1: PackSlideItem;
+  item2: PackSlideItem;
+  item3: PackSlideItem;
+  quote: string;
+  cta: string;
+  footer: string;
+  caption: string;
+  disclaimer: string;
+  photoId: string;
+}
+
+export interface PackSlide {
+  layoutId?: PackLayout;
+  variant?: string;
+  fields?: PackSlideFields;
+  title?: string;
+  body?: string;
   layout?: PackLayout;
   visualIntent?: PackVisualIntent;
   highlight?: string;
@@ -487,10 +521,13 @@ export async function updatePackCarouselPhoto(
 }
 
 export interface PackForExport {
+  schemaVersion?: GeneratedPack["schemaVersion"];
   designDirection?: GeneratedPack["designDirection"];
   carousel: PackSlide[];
+  slides?: PackSlide[];
   staticPost: GeneratedPack["staticPost"];
   caption: string;
+  hashtags?: string[];
   stories: PackSlide[];
   checklist: string[];
   sourceScriptId?: string | null;
