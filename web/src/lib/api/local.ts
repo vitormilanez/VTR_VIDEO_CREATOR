@@ -329,6 +329,10 @@ export interface GeneratedPack {
   checklist: string[];
   sourceScriptId?: string | null;
   sourceAvatarId?: string | null;
+  sourceAvatarSetId?: string | null;
+  sourcePrimaryAvatarId?: string | null;
+  sourceIdentityKey?: string | null;
+  packContextVersion?: string | null;
   avatarAsset?: {
     avatarId: string;
     avatarName: string;
@@ -423,7 +427,132 @@ export interface ProductionProfile {
   voiceId: string;
   speechMode: "natural" | "fiel" | "direto" | "enfatico";
   generationMode: "direct" | "video_agent";
+  avatarMode?: "single" | "set";
+  avatarSetId?: string | null;
+  primaryAvatarId?: string | null;
+  positionCount?: 1 | 2;
   updatedAt?: string;
+}
+
+export type AvatarSetRole = "primary" | "front" | "close" | "three_quarter" | "standing" | "wide";
+
+export interface AvatarSetLook {
+  avatarId: string;
+  role: AvatarSetRole;
+  label: string;
+}
+
+export interface AvatarSet {
+  id: string;
+  name: string;
+  voiceId: string;
+  looks: AvatarSetLook[];
+  updatedAt: string;
+}
+
+export interface ScenePlanScene {
+  id: string;
+  order: number;
+  text: string;
+  lookRole: AvatarSetRole;
+  avatarId: string;
+  estimatedStart: number;
+  estimatedEnd: number;
+}
+
+export interface ScenePlan {
+  scriptId: string;
+  scenes: ScenePlanScene[];
+  updatedAt: string;
+}
+
+export interface SceneGenerationRequest {
+  sceneId: string;
+  order: number;
+  avatarId: string;
+  voiceId: string;
+  spokenText: string;
+  speechMode: "natural" | "fiel" | "direto" | "enfatico";
+  orientation: "portrait" | "landscape";
+}
+
+export interface SceneGenerationResult {
+  scriptId: string;
+  status: "not_submitted";
+  provider: "heygen";
+  sceneCount: number;
+  estimatedCalls: number;
+  requiresExplicitConfirmation: boolean;
+  warning: string;
+  requests: SceneGenerationRequest[];
+}
+
+export interface SceneDirectionSuggestion {
+  text: string;
+  lookRole: AvatarSetRole;
+  reason: string;
+}
+
+export type VideoVisualType = "none" | "full_slide" | "overlay" | "statistic" | "comparison" | "quote";
+export type VideoVisualLayout =
+  | "hero_photo"
+  | "photo_split"
+  | "big_statement"
+  | "question"
+  | "myth_fact"
+  | "number_stat"
+  | "three_points"
+  | "explainer"
+  | "doctor_quote"
+  | "photo_overlay"
+  | "do_dont"
+  | "cta_photo";
+
+export interface VisualPlanScene {
+  sceneId: string;
+  visual: {
+    type: VideoVisualType;
+    layout: VideoVisualLayout | "";
+    headline: string;
+    body: string;
+    purpose: string;
+    startRatio: number;
+    durationSeconds: number;
+    motionPreset: "none" | "fade" | "soft_zoom" | "fade_zoom";
+  };
+}
+
+export interface VisualPlan {
+  scriptId: string;
+  designSystemVersion: string;
+  promptVersion: string;
+  scenes: VisualPlanScene[];
+  updatedAt: string;
+}
+
+export interface VideoSlideAsset {
+  sceneId: string;
+  index: number;
+  type: VideoVisualType;
+  layout: VideoVisualLayout | "";
+  headline: string;
+  body: string;
+  startRatio: number;
+  durationSeconds: number;
+  motionPreset: "none" | "fade" | "soft_zoom" | "fade_zoom";
+  assetPath: string | null;
+  url?: string;
+}
+
+export interface VideoSlideRender {
+  scriptId: string;
+  width: number;
+  height: number;
+  scale: number;
+  sceneCount: number;
+  renderedCount: number;
+  assets: VideoSlideAsset[];
+  updatedAt: string;
 }
 
 export interface PackCompliance {
@@ -449,17 +578,20 @@ export async function fetchPack(scriptId: string): Promise<{
   pack: GeneratedPack | null;
   productionProfile: ProductionProfile | null;
   outdatedAvatar: boolean;
+  outdatedIdentity?: boolean;
 }> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack | null;
     productionProfile: ProductionProfile | null;
     outdatedAvatar: boolean;
+    outdatedIdentity?: boolean;
   }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
   return {
     pack: response.pack,
     productionProfile: response.productionProfile,
     outdatedAvatar: response.outdatedAvatar,
+    outdatedIdentity: response.outdatedIdentity,
   };
 }
 
@@ -468,6 +600,7 @@ export async function refreshPackAvatar(scriptId: string): Promise<{
   compliance: PackCompliance;
   productionProfile: ProductionProfile | null;
   outdatedAvatar: boolean;
+  outdatedIdentity?: boolean;
 }> {
   const response = await requestJson<{
     ok: boolean;
@@ -475,6 +608,7 @@ export async function refreshPackAvatar(scriptId: string): Promise<{
     compliance: PackCompliance;
     productionProfile: ProductionProfile | null;
     outdatedAvatar: boolean;
+    outdatedIdentity?: boolean;
   }>(`/api/packs/${encodeURIComponent(scriptId)}/refresh-avatar`, { method: "POST" });
   return response;
 }
@@ -532,6 +666,10 @@ export interface PackForExport {
   checklist: string[];
   sourceScriptId?: string | null;
   sourceAvatarId?: string | null;
+  sourceAvatarSetId?: string | null;
+  sourcePrimaryAvatarId?: string | null;
+  sourceIdentityKey?: string | null;
+  packContextVersion?: string | null;
   avatarAsset?: GeneratedPack["avatarAsset"];
   designPlan?: GeneratedPack["designPlan"];
 }
@@ -580,6 +718,185 @@ export async function saveProductionProfile(
     { method: "PUT", body: JSON.stringify(profile) },
   );
   return response.profile;
+}
+
+export async function fetchAvatarSets(): Promise<AvatarSet[]> {
+  const response = await requestJson<{ ok: boolean; avatarSets: AvatarSet[] }>(
+    "/api/avatar-sets",
+    { method: "GET" },
+  );
+  return response.avatarSets;
+}
+
+export async function saveAvatarSet(
+  avatarSet: Omit<AvatarSet, "id" | "updatedAt">,
+  id?: string,
+): Promise<AvatarSet> {
+  const response = await requestJson<{ ok: boolean; avatarSet: AvatarSet }>(
+    id ? `/api/avatar-sets/${encodeURIComponent(id)}` : "/api/avatar-sets",
+    {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(avatarSet),
+    },
+  );
+  return response.avatarSet;
+}
+
+export async function deleteAvatarSet(id: string): Promise<void> {
+  await requestJson<{ ok: boolean }>(`/api/avatar-sets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchScenePlan(scriptId: string): Promise<ScenePlan | null> {
+  const response = await requestJson<{ ok: boolean; scenePlan: ScenePlan | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan`,
+    { method: "GET" },
+  );
+  return response.scenePlan;
+}
+
+export async function saveScenePlan(
+  scriptId: string,
+  scenes: Array<{
+    id?: string;
+    text: string;
+    lookRole: AvatarSetRole;
+    estimatedStart: number;
+    estimatedEnd: number;
+  }>,
+): Promise<ScenePlan> {
+  const response = await requestJson<{ ok: boolean; scenePlan: ScenePlan }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan`,
+    { method: "PUT", body: JSON.stringify({ scenes }) },
+  );
+  return response.scenePlan;
+}
+
+export async function fetchSceneGenerationPlan(
+  scriptId: string,
+  options?: {
+    speechMode?: SceneGenerationRequest["speechMode"];
+    orientation?: SceneGenerationRequest["orientation"];
+  },
+): Promise<SceneGenerationResult> {
+  const query = new URLSearchParams({
+    speechMode: options?.speechMode || "natural",
+    orientation: options?.orientation || "portrait",
+  });
+  const response = await requestJson<{ ok: boolean; generation: SceneGenerationResult }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/scene-generation/plan?${query.toString()}`,
+    { method: "GET" },
+  );
+  return response.generation;
+}
+
+export async function submitSceneGeneration(
+  scriptId: string,
+  input: {
+    orientation: "portrait" | "landscape";
+    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    speechMode: "natural" | "fiel" | "direto" | "enfatico";
+    captions: boolean;
+    optimizePronunciation: boolean;
+    idempotencyKey?: string;
+  },
+): Promise<{ generation: SceneGenerationResult; jobs: VideoJob[] }> {
+  const response = await requestJson<{
+    ok: boolean;
+    generation: SceneGenerationResult;
+    jobs: VideoJob[];
+  }>(`/api/scripts/${encodeURIComponent(scriptId)}/scene-generation/submit`, {
+    method: "POST",
+    body: JSON.stringify({ confirmed: true, ...input }),
+  });
+  return { generation: response.generation, jobs: response.jobs };
+}
+
+export async function generateSceneDirection(
+  scriptId: string,
+  input: {
+    displayText: string;
+    spokenText?: string;
+    tone?: string;
+    pace?: string;
+    emotion?: string;
+    emphasisWords?: string[];
+    durationSeconds: 10 | 15 | 30 | 45 | 60;
+  },
+): Promise<{ provider: "claude"; promptVersion: string; scenes: SceneDirectionSuggestion[] }> {
+  const response = await requestJson<{
+    ok: boolean;
+    provider: "claude";
+    promptVersion: string;
+    scenes: SceneDirectionSuggestion[];
+  }>(`/api/scripts/${encodeURIComponent(scriptId)}/scene-plan/direct`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return response;
+}
+
+export async function fetchVisualPlan(scriptId: string): Promise<VisualPlan | null> {
+  const response = await requestJson<{ ok: boolean; visualPlan: VisualPlan | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/visual-plan`,
+    { method: "GET" },
+  );
+  return response.visualPlan;
+}
+
+export async function generateVisualDirection(
+  scriptId: string,
+  input: {
+    displayText: string;
+    spokenText?: string;
+    tone?: string;
+    pace?: string;
+    emotion?: string;
+    emphasisWords?: string[];
+    durationSeconds: 10 | 15 | 30 | 45 | 60;
+  },
+): Promise<{ provider: "claude"; visualPlan: VisualPlan }> {
+  const response = await requestJson<{ ok: boolean; provider: "claude"; visualPlan: VisualPlan }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/visual-plan/direct`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return response;
+}
+
+export async function saveVisualPlan(scriptId: string, plan: VisualPlan): Promise<VisualPlan> {
+  const response = await requestJson<{ ok: boolean; visualPlan: VisualPlan }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/visual-plan`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ scenes: plan.scenes }),
+    },
+  );
+  return response.visualPlan;
+}
+
+export async function fetchVideoSlideRender(scriptId: string): Promise<VideoSlideRender | null> {
+  const response = await requestJson<{ ok: boolean; render: VideoSlideRender | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/video-slides`,
+    { method: "GET" },
+  );
+  return response.render;
+}
+
+export async function renderVideoSlides(scriptId: string): Promise<VideoSlideRender> {
+  const response = await requestJson<{ ok: boolean; render: VideoSlideRender }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/video-slides/render`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+  return response.render;
+}
+
+export async function composeFinalVideo(scriptId: string): Promise<VideoJob> {
+  const response = await requestJson<{ ok: boolean; job: VideoJob }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/compose-final-video`,
+    { method: "POST" },
+  );
+  return response.job;
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
@@ -993,10 +1310,10 @@ export function cutFileUrl(projectId: string, filename: string, download = false
   }`;
 }
 
-export async function refreshHeyGenVideo(jobId: string): Promise<VideoJob> {
+export async function refreshHeyGenVideo(jobId: string): Promise<{ job: VideoJob; composedJob?: VideoJob | null }> {
   const res = await fetch(`${BASE}/api/videos/${jobId}/refresh`, { method: "POST" });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel consultar o HeyGen."));
-  return ((await res.json()) as { job: VideoJob }).job;
+  return (await res.json()) as { job: VideoJob; composedJob?: VideoJob | null };
 }
 
 export interface AiCostProvider {

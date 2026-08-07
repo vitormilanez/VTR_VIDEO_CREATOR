@@ -118,6 +118,18 @@ class StableIdTests(unittest.TestCase):
         )
         self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
 
+    def test_final_narration_allows_shorter_actual_duration_than_target(self) -> None:
+        text = server._validate_final_narration(
+            {},
+            (
+                "Este conteúdo resume o tema com calma e mostra por que contexto e avaliação individual "
+                "importam antes de qualquer decisão."
+            ),
+            45,
+        )
+        self.assertIn("contexto", text)
+        self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
+
     def test_final_narration_blocks_placeholder_script(self) -> None:
         with self.assertRaises(server.HTTPException) as raised:
             server._validate_final_narration(
@@ -758,6 +770,74 @@ class StableIdTests(unittest.TestCase):
                 self.assertEqual(blocked_state, "conflict")
                 self.assertEqual(blocked["id"], "v-primeiro")
                 self.assertEqual(len(server._load_video_jobs()), 1)
+            finally:
+                server.OPERATIONAL_DB = original_database
+                server.VIDEO_JOBS = original_jobs
+
+    def test_preview_does_not_block_final_video_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original_database = server.OPERATIONAL_DB
+            original_jobs = server.VIDEO_JOBS
+            server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+            server.VIDEO_JOBS = Path(temporary) / "missing-video-jobs.json"
+            try:
+                preview = {
+                    "id": "vp-preview",
+                    "scriptId": "s-1",
+                    "status": "fila",
+                    "submissionState": "submitted",
+                    "isPreview": True,
+                    "criadoEm": "2026-07-23T10:00:00+00:00",
+                    "atualizadoEm": "2026-07-23T10:00:00+00:00",
+                }
+                server._job_store().reserve_video(
+                    preview,
+                    idempotency_key="preview-stable-123",
+                    force_new_version=False,
+                )
+
+                final, state = server._job_store().reserve_video(
+                    {
+                        "id": "v-final",
+                        "scriptId": "s-1",
+                        "status": "fila",
+                        "criadoEm": "2026-07-23T10:01:00+00:00",
+                        "atualizadoEm": "2026-07-23T10:01:00+00:00",
+                    },
+                    idempotency_key="final-stable-123",
+                    force_new_version=False,
+                )
+
+                self.assertEqual(state, "created")
+                self.assertEqual(final["id"], "v-final")
+            finally:
+                server.OPERATIONAL_DB = original_database
+                server.VIDEO_JOBS = original_jobs
+
+    def test_scene_reservations_allow_multiple_scenes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original_database = server.OPERATIONAL_DB
+            original_jobs = server.VIDEO_JOBS
+            server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+            server.VIDEO_JOBS = Path(temporary) / "missing-video-jobs.json"
+            try:
+                for scene_id in ("scene-1", "scene-2"):
+                    job, state = server._job_store().reserve_video(
+                        {
+                            "id": f"sv-{scene_id}",
+                            "scriptId": "s-1",
+                            "status": "fila",
+                            "submissionState": "submitted",
+                            "isScene": True,
+                            "sceneId": scene_id,
+                            "criadoEm": "2026-07-23T10:00:00+00:00",
+                            "atualizadoEm": "2026-07-23T10:00:00+00:00",
+                        },
+                        idempotency_key=f"scene-stable-{scene_id}",
+                        force_new_version=False,
+                    )
+                    self.assertEqual(state, "created")
+                    self.assertEqual(job["sceneId"], scene_id)
             finally:
                 server.OPERATIONAL_DB = original_database
                 server.VIDEO_JOBS = original_jobs

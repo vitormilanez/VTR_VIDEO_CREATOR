@@ -90,7 +90,7 @@ export interface VideoJob {
   id: string;
   scriptId: string;
   status: VideoJobStatus;
-  provider: "heygen";
+  provider: "heygen" | "local";
   progresso: number; // 0..100
   criadoEm: string;
   atualizadoEm: string;
@@ -101,6 +101,14 @@ export interface VideoJob {
   remoteSessionId?: string;
   remoteVideoId?: string;
   isPreview?: boolean;
+  isScene?: boolean;
+  isComposed?: boolean;
+  sceneId?: string;
+  sceneOrder?: number;
+  sourceSceneJobs?: string[];
+  outputPath?: string;
+  sceneCount?: number;
+  visualCount?: number;
   productionSettings?: {
     generationMode?: "direct" | "video_agent";
     voiceSpeed?: number;

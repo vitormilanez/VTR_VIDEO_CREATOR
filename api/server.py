@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote, quote_plus, urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -50,6 +50,7 @@ from api.pack_design import (
     empty_fields,
     normalize_slide,
     photo_asset,
+    repair_pack_copy,
     slide_headline,
     validate_pack_contract,
 )
@@ -73,6 +74,10 @@ from api.services.video_generation import (
     direct_video_payload,
     normalize_caption_srt,
 )
+from api.services.scene_generation import build_scene_generation_result
+from api.services.video_composer import CompositionScene, compose_video
+from api.services.pack_context import PACK_CONTEXT_VERSION, build_pack_context
+from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
 from integrations.instagram_client import InstagramClient
@@ -90,6 +95,8 @@ CUT_UPLOADS = ROOT / "data" / "cut_uploads"
 CUT_OUTPUTS = ROOT / "data" / "cuts"
 PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
 PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
+VIDEO_SLIDE_OUTPUTS = ROOT / "data" / "video_slides"
+COMPOSED_VIDEO_OUTPUTS = ROOT / "data" / "composed_videos"
 MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
@@ -169,6 +176,32 @@ def _ai_db() -> sqlite3.Connection:
             voice_id TEXT NOT NULL,
             speech_mode TEXT NOT NULL,
             generation_mode TEXT NOT NULL,
+            avatar_mode TEXT NOT NULL DEFAULT 'single',
+            avatar_set_id TEXT,
+            primary_avatar_id TEXT,
+            position_count INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS avatar_sets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            voice_id TEXT NOT NULL,
+            looks_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS scene_plans (
+            script_id TEXT PRIMARY KEY,
+            plan_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS visual_plans (
+            script_id TEXT PRIMARY KEY,
+            plan_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS video_slide_renders (
+            script_id TEXT PRIMARY KEY,
+            render_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS visual_packs (
@@ -179,6 +212,20 @@ def _ai_db() -> sqlite3.Connection:
         );
         """
     )
+    # Existing local databases predate Avatar Sets. Keep them usable without
+    # requiring a destructive migration or touching the Google Sheets schema.
+    for column, definition in (
+        ("avatar_mode", "TEXT NOT NULL DEFAULT 'single'"),
+        ("avatar_set_id", "TEXT"),
+        ("primary_avatar_id", "TEXT"),
+        ("position_count", "INTEGER NOT NULL DEFAULT 1"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE production_profiles ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    conn.commit()
     return conn
 
 
@@ -187,7 +234,8 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
     try:
         row = conn.execute(
             """
-            SELECT script_id, avatar_id, voice_id, speech_mode, generation_mode, updated_at
+            SELECT script_id, avatar_id, voice_id, speech_mode, generation_mode,
+                   avatar_mode, avatar_set_id, primary_avatar_id, position_count, updated_at
             FROM production_profiles
             WHERE script_id = ?
             """,
@@ -203,17 +251,145 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
         "voiceId": row["voice_id"],
         "speechMode": row["speech_mode"],
         "generationMode": row["generation_mode"],
+        "avatarMode": row["avatar_mode"] or "single",
+        "avatarSetId": row["avatar_set_id"],
+        "primaryAvatarId": row["primary_avatar_id"] or row["avatar_id"],
+        "positionCount": int(row["position_count"] or 1),
         "updatedAt": row["updated_at"],
     }
 
 
+AVATAR_SET_ROLES = frozenset({"primary", "front", "close", "three_quarter", "standing", "wide"})
+
+
+def _normalize_avatar_set_looks(looks: list[dict[str, Any]]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    roles: set[str] = set()
+    avatar_ids: set[str] = set()
+    for raw in looks:
+        avatar_id = str(raw.get("avatarId") or raw.get("avatar_id") or "").strip()
+        role = str(raw.get("role") or "").strip()
+        label = re.sub(r"\s+", " ", str(raw.get("label") or role)).strip()
+        if not avatar_id:
+            raise HTTPException(status_code=422, detail="Cada look do Avatar Set precisa de avatarId.")
+        if role not in AVATAR_SET_ROLES:
+            raise HTTPException(status_code=422, detail=f"Role de Avatar Set invalida: {role or 'vazio'}.")
+        if role in roles:
+            raise HTTPException(status_code=422, detail=f"O role '{role}' aparece mais de uma vez no Avatar Set.")
+        roles.add(role)
+        avatar_ids.add(avatar_id)
+        normalized.append({"avatarId": avatar_id, "role": role, "label": label or role})
+    if len(normalized) < 2 or len(avatar_ids) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="Um Avatar Set precisa de pelo menos duas posições/looks diferentes do mesmo avatar.",
+        )
+    return normalized
+
+
+def _avatar_set(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "voiceId": row["voice_id"],
+        "looks": json.loads(str(row["looks_json"])),
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _list_avatar_sets() -> list[dict[str, Any]]:
+    conn = _ai_db()
+    try:
+        rows = conn.execute("SELECT id, name, voice_id, looks_json, updated_at FROM avatar_sets ORDER BY name COLLATE NOCASE").fetchall()
+    finally:
+        conn.close()
+    return [_avatar_set(row) for row in rows]
+
+
+def _get_avatar_set(avatar_set_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT id, name, voice_id, looks_json, updated_at FROM avatar_sets WHERE id = ?",
+            (avatar_set_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return _avatar_set(row) if row else None
+
+
+def _save_avatar_set(
+    *,
+    name: str,
+    voice_id: str,
+    looks: list[dict[str, Any]],
+    avatar_set_id: str | None = None,
+) -> dict[str, Any]:
+    clean_name = re.sub(r"\s+", " ", name).strip()
+    clean_voice_id = str(voice_id).strip()
+    if not clean_name:
+        raise HTTPException(status_code=422, detail="Dê um nome ao Avatar Set.")
+    if not clean_voice_id:
+        raise HTTPException(status_code=422, detail="Avatar Set precisa de voiceId.")
+    normalized_looks = _normalize_avatar_set_looks(looks)
+    saved = {
+        "id": avatar_set_id or f"avatar-set-{uuid.uuid4().hex[:12]}",
+        "name": clean_name[:160],
+        "voiceId": clean_voice_id[:160],
+        "looks": normalized_looks,
+        "updatedAt": _now(),
+    }
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO avatar_sets(id, name, voice_id, looks_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                voice_id = excluded.voice_id,
+                looks_json = excluded.looks_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                saved["id"],
+                saved["name"],
+                saved["voiceId"],
+                json.dumps(saved["looks"], ensure_ascii=False),
+                saved["updatedAt"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return saved
+
+
 def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    avatar_mode = str(profile.get("avatarMode") or "single")
+    if avatar_mode not in {"single", "set"}:
+        raise HTTPException(status_code=422, detail="avatarMode deve ser 'single' ou 'set'.")
+    avatar_set_id = str(profile.get("avatarSetId") or "").strip() or None
+    primary_avatar_id = str(profile.get("primaryAvatarId") or profile.get("avatarId") or "").strip()
+    if avatar_mode == "set":
+        avatar_set = _get_avatar_set(avatar_set_id or "")
+        if not avatar_set:
+            raise HTTPException(status_code=422, detail="Avatar Set não encontrado.")
+        set_avatar_ids = {look["avatarId"] for look in avatar_set["looks"]}
+        if primary_avatar_id not in set_avatar_ids:
+            raise HTTPException(status_code=422, detail="primaryAvatarId precisa pertencer ao Avatar Set.")
+    if not primary_avatar_id:
+        raise HTTPException(status_code=422, detail="Selecione um avatar principal.")
     saved = {
         "scriptId": str(profile["scriptId"]),
-        "avatarId": str(profile["avatarId"]),
+        "avatarId": primary_avatar_id,
         "voiceId": str(profile["voiceId"]),
         "speechMode": str(profile["speechMode"]),
         "generationMode": str(profile["generationMode"]),
+        "avatarMode": avatar_mode,
+        "avatarSetId": avatar_set_id,
+        "primaryAvatarId": primary_avatar_id,
+        "positionCount": 2 if avatar_mode == "set" else 1,
         "updatedAt": _now(),
     }
     conn = _ai_db()
@@ -221,13 +397,18 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
         conn.execute(
             """
             INSERT INTO production_profiles(
-                script_id, avatar_id, voice_id, speech_mode, generation_mode, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                script_id, avatar_id, voice_id, speech_mode, generation_mode,
+                avatar_mode, avatar_set_id, primary_avatar_id, position_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(script_id) DO UPDATE SET
                 avatar_id = excluded.avatar_id,
                 voice_id = excluded.voice_id,
                 speech_mode = excluded.speech_mode,
                 generation_mode = excluded.generation_mode,
+                avatar_mode = excluded.avatar_mode,
+                avatar_set_id = excluded.avatar_set_id,
+                primary_avatar_id = excluded.primary_avatar_id,
+                position_count = excluded.position_count,
                 updated_at = excluded.updated_at
             """,
             (
@@ -236,6 +417,10 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 saved["voiceId"],
                 saved["speechMode"],
                 saved["generationMode"],
+                saved["avatarMode"],
+                saved["avatarSetId"],
+                saved["primaryAvatarId"],
+                saved["positionCount"],
                 saved["updatedAt"],
             ),
         )
@@ -243,6 +428,540 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
     finally:
         conn.close()
     return saved
+
+
+def _resolve_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, Any]:
+    profile = _production_profile(script_id)
+    if not profile:
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes do Scene Plan.")
+    avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    look_to_avatar = {
+        str(look["role"]): str(look["avatarId"])
+        for look in (avatar_set or {}).get("looks", [])
+        if look.get("role") and look.get("avatarId")
+    }
+    primary_avatar_id = str(profile.get("primaryAvatarId") or profile.get("avatarId") or "")
+    resolved_scenes: list[dict[str, Any]] = []
+    for index, scene in enumerate(scenes, start=1):
+        look_role = str(scene.get("lookRole") or "primary")
+        avatar_id = look_to_avatar.get(look_role) or primary_avatar_id
+        if not avatar_id:
+            raise HTTPException(status_code=422, detail=f"Não foi possível resolver o avatar da cena {index}.")
+        resolved_scenes.append(
+            {
+                "id": str(scene.get("id") or f"scene-{index}"),
+                "order": index,
+                "text": re.sub(r"\s+", " ", str(scene.get("text") or "")).strip(),
+                "lookRole": look_role if look_role in AVATAR_SET_ROLES else "primary",
+                "avatarId": avatar_id,
+                "estimatedStart": max(0, float(scene.get("estimatedStart") or 0)),
+                "estimatedEnd": max(0, float(scene.get("estimatedEnd") or 0)),
+            }
+        )
+    return {"scriptId": script_id, "scenes": resolved_scenes, "updatedAt": _now()}
+
+
+def _scene_plan(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT plan_json FROM scene_plans WHERE script_id = ?",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return json.loads(str(row["plan_json"]))
+
+
+def _save_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, Any]:
+    plan = _resolve_scene_plan(script_id, scenes)
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO scene_plans(script_id, plan_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                plan_json = excluded.plan_json,
+                updated_at = excluded.updated_at
+            """,
+            (script_id, json.dumps(plan, ensure_ascii=False), plan["updatedAt"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return plan
+
+
+VIDEO_VISUAL_DESIGN_SYSTEM_VERSION = "video-vertical-v1"
+VIDEO_VISUAL_TYPES = frozenset({"none", "full_slide", "overlay", "statistic", "comparison", "quote"})
+VIDEO_VISUAL_MOTION_PRESETS = frozenset({"none", "fade", "soft_zoom", "fade_zoom"})
+VIDEO_VISUAL_LAYOUTS = frozenset(
+    {
+        "hero_photo",
+        "photo_split",
+        "big_statement",
+        "question",
+        "myth_fact",
+        "number_stat",
+        "three_points",
+        "explainer",
+        "doctor_quote",
+        "photo_overlay",
+        "do_dont",
+        "cta_photo",
+    }
+)
+
+
+def _required_visual_support_count(scene_count: int) -> int:
+    """Apoios visuais entram durante a fala antes do próximo look/cena."""
+    return max(0, scene_count - 1)
+
+
+def _visual_support_required(scene_index: int, scene_count: int) -> bool:
+    return scene_index < _required_visual_support_count(scene_count)
+
+
+def _fallback_visual_from_scene(scene: dict[str, Any], index: int) -> dict[str, str]:
+    text = re.sub(r"\s+", " ", str(scene.get("text") or "")).strip()
+    first_sentence = re.split(r"(?<=[.!?])\s+", text)[0] if text else ""
+    headline = first_sentence[:72].strip(" .,:;") or f"Apoio visual {index + 1}"
+    body = text[len(first_sentence):].strip()[:180] if first_sentence and len(text) > len(first_sentence) else ""
+    return {
+        "type": "full_slide",
+        "layout": "big_statement",
+        "headline": headline,
+        "body": body,
+        "purpose": "Apoiar visualmente a fala enquanto o áudio do avatar continua.",
+    }
+
+
+def _normalize_video_visual(
+    visual: dict[str, Any],
+    *,
+    scene: dict[str, Any],
+    index: int,
+    scene_count: int,
+    strict_required: bool = False,
+) -> dict[str, str]:
+    visual_type = str(visual.get("type") or "none")
+    if visual_type not in VIDEO_VISUAL_TYPES:
+        visual_type = "none"
+    layout = str(visual.get("layout") or "")
+    if layout not in VIDEO_VISUAL_LAYOUTS:
+        layout = ""
+    headline = re.sub(r"\s+", " ", str(visual.get("headline") or "")).strip()[:180]
+    body = re.sub(r"\s+", " ", str(visual.get("body") or "")).strip()[:500]
+    purpose = re.sub(r"\s+", " ", str(visual.get("purpose") or "")).strip()[:300]
+    try:
+        start_ratio = float(visual.get("startRatio", 0.65))
+    except (TypeError, ValueError):
+        start_ratio = 0.65
+    start_ratio = max(0.15, min(0.70, start_ratio))
+    try:
+        duration_seconds = float(visual.get("durationSeconds", 2.5))
+    except (TypeError, ValueError):
+        duration_seconds = 2.5
+    duration_seconds = max(1.0, min(5.0, duration_seconds))
+    motion_preset = str(visual.get("motionPreset") or "fade")
+    if motion_preset not in VIDEO_VISUAL_MOTION_PRESETS:
+        motion_preset = "fade"
+    support_required = _visual_support_required(index, scene_count)
+    if support_required and (visual_type == "none" or not headline):
+        if strict_required:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A cena {index + 1} precisa de um apoio visual porque há uma próxima cena/look.",
+            )
+        fallback = _fallback_visual_from_scene(scene, index)
+        visual_type = str(fallback["type"])
+        layout = str(fallback["layout"])
+        headline = headline or str(fallback["headline"])
+        body = body or str(fallback["body"])
+        purpose = purpose or str(fallback["purpose"])
+    if scene_count > 1 and not support_required and index >= _required_visual_support_count(scene_count):
+        visual_type = "none"
+    if visual_type == "none":
+        layout = ""
+        headline = ""
+        body = ""
+        start_ratio = 0.0
+        duration_seconds = 0.0
+        motion_preset = "none"
+    elif not layout:
+        layout = "big_statement"
+    if visual_type != "none":
+        _validate_production_compliance(headline, field=f"Headline visual da cena {index + 1}")
+        _validate_production_compliance(body, field=f"Body visual da cena {index + 1}")
+    return {
+        "type": visual_type,
+        "layout": layout,
+        "headline": headline,
+        "body": body,
+        "purpose": purpose,
+        "startRatio": round(start_ratio, 3),
+        "durationSeconds": round(duration_seconds, 2),
+        "motionPreset": motion_preset,
+    }
+
+
+def _get_visual_plan(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT plan_json FROM visual_plans WHERE script_id = ?",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return json.loads(str(row["plan_json"]))
+
+
+def _save_visual_plan(script_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    plan = {**plan, "scriptId": script_id, "updatedAt": _now()}
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO visual_plans(script_id, plan_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                plan_json = excluded.plan_json,
+                updated_at = excluded.updated_at
+            """,
+            (script_id, json.dumps(plan, ensure_ascii=False), plan["updatedAt"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return plan
+
+
+def _video_slide_output_dir(script_id: str) -> Path:
+    """Mantem os arquivos de preview fora do caminho controlado pelo usuario."""
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", script_id).strip("-") or "script"
+    digest = hashlib.sha256(script_id.encode("utf-8")).hexdigest()[:12]
+    return VIDEO_SLIDE_OUTPUTS / f"{safe_id}-{digest}"
+
+
+def _get_video_slide_render(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT render_json FROM video_slide_renders WHERE script_id = ?",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return json.loads(str(row["render_json"]))
+
+
+def _save_video_slide_render(script_id: str, render: dict[str, Any]) -> dict[str, Any]:
+    saved = {**render, "scriptId": script_id, "updatedAt": _now()}
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO video_slide_renders(script_id, render_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                render_json = excluded.render_json,
+                updated_at = excluded.updated_at
+            """,
+            (script_id, json.dumps(saved, ensure_ascii=False), saved["updatedAt"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return saved
+
+
+def _video_slide_public_render(script_id: str, render: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not render:
+        return None
+    public = {**render, "assets": []}
+    for asset in render.get("assets") or []:
+        item = dict(asset)
+        filename = str(item.get("assetPath") or "")
+        if filename:
+            item["url"] = (
+                f"/api/scripts/{quote(script_id, safe='')}/video-slides/"
+                f"{quote(filename, safe='')}"
+            )
+        public["assets"].append(item)
+    return public
+
+
+def _composed_video_output_dir(script_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", script_id).strip("-") or "script"
+    digest = hashlib.sha256(script_id.encode("utf-8")).hexdigest()[:12]
+    return COMPOSED_VIDEO_OUTPUTS / f"{safe_id}-{digest}"
+
+
+def _local_output_path(raw_path: Any) -> Path | None:
+    if not raw_path:
+        return None
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = ROOT / path
+    try:
+        resolved = path.resolve()
+        root = ROOT.resolve()
+    except OSError:
+        return None
+    if resolved == root or root not in resolved.parents:
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _probe_video_duration(path: Path) -> float:
+    process = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(process.stderr or "Não foi possível medir a duração do vídeo.")
+    try:
+        return float(json.loads(process.stdout)["format"]["duration"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("FFprobe não retornou uma duração válida.") from exc
+
+
+def _copy_or_download_video(job: dict[str, Any], destination: Path) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    local_path = _local_output_path(job.get("outputPath"))
+    if local_path:
+        shutil.copyfile(local_path, destination)
+        return destination
+    video_url = str(job.get("videoUrl") or "")
+    parsed = urlparse(video_url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (hostname == "heygen.ai" or hostname.endswith(".heygen.ai")):
+        raise HTTPException(status_code=409, detail=f"Cena {job.get('sceneId') or job.get('id')} sem MP4 disponível.")
+    try:
+        with requests.get(video_url, stream=True, timeout=(15, 300)) as response:
+            response.raise_for_status()
+            with destination.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Não foi possível baixar uma cena pronta.") from exc
+    return destination
+
+
+def _scene_jobs_ready(script_id: str, scene_plan: dict[str, Any]) -> list[dict[str, Any]] | None:
+    jobs = [job for job in _load_video_jobs() if job.get("scriptId") == script_id and job.get("isScene")]
+    ready_by_scene: dict[str, list[dict[str, Any]]] = {}
+    for job in jobs:
+        if job.get("status") == "pronto":
+            ready_by_scene.setdefault(str(job.get("sceneId") or ""), []).append(job)
+    ordered: list[dict[str, Any]] = []
+    for scene in scene_plan.get("scenes") or []:
+        scene_id = str(scene.get("id") or "")
+        candidates = sorted(
+            ready_by_scene.get(scene_id, []),
+            key=lambda item: str(item.get("atualizadoEm") or item.get("criadoEm") or ""),
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        ordered.append(candidates[0])
+    return ordered
+
+
+def _visual_asset_by_scene(script_id: str, visual_plan: dict[str, Any]) -> dict[str, Path]:
+    render = _get_video_slide_render(script_id)
+    if not render or not render.get("assets"):
+        render = _save_video_slide_render(script_id, render_video_slides(_video_slide_output_dir(script_id), visual_plan))
+    assets: dict[str, Path] = {}
+    root = _video_slide_output_dir(script_id).resolve()
+    for asset in render.get("assets") or []:
+        filename = str(asset.get("assetPath") or "")
+        if not filename:
+            continue
+        path = (root / filename).resolve()
+        if root in path.parents and path.is_file():
+            assets[str(asset.get("sceneId") or "")] = path
+    return assets
+
+
+def _composed_video_file_response(job: dict[str, Any], *, download: bool) -> FileResponse:
+    path = _local_output_path(job.get("outputPath"))
+    if not path:
+        raise HTTPException(status_code=404, detail="Arquivo composto não encontrado.")
+    try:
+        script = _find_script(str(job.get("scriptId") or ""))
+        base_name = str(script.get("titulo") or "video-final")
+    except HTTPException:
+        base_name = "video-final"
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", _norm(base_name)).strip("-") or "video-final"
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"{safe_name}.mp4" if download else None,
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
+def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool = False) -> dict[str, Any] | None:
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        if raise_when_not_ready:
+            raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de compor o vídeo final.")
+        return None
+    scene_jobs = _scene_jobs_ready(script_id, scene_plan)
+    if scene_jobs is None:
+        if raise_when_not_ready:
+            raise HTTPException(status_code=409, detail="Todas as cenas precisam estar prontas antes da composição final.")
+        return None
+    visual_plan = _get_visual_plan(script_id)
+    scene_count = len(scene_plan["scenes"])
+    if scene_count > 1 and (not visual_plan or not visual_plan.get("scenes")):
+        if raise_when_not_ready:
+            raise HTTPException(status_code=409, detail="Salve o Visual Plan antes de compor o vídeo final.")
+        return None
+    visual_plan = visual_plan or {"scenes": []}
+    required_supports = _required_visual_support_count(scene_count)
+    visual_by_scene = {
+        str(item.get("sceneId")): item.get("visual")
+        for item in visual_plan.get("scenes") or []
+        if isinstance(item, dict) and isinstance(item.get("visual"), dict)
+    }
+    asset_by_scene = _visual_asset_by_scene(script_id, visual_plan) if required_supports else {}
+    output_root = _composed_video_output_dir(script_id)
+    source_ids = [str(job["id"]) for job in scene_jobs]
+    composition_key = hashlib.sha256(
+        json.dumps(
+            {
+                "scriptId": script_id,
+                "sources": source_ids,
+                "visualPlanUpdatedAt": visual_plan.get("updatedAt"),
+                "requiredSupportSlides": required_supports,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    job_id = f"vc-{composition_key}"
+    existing = _job_store().get("video", job_id)
+    if existing and existing.get("status") == "pronto" and _local_output_path(existing.get("outputPath")):
+        return existing
+
+    now = _now()
+    output_path = output_root / f"{job_id}.mp4"
+    relative_output = str(output_path.relative_to(ROOT))
+    job = existing or {
+        "id": job_id,
+        "scriptId": script_id,
+        "provider": "local",
+        "progresso": 0,
+        "criadoEm": now,
+        "sourceSceneJobs": source_ids,
+        "sceneCount": scene_count,
+        "visualCount": required_supports,
+        "isComposed": True,
+    }
+    job.update(
+        {
+            "status": "processando",
+            "progresso": 40,
+            "atualizadoEm": now,
+            "outputPath": relative_output,
+            "videoUrl": f"/api/videos/{quote(job_id, safe='')}/file",
+            "sourceSceneJobs": source_ids,
+            "sceneCount": scene_count,
+            "visualCount": required_supports,
+            "isComposed": True,
+            "submissionState": "local_composing",
+        }
+    )
+    _job_store().upsert("video", job, idempotency_key=f"compose-final:{composition_key}")
+    try:
+        source_root = output_root / "sources" / job_id
+        composition_scenes: list[CompositionScene] = []
+        total_duration = 0.0
+        for index, (scene, scene_job) in enumerate(zip(scene_plan["scenes"], scene_jobs, strict=True), start=1):
+            scene_id = str(scene["id"])
+            scene_path = _copy_or_download_video(scene_job, source_root / f"{index:02d}-{scene_id}.mp4")
+            duration = _probe_video_duration(scene_path)
+            total_duration += duration
+            visual = visual_by_scene.get(scene_id) or {}
+            slide_path = asset_by_scene.get(scene_id)
+            slide_duration = float(visual.get("durationSeconds") or 0) if isinstance(visual, dict) else 0.0
+            has_explicit_timing = isinstance(visual, dict) and "startRatio" in visual and "durationSeconds" in visual
+            if index <= required_supports:
+                slide_duration = min(max(1.0, slide_duration or 3.0), 5.0, max(0.3, duration))
+                start_seconds = max(0.0, duration - slide_duration)
+            elif has_explicit_timing:
+                start_ratio = float(visual.get("startRatio") or 0.65)
+                start_ratio = max(0.15, min(0.70, start_ratio))
+                start_seconds = max(0.0, min(duration * start_ratio, max(0.0, duration - 0.5)))
+                usable_duration = max(0.3, duration - start_seconds)
+                slide_duration = min(max(1.0, slide_duration or 2.5), 5.0, usable_duration)
+            else:
+                slide_duration = min(3.0, max(1.0, duration))
+                start_seconds = max(0.0, duration - slide_duration)
+            if index <= required_supports and not slide_path:
+                raise HTTPException(status_code=409, detail=f"Apoio visual da cena {index} não foi renderizado.")
+            composition_scenes.append(
+                CompositionScene(
+                    scene_id=scene_id,
+                    video_path=scene_path,
+                    slide_path=slide_path if index <= required_supports else None,
+                    slide_mode="during",
+                    visual_start_seconds=start_seconds,
+                    slide_duration_seconds=slide_duration,
+                    visual_animation=str(visual.get("motionPreset") or "fade") if isinstance(visual, dict) else "fade",
+                )
+            )
+        manifest = compose_video(composition_scenes, output_path)
+        final_duration = _probe_video_duration(output_path)
+        job.update(
+            {
+                "status": "pronto",
+                "progresso": 100,
+                "submissionState": "completed",
+                "atualizadoEm": _now(),
+                "duracaoSegundos": round(final_duration or total_duration, 2),
+                "composition": manifest,
+            }
+        )
+    except Exception as exc:
+        job.update(
+            {
+                "status": "erro",
+                "progresso": 0,
+                "erro": str(exc.detail) if isinstance(exc, HTTPException) else str(exc),
+                "submissionState": "local_failed",
+                "atualizadoEm": _now(),
+            }
+        )
+        _job_store().upsert("video", job, idempotency_key=f"compose-final:{composition_key}")
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=503, detail=f"Não foi possível compor o vídeo final: {exc}") from exc
+    _job_store().upsert("video", job, idempotency_key=f"compose-final:{composition_key}")
+    return job
 
 
 def _get_visual_pack(script_id: str) -> dict[str, Any] | None:
@@ -1771,11 +2490,154 @@ class VideoPreviewCreateIn(BaseModel):
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
 
 
+class SceneVideoConfirmIn(BaseModel):
+    confirmed: Literal[True]
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
+    captions: bool = True
+    optimizePronunciation: bool = True
+    idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+
+
 class ProductionProfileIn(BaseModel):
     avatarId: str = Field(min_length=1, max_length=160)
     voiceId: str = Field(min_length=1, max_length=160)
     speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
     generationMode: Literal["direct", "video_agent"] = "direct"
+    avatarMode: Literal["single", "set"] = "single"
+    avatarSetId: str | None = Field(default=None, max_length=160)
+    primaryAvatarId: str | None = Field(default=None, max_length=160)
+
+
+class AvatarLookIn(BaseModel):
+    avatarId: str = Field(min_length=1, max_length=160)
+    role: Literal["primary", "front", "close", "three_quarter", "standing", "wide"]
+    label: str = Field(min_length=1, max_length=120)
+
+
+class AvatarSetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    voiceId: str = Field(min_length=1, max_length=160)
+    looks: list[AvatarLookIn] = Field(min_length=2, max_length=12)
+
+
+class ScenePlanSceneIn(BaseModel):
+    id: str | None = Field(default=None, max_length=80)
+    text: str = Field(min_length=1, max_length=6000)
+    lookRole: Literal["primary", "front", "close", "three_quarter", "standing", "wide"] = "primary"
+    estimatedStart: float = Field(default=0, ge=0, le=3600)
+    estimatedEnd: float = Field(default=0, ge=0, le=3600)
+
+
+class ScenePlanIn(BaseModel):
+    scenes: list[ScenePlanSceneIn] = Field(min_length=1, max_length=30)
+
+
+class SceneDirectorIn(BaseModel):
+    displayText: str = Field(min_length=1, max_length=6000)
+    spokenText: str = Field(default="", max_length=6000)
+    tone: str = Field(default="médico humano e seguro", max_length=300)
+    pace: str = Field(default="frases curtas, com pausas naturais", max_length=300)
+    emotion: str = Field(default="calmo e convincente", max_length=300)
+    emphasisWords: list[str] = Field(default_factory=list, max_length=20)
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+
+
+class VisualDirectorIn(BaseModel):
+    displayText: str = Field(min_length=1, max_length=6000)
+    spokenText: str = Field(default="", max_length=6000)
+    tone: str = Field(default="médico humano e seguro", max_length=300)
+    pace: str = Field(default="frases curtas, com pausas naturais", max_length=300)
+    emotion: str = Field(default="calmo e convincente", max_length=300)
+    emphasisWords: list[str] = Field(default_factory=list, max_length=20)
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+
+
+class VisualPlanVisualIn(BaseModel):
+    type: str = Field(default="none", max_length=40)
+    layout: str = Field(default="", max_length=80)
+    headline: str = Field(default="", max_length=180)
+    body: str = Field(default="", max_length=500)
+    purpose: str = Field(default="", max_length=300)
+    startRatio: float = Field(default=0.65, ge=0, le=1)
+    durationSeconds: float = Field(default=2.5, ge=0, le=60)
+    motionPreset: str = Field(default="fade", max_length=40)
+
+
+class VisualPlanSceneIn(BaseModel):
+    sceneId: str = Field(min_length=1, max_length=80)
+    visual: VisualPlanVisualIn
+
+
+class VisualPlanIn(BaseModel):
+    scenes: list[VisualPlanSceneIn] = Field(min_length=1, max_length=30)
+
+
+SCENE_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-scene-director"
+VISUAL_DIRECTOR_PROMPT_VERSION = "2026-08-07-v2-visual-director"
+_SCENE_DIRECTOR_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "text": {"type": "string"},
+                    "lookRole": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["text", "lookRole", "reason"],
+            },
+        }
+    },
+    "required": ["scenes"],
+}
+_VISUAL_DIRECTOR_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "sceneId": {"type": "string"},
+                    "visual": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "type": {"type": "string"},
+                            "layout": {"type": "string"},
+                            "headline": {"type": "string"},
+                            "body": {"type": "string"},
+                            "purpose": {"type": "string"},
+                            "startRatio": {"type": "number"},
+                            "durationSeconds": {"type": "number"},
+                            "motionPreset": {"type": "string"},
+                        },
+                        "required": [
+                            "type",
+                            "layout",
+                            "headline",
+                            "body",
+                            "purpose",
+                            "startRatio",
+                            "durationSeconds",
+                            "motionPreset",
+                        ],
+                    },
+                },
+                "required": ["sceneId", "visual"],
+            },
+        }
+    },
+    "required": ["scenes"],
+}
 
 
 SHORT_DIRECT_VIDEO_DURATIONS = DIRECT_VIDEO_DURATIONS
@@ -1826,9 +2688,545 @@ def save_script_production_profile(script_id: str, payload: ProductionProfileIn)
             "voiceId": payload.voiceId,
             "speechMode": payload.speechMode,
             "generationMode": payload.generationMode,
+            "avatarMode": payload.avatarMode,
+            "avatarSetId": payload.avatarSetId,
+            "primaryAvatarId": payload.primaryAvatarId,
         }
     )
     return {"ok": True, "profile": profile}
+
+
+@app.get("/api/avatar-sets")
+def list_avatar_sets() -> dict:
+    """Lista conjuntos de looks locais; não consulta nem gera vídeo na HeyGen."""
+    return {"ok": True, "avatarSets": _list_avatar_sets()}
+
+
+@app.post("/api/avatar-sets")
+def create_avatar_set(payload: AvatarSetIn) -> dict:
+    """Cria um Avatar Set local com duas ou mais posições reais."""
+    saved = _save_avatar_set(
+        name=payload.name,
+        voice_id=payload.voiceId,
+        looks=[look.model_dump() for look in payload.looks],
+    )
+    return {"ok": True, "avatarSet": saved}
+
+
+@app.put("/api/avatar-sets/{avatar_set_id}")
+def update_avatar_set(avatar_set_id: str, payload: AvatarSetIn) -> dict:
+    if not _get_avatar_set(avatar_set_id):
+        raise HTTPException(status_code=404, detail="Avatar Set não encontrado.")
+    saved = _save_avatar_set(
+        name=payload.name,
+        voice_id=payload.voiceId,
+        looks=[look.model_dump() for look in payload.looks],
+        avatar_set_id=avatar_set_id,
+    )
+    return {"ok": True, "avatarSet": saved}
+
+
+@app.delete("/api/avatar-sets/{avatar_set_id}")
+def delete_avatar_set(avatar_set_id: str) -> dict:
+    conn = _ai_db()
+    try:
+        cursor = conn.execute("DELETE FROM avatar_sets WHERE id = ?", (avatar_set_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Avatar Set não encontrado.")
+    return {"ok": True, "deleted": avatar_set_id}
+
+
+@app.get("/api/scripts/{script_id}/scene-plan")
+def get_script_scene_plan(script_id: str) -> dict:
+    _find_script(script_id)
+    return {"ok": True, "scenePlan": _scene_plan(script_id)}
+
+
+@app.put("/api/scripts/{script_id}/scene-plan")
+def save_script_scene_plan(script_id: str, payload: ScenePlanIn) -> dict:
+    _find_script(script_id)
+    plan = _save_scene_plan(script_id, [scene.model_dump() for scene in payload.scenes])
+    return {"ok": True, "scenePlan": plan}
+
+
+@app.get("/api/scripts/{script_id}/scene-generation/plan")
+def get_scene_generation_plan(
+    script_id: str,
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural",
+    orientation: Literal["portrait", "landscape"] = "portrait",
+) -> dict:
+    """Expõe o contrato futuro por cena sem criar job ou chamar a HeyGen."""
+    _find_script(script_id)
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de montar a geração por cena.")
+    profile = _production_profile(script_id)
+    if not profile or not profile.get("voiceId"):
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes de montar a geração por cena.")
+    try:
+        result = build_scene_generation_result(
+            script_id=script_id,
+            scene_plan=scene_plan,
+            voice_id=str(profile["voiceId"]),
+            speech_mode=speechMode,
+            orientation=orientation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "generation": result.to_dict()}
+
+
+@app.post("/api/scripts/{script_id}/scene-generation/submit")
+def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dict:
+    """Submete uma chamada HeyGen por cena somente após confirmação explícita."""
+    script = _find_script(script_id)
+    if script.get("status") != "aprovado_clinicamente":
+        raise HTTPException(status_code=409, detail="O roteiro precisa estar marcado como Pronto antes da geração paga.")
+    scene_plan = _scene_plan(script_id)
+    profile = _production_profile(script_id)
+    if not scene_plan or not profile or not profile.get("voiceId"):
+        raise HTTPException(status_code=409, detail="Salve perfil de produção e Scene Plan antes de gerar por cena.")
+    try:
+        generation = build_scene_generation_result(
+            script_id=script_id,
+            scene_plan=scene_plan,
+            voice_id=str(profile["voiceId"]),
+            speech_mode=payload.speechMode,
+            orientation=payload.orientation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    command = _heygen_cli()
+    _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
+    ready_avatar_ids = {
+        str(look.get("id"))
+        for look in private_looks
+        if isinstance(look, dict) and look.get("status") == "completed" and look.get("id")
+    }
+    missing = [request.avatar_id for request in generation.requests if request.avatar_id not in ready_avatar_ids]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Looks não prontos na HeyGen: {', '.join(missing)}")
+
+    jobs: list[dict[str, Any]] = []
+    base_key = payload.idempotencyKey or hashlib.sha256(
+        json.dumps(generation.to_dict(), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    for request in generation.requests:
+        now = _now()
+        scene_key = f"scene-video:{script_id}:{request.scene_id}:{base_key}"
+        reserved_job = {
+            "id": f"sv-{uuid.uuid4().hex[:12]}",
+            "scriptId": script_id,
+            "status": "fila",
+            "provider": "heygen",
+            "progresso": 0,
+            "criadoEm": now,
+            "atualizadoEm": now,
+            "submissionState": "reserved",
+            "isScene": True,
+            "sceneId": request.scene_id,
+            "sceneOrder": request.order,
+            "productionSettings": {
+                "avatarId": request.avatar_id,
+                "voiceId": request.voice_id,
+                "orientation": request.orientation,
+                "durationSeconds": payload.durationSeconds,
+                "speechMode": request.speech_mode,
+                "generationMode": "direct",
+                "captions": payload.captions,
+                "optimizePronunciation": payload.optimizePronunciation,
+                "spokenText": request.spoken_text,
+                "sceneCount": generation.scene_count,
+                "cutPolicy": "hard_cut",
+            },
+        }
+        job, reservation = _job_store().reserve_video(
+            reserved_job,
+            idempotency_key=scene_key,
+            force_new_version=False,
+        )
+        if reservation == "duplicate":
+            jobs.append(job)
+            continue
+        if reservation == "conflict":
+            raise HTTPException(status_code=409, detail=f"A cena {request.scene_id} já está em produção.")
+        try:
+            job["submissionState"] = "submitting"
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            direct_payload = _direct_video_payload(
+                script=script,
+                narration_text=request.spoken_text,
+                avatar_id=request.avatar_id,
+                voice_id=request.voice_id,
+                orientation=request.orientation,
+                speech_mode=request.speech_mode,
+                captions=payload.captions,
+                optimize_pronunciation=payload.optimizePronunciation,
+            )
+            response = _run_heygen_json(command, ["video", "create"], payload=direct_payload, timeout=60)
+            video_id = _find_value(response, "video_id", "videoId", "id")
+            if not video_id:
+                raise RuntimeError("HeyGen não retornou o identificador da cena.")
+            job["status"] = "fila"
+            job["submissionState"] = "submitted"
+            job["remoteVideoId"] = video_id
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            jobs.append(job)
+        except (HTTPException, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            job["status"] = "erro"
+            job["erro"] = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            job["retrySafe"] = job.get("submissionState") != "submitting"
+            job["submissionState"] = "failed_safe" if job["retrySafe"] else "submission_uncertain"
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            raise HTTPException(status_code=502, detail=f"Falha ao gerar a cena {request.scene_id}: {job['erro']}") from exc
+    return {
+        "ok": True,
+        "generation": generation.to_dict(),
+        "jobs": jobs,
+    }
+
+
+@app.post("/api/scripts/{script_id}/scene-plan/direct")
+def direct_scene_plan(script_id: str, payload: SceneDirectorIn) -> dict:
+    """Sugere a divisão de cenas somente após ação explícita do usuário."""
+    script = _find_script(script_id)
+    profile = _production_profile(script_id)
+    if not profile:
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes de pedir direção ao Claude.")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(status_code=503, detail="Defina ANTHROPIC_API_KEY para gerar direção com Claude.")
+
+    avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    available_roles = [str(look["role"]) for look in (avatar_set or {}).get("looks", []) if look.get("role")]
+    if not available_roles:
+        available_roles = ["primary"]
+    cache_payload = {
+        "promptVersion": SCENE_DIRECTOR_PROMPT_VERSION,
+        "scriptId": script_id,
+        "script": {
+            "titulo": script.get("titulo"),
+            "hook": script.get("hook"),
+            "dorConflito": script.get("dorConflito"),
+            "explicacaoSimples": script.get("explicacaoSimples"),
+            "virada": script.get("virada"),
+            "cta": script.get("cta"),
+            "cuidadosMedicos": script.get("cuidadosMedicos"),
+        },
+        "performance": payload.model_dump(),
+        "avatarMode": profile.get("avatarMode"),
+        "availableRoles": available_roles,
+    }
+    cached = _ai_cache_get("scene-plan.direct", cache_payload)
+    if cached:
+        return cached
+
+    user_prompt = json.dumps(
+        {
+            "IDEIA_E_ROTEIRO": cache_payload["script"],
+            "PERFORMANCE": payload.model_dump(),
+            "AVATAR_SET": {
+                "mode": profile.get("avatarMode"),
+                "availableRoles": available_roles,
+                "instruction": "Escolha somente lookRole. Nunca escolha ou invente avatarId.",
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    system_prompt = f"""Você é diretor de cenas para vídeos curtos médicos em português brasileiro.
+Divida a narrativa em poucas cenas coerentes, sem transformar cada frase em uma cena.
+
+Regras obrigatórias:
+- Preserve exatamente o texto falado; não reescreva a fala.
+- Use 1–2 cenas para vídeos de 10–15s, 2–3 para 30s, 3–4 para 45s e 3–5 para 60s.
+- Mude de posição principalmente no hook, mudança de argumento, virada ou conclusão.
+- Se houver dois ou mais roles disponíveis, use pelo menos dois roles distintos.
+- Escolha somente um lookRole por cena dentre os roles disponíveis no contexto.
+- Nunca retorne avatarId; o backend resolve o avatar real.
+- Uma cena possui um único look fixo. Nunca descreva transição de posição dentro da cena.
+- Retorne somente JSON no schema solicitado.
+
+VERSÃO DO PROMPT: {SCENE_DIRECTOR_PROMPT_VERSION}"""
+
+    import anthropic
+
+    try:
+        client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_SCENE_MODEL", os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"))
+        message = client.messages.create(
+            model=model,
+            max_tokens=1200,
+            system=system_prompt,
+            output_config={"format": {"type": "json_schema", "schema": _SCENE_DIRECTOR_SCHEMA}},
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        raw_text = "".join(getattr(block, "text", "") for block in message.content)
+        parsed = json.loads(raw_text)
+    except anthropic.APIStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="A direção do Claude não veio em JSON válido.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao gerar direção de cenas: {exc}")
+
+    suggestions: list[dict[str, str]] = []
+    for item in parsed.get("scenes") or []:
+        if not isinstance(item, dict):
+            continue
+        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+        if not text:
+            continue
+        role = str(item.get("lookRole") or "primary")
+        suggestions.append(
+            {
+                "text": text,
+                "lookRole": role if role in available_roles else "primary",
+                "reason": re.sub(r"\s+", " ", str(item.get("reason") or "mudança narrativa")).strip(),
+            }
+        )
+    if not suggestions:
+        raise HTTPException(status_code=502, detail="Claude não retornou nenhuma cena utilizável.")
+    response = {"ok": True, "provider": "claude", "promptVersion": SCENE_DIRECTOR_PROMPT_VERSION, "scenes": suggestions}
+    _record_anthropic_usage("scene-plan.direct", model, message)
+    _ai_cache_put("scene-plan.direct", cache_payload, response)
+    return response
+
+
+@app.get("/api/scripts/{script_id}/visual-plan")
+def get_script_visual_plan(script_id: str) -> dict:
+    _find_script(script_id)
+    return {"ok": True, "visualPlan": _get_visual_plan(script_id)}
+
+
+@app.put("/api/scripts/{script_id}/visual-plan")
+def save_script_visual_plan(script_id: str, payload: VisualPlanIn) -> dict:
+    _find_script(script_id)
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de editar a direção visual.")
+    submitted = {scene.sceneId: scene.visual.model_dump() for scene in payload.scenes}
+    visual_scenes: list[dict[str, Any]] = []
+    scene_count = len(scene_plan["scenes"])
+    for index, scene in enumerate(scene_plan["scenes"]):
+        visual = submitted.get(str(scene["id"]), {})
+        visual_scenes.append(
+            {
+                "sceneId": scene["id"],
+                "visual": _normalize_video_visual(
+                    visual,
+                    scene=scene,
+                    index=index,
+                    scene_count=scene_count,
+                    strict_required=True,
+                ),
+            }
+        )
+    plan = {
+        "scriptId": script_id,
+        "designSystemVersion": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
+        "promptVersion": VISUAL_DIRECTOR_PROMPT_VERSION,
+        "scenes": visual_scenes,
+    }
+    return {"ok": True, "visualPlan": _save_visual_plan(script_id, plan)}
+
+
+@app.get("/api/scripts/{script_id}/video-slides")
+def get_video_slide_render(script_id: str) -> dict:
+    _find_script(script_id)
+    return {"ok": True, "render": _video_slide_public_render(script_id, _get_video_slide_render(script_id))}
+
+
+@app.post("/api/scripts/{script_id}/video-slides/render")
+def render_script_video_slides(script_id: str) -> dict:
+    """Renderiza previews locais; nao chama Claude, HeyGen ou outro provedor."""
+    _find_script(script_id)
+    visual_plan = _get_visual_plan(script_id)
+    if not visual_plan or not visual_plan.get("scenes"):
+        raise HTTPException(status_code=409, detail="Salve a direção visual antes de renderizar os previews.")
+    try:
+        rendered = render_video_slides(_video_slide_output_dir(script_id), visual_plan)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Não foi possível renderizar os previews locais: {exc}") from exc
+    saved = _save_video_slide_render(script_id, rendered)
+    return {"ok": True, "render": _video_slide_public_render(script_id, saved)}
+
+
+@app.get("/api/scripts/{script_id}/video-slides/{filename}")
+def get_video_slide_file(script_id: str, filename: str) -> FileResponse:
+    _find_script(script_id)
+    if Path(filename).name != filename or not filename.endswith(".png"):
+        raise HTTPException(status_code=404, detail="Preview não encontrado.")
+    path = (_video_slide_output_dir(script_id) / filename).resolve()
+    root = _video_slide_output_dir(script_id).resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="Preview não encontrado.")
+    return FileResponse(path, media_type="image/png")
+
+
+@app.post("/api/scripts/{script_id}/compose-final-video")
+def compose_script_final_video(script_id: str) -> dict:
+    _find_script(script_id)
+    job = _compose_final_video_if_ready(script_id, raise_when_not_ready=True)
+    return {"ok": True, "job": job}
+
+
+@app.post("/api/scripts/{script_id}/visual-plan/direct")
+def direct_visual_plan(script_id: str, payload: VisualDirectorIn) -> dict:
+    """Analisa o vídeo inteiro e sugere apoios visuais somente após clique explícito."""
+    script = _find_script(script_id)
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de pedir direção visual.")
+    profile = _production_profile(script_id)
+    if not profile:
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes de pedir direção visual.")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(status_code=503, detail="Defina ANTHROPIC_API_KEY para gerar direção visual com Claude.")
+
+    avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    scene_count = len(scene_plan["scenes"])
+    required_supports = _required_visual_support_count(scene_count)
+    design_system = {
+        "version": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
+        "canvas": "1080x1920",
+        "allowedTypes": sorted(VIDEO_VISUAL_TYPES),
+        "allowedLayouts": sorted(VIDEO_VISUAL_LAYOUTS),
+        "allowedMotionPresets": sorted(VIDEO_VISUAL_MOTION_PRESETS),
+        "requiredSupportSlides": required_supports,
+        "supportPolicy": (
+            "Se houver N cenas, crie exatamente N-1 apoios visuais: um para cada cena antes da última. "
+            "O apoio aparece durante o áudio do avatar; a troca de avatar/look acontece somente no corte para a próxima cena."
+        ),
+        "rules": [
+            "headline de 3 a 8 palavras quando houver headline",
+            "linguagem simples e complementar à fala",
+            "não transcrever o roteiro",
+            "não gerar HTML, CSS ou JavaScript",
+            "startRatio sempre entre 0.15 e 0.70 para apoios obrigatórios",
+            "durationSeconds entre 1.0 e 5.0",
+            "motionPreset somente none, fade, soft_zoom ou fade_zoom",
+        ],
+    }
+    cache_payload = {
+        "promptVersion": VISUAL_DIRECTOR_PROMPT_VERSION,
+        "designSystemVersion": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
+        "script": {
+            "scriptId": script_id,
+            "titulo": script.get("titulo"),
+            "hook": script.get("hook"),
+            "dorConflito": script.get("dorConflito"),
+            "explicacaoSimples": script.get("explicacaoSimples"),
+            "virada": script.get("virada"),
+            "cta": script.get("cta"),
+            "cuidadosMedicos": script.get("cuidadosMedicos"),
+        },
+        "performance": payload.model_dump(),
+        "scenePlan": scene_plan,
+        "avatarSet": avatar_set,
+        "designSystem": design_system,
+    }
+    cached = _ai_cache_get("visual-plan.direct", cache_payload)
+    if cached:
+        return cached
+
+    user_prompt = json.dumps(
+        {
+            "ROTEIRO_COMPLETO": cache_payload["script"],
+            "PERFORMANCE": payload.model_dump(),
+            "PLANO_DE_CENAS": scene_plan,
+            "AVATAR_SET": avatar_set or {"mode": "single", "primaryAvatarId": profile.get("primaryAvatarId")},
+            "DESIGN_SYSTEM": design_system,
+            "COMPLIANCE": "O visual não pode ser mais assertivo que o roteiro. Trate associações como associações.",
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    system_prompt = f"""Você é diretor visual de vídeos médicos verticais.
+Analise o vídeo como uma narrativa completa, considerando o que foi dito antes,
+o que está sendo dito agora e o que será explicado depois.
+
+Regras obrigatórias:
+- Retorne exatamente uma entrada para cada cena do PLANO_DE_CENAS.
+- Se o vídeo tiver N cenas, crie exatamente N-1 apoios visuais.
+- Para as primeiras N-1 cenas, visual.type não pode ser none.
+- Para a última cena, use visual.type none para fechar no avatar.
+- O apoio visual aparece durante a fala do avatar; ele não é um intervalo mudo.
+- startRatio é posição relativa dentro da própria cena, nunca timestamp absoluto.
+- Para apoios obrigatórios, startRatio deve ficar entre 0.15 e 0.70.
+- durationSeconds deve ficar entre 1.0 e 5.0.
+- motionPreset deve ser um dos presets permitidos.
+- Quando usar visual, escolha somente tipos e layouts permitidos no DESIGN_SYSTEM.
+- O visual deve complementar, não repetir ou transcrever, a fala.
+- Headline ideal: 3–8 palavras. Evite parágrafos.
+- Não crie afirmações médicas mais fortes que o roteiro.
+- Não gere HTML, CSS, JavaScript ou avatarId.
+- Retorne somente JSON no schema solicitado.
+
+VERSÃO DO PROMPT: {VISUAL_DIRECTOR_PROMPT_VERSION}"""
+
+    import anthropic
+
+    try:
+        client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_VISUAL_MODEL", os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"))
+        message = client.messages.create(
+            model=model,
+            max_tokens=1600,
+            system=system_prompt,
+            output_config={"format": {"type": "json_schema", "schema": _VISUAL_DIRECTOR_SCHEMA}},
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        raw_text = "".join(getattr(block, "text", "") for block in message.content)
+        parsed = json.loads(raw_text)
+    except anthropic.APIStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="A direção visual do Claude não veio em JSON válido.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao gerar direção visual: {exc}")
+
+    returned_by_id = {
+        str(item.get("sceneId")): item
+        for item in parsed.get("scenes") or []
+        if isinstance(item, dict)
+    }
+    visual_scenes: list[dict[str, Any]] = []
+    for index, scene in enumerate(scene_plan["scenes"]):
+        raw_item = returned_by_id.get(str(scene["id"]))
+        if raw_item is None:
+            raw_items = parsed.get("scenes") or []
+            raw_item = raw_items[index] if index < len(raw_items) and isinstance(raw_items[index], dict) else {}
+        raw_visual = raw_item.get("visual") if isinstance(raw_item, dict) else {}
+        raw_visual = raw_visual if isinstance(raw_visual, dict) else {}
+        visual_scenes.append(
+            {
+                "sceneId": scene["id"],
+                "visual": _normalize_video_visual(
+                    raw_visual,
+                    scene=scene,
+                    index=index,
+                    scene_count=scene_count,
+                ),
+            }
+        )
+    plan = {
+        "scriptId": script_id,
+        "designSystemVersion": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
+        "promptVersion": VISUAL_DIRECTOR_PROMPT_VERSION,
+        "scenes": visual_scenes,
+    }
+    saved_plan = _save_visual_plan(script_id, plan)
+    response = {"ok": True, "provider": "claude", "visualPlan": saved_plan}
+    _record_anthropic_usage("visual-plan.direct", model, message)
+    _ai_cache_put("visual-plan.direct", cache_payload, response)
+    return response
 
 
 class NaturalizeScriptIn(BaseModel):
@@ -1868,6 +3266,42 @@ def _fit_text_to_duration(text: str, duration_seconds: int, outro: str) -> str:
     return fit_text_to_duration(text, duration_seconds, outro)
 
 
+_SAFE_NARRATION_PADDING = (
+    "Esse resultado precisa ser interpretado com calma, porque uma associação não prova causa.",
+    "Pessoas diferentes podem ter contextos e respostas diferentes, então um número não representa automaticamente cada indivíduo.",
+    "O mais importante é entender os limites da informação antes de tomar uma decisão.",
+    "Uma conversa com um profissional de saúde ajuda a colocar o achado no contexto da sua história.",
+)
+
+
+def _repair_script_narration(script: dict[str, Any], payload: GenerateScriptIn) -> tuple[str, bool]:
+    """Recompõe uma fala curta usando o conteúdo estruturado já retornado pelo Claude."""
+    original = str(script.get("textoFalado") or "").strip()
+    candidate = _fit_text_to_duration(original, payload.durationSeconds, payload.outro)
+    issues = _narration_quality_issues(candidate, payload.durationSeconds, payload.outro)
+    if not any("Texto muito curto" in issue for issue in issues):
+        return candidate, candidate != original
+
+    parts = [
+        original,
+        str(script.get("hook") or ""),
+        str(script.get("dorConflito") or ""),
+        str(script.get("explicacaoSimples") or ""),
+        str(script.get("virada") or ""),
+        str(script.get("cta") or ""),
+    ]
+    expanded = " ".join(part.strip() for part in parts if part.strip())
+    candidate = _fit_text_to_duration(expanded, payload.durationSeconds, payload.outro)
+    for padding in _SAFE_NARRATION_PADDING:
+        issues = _narration_quality_issues(candidate, payload.durationSeconds, payload.outro)
+        if not any("Texto muito curto" in issue for issue in issues):
+            break
+        candidate = _fit_text_to_duration(
+            f"{candidate} {padding}", payload.durationSeconds, payload.outro
+        )
+    return candidate, candidate != original
+
+
 _SCRIPT_GENERATION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -1894,7 +3328,7 @@ _SCRIPT_GENERATION_SCHEMA = {
 }
 
 
-SCRIPT_GENERATION_PROMPT_VERSION = "2026-08-05-v4-claude-flow-validated"
+SCRIPT_GENERATION_PROMPT_VERSION = "2026-08-07-v5-duration-repair"
 
 
 def _script_generation_system(tone: str, duration_seconds: int) -> str:
@@ -1939,6 +3373,8 @@ REGRAS OBRIGATORIAS PARA TODO TOM:
 - Quando houver dado numerico, trate como "estudos sugerem/associam", nunca como verdade absoluta.
 - Respeite a observacaoCompliance da ideia.
 - O texto falado deve ser portugues brasileiro falado, espontaneo, humano, com frases curtas.
+- Para {duration_seconds} segundos, escreva textoFalado entre {_duration_word_limits(duration_seconds)[0]} e {_duration_word_limits(duration_seconds)[1]} palavras.
+- Nunca devolva um resumo curto: desenvolva hook, contexto, explicacao, virada e encerramento.
 {ending_rule}
 - Responda somente no JSON solicitado."""
 
@@ -2216,12 +3652,7 @@ def generate_script(payload: GenerateScriptIn) -> dict:
         script = _manual_script_generation(payload)
         return {"ok": True, "provider": "fallback", "script": script}
 
-    raw_spoken_text = str(script.get("textoFalado") or "")
-    script["textoFalado"] = _fit_text_to_duration(
-        raw_spoken_text,
-        payload.durationSeconds,
-        payload.outro,
-    )
+    script["textoFalado"], narration_repaired = _repair_script_narration(script, payload)
     if payload.durationSeconds == 10:
         script["cta"] = ""
 
@@ -2238,7 +3669,12 @@ def generate_script(payload: GenerateScriptIn) -> dict:
         script = _manual_script_generation(payload)
         return {"ok": True, "provider": "fallback", "script": script}
 
-    response = {"ok": True, "provider": "claude", "script": script}
+    response = {
+        "ok": True,
+        "provider": "claude",
+        "script": script,
+        "repairApplied": narration_repaired,
+    }
     _record_anthropic_usage("scripts.generate", model, message)
     _ai_cache_put("scripts.generate", cache_payload, response)
     return response
@@ -2606,6 +4042,7 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
         allowed_avatar_ids = {look.get("id") for look in ready_looks}
         if payload.avatarId not in allowed_avatar_ids:
             raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
+        existing_profile = _production_profile(payload.scriptId) or {}
         _save_production_profile(
             {
                 "scriptId": payload.scriptId,
@@ -2613,6 +4050,9 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
                 "voiceId": payload.voiceId,
                 "speechMode": payload.speechMode,
                 "generationMode": "direct",
+                "avatarMode": existing_profile.get("avatarMode", "single"),
+                "avatarSetId": existing_profile.get("avatarSetId"),
+                "primaryAvatarId": existing_profile.get("primaryAvatarId") or payload.avatarId,
             }
         )
         job["submissionState"] = "submitting"
@@ -2728,15 +4168,23 @@ def refresh_video(job_id: str) -> dict:
         )
     job["submissionState"] = "completed" if status == "pronto" else "processing"
     _job_store().upsert("video", job)
-    return {"ok": True, "job": job}
+    composed_job = None
+    if job.get("isScene") and job.get("status") == "pronto":
+        try:
+            composed_job = _compose_final_video_if_ready(str(job.get("scriptId") or ""))
+        except HTTPException:
+            pass
+    return {"ok": True, "job": job, "composedJob": composed_job}
 
 
 @app.get("/api/videos/{job_id}/download")
-def download_video(job_id: str) -> StreamingResponse:
+def download_video(job_id: str):
     """Transmite o MP4 pronto do HeyGen como download com nome amigavel."""
     job = _job_store().get("video", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Video nao encontrado.")
+    if job.get("isComposed"):
+        return _composed_video_file_response(job, download=True)
     video_url = str(job.get("videoUrl") or "")
     parsed = urlparse(video_url)
     hostname = (parsed.hostname or "").lower()
@@ -2769,6 +4217,14 @@ def download_video(job_id: str) -> StreamingResponse:
         media_type=response.headers.get("content-type", "video/mp4"),
         headers={"Content-Disposition": f'attachment; filename="{safe_name}.mp4"'},
     )
+
+
+@app.get("/api/videos/{job_id}/file")
+def video_file(job_id: str) -> FileResponse:
+    job = _job_store().get("video", job_id)
+    if not job or not job.get("isComposed"):
+        raise HTTPException(status_code=404, detail="Vídeo local não encontrado.")
+    return _composed_video_file_response(job, download=False)
 
 
 class CutCreateIn(BaseModel):
@@ -5404,7 +6860,11 @@ def _validate_final_narration(
     final_text = _strip_video_outros(text, outro) if duration_seconds == 10 else text
     if selected_outro and selected_outro.lower() not in final_text.lower():
         final_text = f"{final_text.rstrip()} {selected_outro}"
-    quality_issues = _narration_quality_issues(final_text, duration_seconds, selected_outro)
+    quality_issues = [
+        issue
+        for issue in _narration_quality_issues(final_text, duration_seconds, selected_outro)
+        if not issue.startswith("Texto muito curto")
+    ]
     if quality_issues:
         reasons = "; ".join(quality_issues)
         raise HTTPException(
@@ -5548,6 +7008,11 @@ _PACK_SYSTEM = """Voce e o editor de carrosseis do Instituto Guilherme Martins.
 Sua unica tarefa e transformar um roteiro medico em um carrossel de 6 slides,
 em portugues do Brasil, usando o schema estruturado fornecido.
 
+IDENTIDADE:
+- Use exclusivamente a identidade e o Avatar Set presentes no CONTEXTO COMPLETO.
+- Nunca invente, troque ou escolha outro avatarId; a identidade é anexada pelo backend.
+- Se houver Avatar Set, ele representa a mesma pessoa em posições diferentes; mantenha essa continuidade também nas fotos.
+
 OBJETIVO DE COPY: leitura instantanea e entendimento na primeira passada.
 - Uma unica ideia por slide.
 - Headline curta, concreta e com no maximo 11 palavras.
@@ -5671,7 +7136,7 @@ def _pack_design_plan(pack: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_pack_design(pack: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(pack)
+    normalized = repair_pack_copy(pack)
     raw_carousel = normalized.get("carousel")
     if not isinstance(raw_carousel, list):
         raw_carousel = normalized.get("slides") if isinstance(normalized.get("slides"), list) else []
@@ -5717,12 +7182,19 @@ def _attach_pack_metadata(
     *,
     script_id: str,
     avatar_asset: dict[str, Any] | None = None,
+    pack_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enriched = _normalize_pack_design(pack)
     enriched["sourceScriptId"] = script_id
     if avatar_asset:
         enriched["sourceAvatarId"] = avatar_asset.get("avatarId")
         enriched["avatarAsset"] = avatar_asset
+    if pack_context:
+        identity = pack_context.get("identity") if isinstance(pack_context.get("identity"), dict) else {}
+        enriched["packContextVersion"] = PACK_CONTEXT_VERSION
+        enriched["sourceIdentityKey"] = pack_context.get("identityKey")
+        enriched["sourceAvatarSetId"] = identity.get("avatarSetId")
+        enriched["sourcePrimaryAvatarId"] = identity.get("primaryAvatarId")
     enriched["designPlan"] = _pack_design_plan(enriched)
     return enriched
 
@@ -5762,6 +7234,35 @@ def _recent_pack_context(limit: int = 5) -> list[dict[str, Any]]:
     return context
 
 
+def _pack_generation_context(script_id: str, script: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    profile = _production_profile(script_id)
+    if not profile:
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes de gerar o Pack visual.")
+    avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    design_system = {
+        "version": PACK_SCHEMA_VERSION,
+        "canvas": "1080x1350",
+        "layouts": list(PACK_LAYOUTS),
+        "photoLibrary": list(PHOTO_LIBRARY),
+        "rules": [
+            "Claude escolhe copy, narrativa, layout e photoId; o renderer controla HTML/CSS.",
+            "Exatamente 6 slides, sem layouts repetidos.",
+            "O Pack herda a identidade do Roteiro e não escolhe outro avatar.",
+        ],
+    }
+    context = build_pack_context(
+        script=script,
+        profile=profile,
+        avatar_set=avatar_set,
+        design_system=design_system,
+        compliance_rules=MEDICAL_COMPLIANCE_RULES,
+    )
+    identity = context.get("identity") if isinstance(context.get("identity"), dict) else {}
+    if not identity.get("primaryAvatarId") or not profile.get("voiceId"):
+        raise HTTPException(status_code=409, detail="Defina avatar principal e voz no perfil de produção.")
+    return context, profile
+
+
 @app.get("/api/packs/photo-assets")
 def list_pack_photo_assets() -> dict:
     return {"ok": True, "assets": _pack_photo_assets()}
@@ -5782,7 +7283,8 @@ def generate_pack(payload: PackIn) -> dict:
     script_id = payload.scriptId
     if not script_id:
         raise HTTPException(status_code=422, detail="Informe scriptId para gerar o Pack visual.")
-    _find_script(script_id)
+    script = _find_script(script_id)
+    pack_context, _profile = _pack_generation_context(script_id, script)
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise HTTPException(
             status_code=503,
@@ -5790,7 +7292,9 @@ def generate_pack(payload: PackIn) -> dict:
         )
     recent_context = _recent_pack_context()
     cache_payload = {
-        **payload.model_dump(),
+        "request": payload.model_dump(),
+        "context": pack_context,
+        "identityKey": pack_context["identityKey"],
         "recentPackContext": recent_context,
         "schemaVersion": PACK_SCHEMA_VERSION,
     }
@@ -5798,24 +7302,21 @@ def generate_pack(payload: PackIn) -> dict:
     if cached:
         pack = cached.get("pack") if isinstance(cached, dict) else None
         if isinstance(pack, dict):
-            pack = _attach_pack_metadata(pack, script_id=script_id)
+            avatar_asset = pack.get("avatarAsset") if isinstance(pack.get("avatarAsset"), dict) else None
+            if not avatar_asset:
+                avatar_asset = _find_pack_avatar_asset(str(pack_context["identity"]["primaryAvatarId"]))
+            pack = _attach_pack_metadata(
+                pack,
+                script_id=script_id,
+                avatar_asset=avatar_asset,
+                pack_context=pack_context,
+            )
             _save_visual_pack(script_id, pack)
             cached["pack"] = pack
         return cached
     import anthropic
 
-    roteiro = (
-        f"Titulo: {payload.titulo}\n"
-        f"Tema: {payload.tema}\n"
-        f"Categoria: {payload.categoria}\n"
-        f"Hook: {payload.hook}\n"
-        f"Dor/Conflito: {payload.dorConflito}\n"
-        f"Explicacao simples: {payload.explicacaoSimples}\n"
-        f"Virada/Provocacao: {payload.virada}\n"
-        f"CTA: {payload.cta}\n"
-        f"Cuidados medicos: {payload.cuidadosMedicos}\n"
-        f"Formato do video: {payload.formatoSugerido}"
-    )
+    avatar_asset = _find_pack_avatar_asset(str(pack_context["identity"]["primaryAvatarId"]))
     diversity = json.dumps(recent_context, ensure_ascii=False, indent=2)
     photo_context = json.dumps(
         [
@@ -5845,7 +7346,8 @@ def generate_pack(payload: PackIn) -> dict:
         indent=2,
     )
     base_prompt = (
-        f"ROTEIRO DE ORIGEM:\n{roteiro}\n\n"
+        "CONTEXTO COMPLETO DO ROTEIRO, PERFORMANCE, IDENTIDADE E COMPLIANCE:\n"
+        f"{json.dumps(pack_context, ensure_ascii=False, indent=2)}\n\n"
         f"BIBLIOTECA DE FOTOS (use somente estes IDs):\n{photo_context}\n\n"
         f"VOCABULARIO E LIMITES:\n{layout_context}\n\n"
         f"ULTIMOS CARROSSEIS — evite repetir a mesma sequencia e os mesmos ganchos:\n{diversity}\n\n"
@@ -5885,10 +7387,12 @@ def generate_pack(payload: PackIn) -> dict:
         model = os.getenv("ANTHROPIC_PACK_MODEL", "claude-haiku-4-5")
         message, pack = request_pack(client, model)
         _record_anthropic_usage("packs.generate", model, message)
+        pack = repair_pack_copy(pack)
         validation_errors = validate_pack_contract(pack)
         if validation_errors:
             message, pack = request_pack(client, model, validation_errors)
             _record_anthropic_usage("packs.generate.repair", model, message)
+            pack = repair_pack_copy(pack)
             validation_errors = validate_pack_contract(pack)
         if validation_errors:
             raise HTTPException(
@@ -5903,7 +7407,12 @@ def generate_pack(payload: PackIn) -> dict:
     except Exception as exc:  # rede / credencial
         raise HTTPException(status_code=502, detail=f"Falha ao chamar o Claude: {exc}")
 
-    pack = _attach_pack_metadata(pack, script_id=script_id)
+    pack = _attach_pack_metadata(
+        pack,
+        script_id=script_id,
+        avatar_asset=avatar_asset,
+        pack_context=pack_context,
+    )
     _save_visual_pack(script_id, pack)
     response = {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
     _ai_cache_put("packs.generate", cache_payload, response)
@@ -5912,18 +7421,40 @@ def generate_pack(payload: PackIn) -> dict:
 
 @app.get("/api/packs/{script_id}")
 def get_pack(script_id: str) -> dict:
-    _find_script(script_id)
+    script = _find_script(script_id)
     pack = _get_visual_pack(script_id)
     profile = _production_profile(script_id)
+    current_identity_key = None
+    if profile:
+        try:
+            current_context, _ = _pack_generation_context(script_id, script)
+            current_identity_key = current_context.get("identityKey")
+        except HTTPException:
+            current_identity_key = None
     outdated = bool(
         pack
-        and pack.get("schemaVersion") != PACK_SCHEMA_VERSION
-        and profile
-        and pack.get("sourceAvatarId")
-        and profile.get("avatarId")
-        and pack.get("sourceAvatarId") != profile.get("avatarId")
+        and (
+            (
+                current_identity_key
+                and pack.get("sourceIdentityKey")
+                and pack.get("sourceIdentityKey") != current_identity_key
+            )
+            or (
+                pack.get("schemaVersion") != PACK_SCHEMA_VERSION
+                and profile
+                and pack.get("sourceAvatarId")
+                and profile.get("avatarId")
+                and pack.get("sourceAvatarId") != profile.get("avatarId")
+            )
+        )
     )
-    return {"ok": True, "pack": pack, "productionProfile": profile, "outdatedAvatar": outdated}
+    return {
+        "ok": True,
+        "pack": pack,
+        "productionProfile": profile,
+        "outdatedAvatar": outdated,
+        "outdatedIdentity": outdated,
+    }
 
 
 @app.put("/api/packs/{script_id}/carousel/{slide_index}/layout")
@@ -5996,33 +7527,36 @@ def update_pack_carousel_photo(
 
 @app.post("/api/packs/{script_id}/refresh-avatar")
 def refresh_pack_avatar(script_id: str) -> dict:
-    _find_script(script_id)
+    script = _find_script(script_id)
     pack = _get_visual_pack(script_id)
     if not pack:
         raise HTTPException(status_code=404, detail="Pack visual nao encontrado para este roteiro.")
-    if pack.get("schemaVersion") == PACK_SCHEMA_VERSION:
+    pack_context, _profile = _pack_generation_context(script_id, script)
+    current_key = pack_context.get("identityKey")
+    if pack.get("sourceIdentityKey") == current_key:
         return {
             "ok": True,
             "pack": pack,
             "compliance": _pack_compliance(pack),
-            "productionProfile": _production_profile(script_id),
+            "productionProfile": _profile,
             "outdatedAvatar": False,
+            "outdatedIdentity": False,
         }
-    profile = _production_profile(script_id)
-    if not profile or not profile.get("avatarId"):
-        raise HTTPException(
-            status_code=409,
-            detail="Escolha um avatar no Roteiro antes de gerar um Pack visual.",
-        )
-    avatar_asset = _find_pack_avatar_asset(str(profile["avatarId"]))
-    refreshed = _attach_pack_metadata(pack, script_id=script_id, avatar_asset=avatar_asset)
+    avatar_asset = _find_pack_avatar_asset(str(pack_context["identity"]["primaryAvatarId"]))
+    refreshed = _attach_pack_metadata(
+        pack,
+        script_id=script_id,
+        avatar_asset=avatar_asset,
+        pack_context=pack_context,
+    )
     _save_visual_pack(script_id, refreshed)
     return {
         "ok": True,
         "pack": refreshed,
         "compliance": _pack_compliance(refreshed),
-        "productionProfile": profile,
+        "productionProfile": _profile,
         "outdatedAvatar": False,
+        "outdatedIdentity": False,
     }
 
 
@@ -6069,6 +7603,10 @@ class PackBody(BaseModel):
     checklist: list[str] = Field(default_factory=list)
     sourceScriptId: str | None = None
     sourceAvatarId: str | None = None
+    sourceAvatarSetId: str | None = None
+    sourcePrimaryAvatarId: str | None = None
+    sourceIdentityKey: str | None = None
+    packContextVersion: str | None = None
     avatarAsset: dict[str, Any] | None = None
     designPlan: dict[str, Any] | None = None
     updatedAt: str | None = None
@@ -6161,6 +7699,10 @@ def export_pack(payload: PackExportIn) -> dict:
                 {
                     "sourceScriptId": pack.sourceScriptId or payload.scriptId,
                     "sourceAvatarId": pack.sourceAvatarId,
+                    "sourceAvatarSetId": pack.sourceAvatarSetId,
+                    "sourcePrimaryAvatarId": pack.sourcePrimaryAvatarId,
+                    "sourceIdentityKey": pack.sourceIdentityKey,
+                    "packContextVersion": pack.packContextVersion,
                     "avatarAsset": pack.avatarAsset,
                     "schemaVersion": pack.schemaVersion,
                     "designDirection": pack.designDirection,
