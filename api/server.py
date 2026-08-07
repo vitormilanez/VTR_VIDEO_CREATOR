@@ -7805,6 +7805,7 @@ def generate_pack(payload: PackIn) -> dict:
         "identityKey": pack_context["identityKey"],
         "recentPackContext": recent_context,
         "schemaVersion": PACK_SCHEMA_VERSION,
+        "slideCount": PACK_SLIDE_COUNT,
     }
     cached = _ai_cache_get("packs.generate", cache_payload)
     if cached:
@@ -7819,9 +7820,17 @@ def generate_pack(payload: PackIn) -> dict:
                 avatar_asset=avatar_asset,
                 pack_context=pack_context,
             )
-            _save_visual_pack(script_id, pack)
-            cached["pack"] = pack
-        return cached
+            validation_errors = validate_pack_contract(pack)
+            if validation_errors:
+                pack = None
+            else:
+                _save_visual_pack(script_id, pack)
+                cached["pack"] = pack
+                return cached
+        elif pack is None:
+            pass
+        else:
+            pack = None
     import anthropic
 
     avatar_asset = _find_pack_avatar_asset(str(pack_context["identity"]["primaryAvatarId"]))
@@ -7949,20 +7958,26 @@ def get_pack(script_id: str) -> dict:
             current_identity_key = current_context.get("identityKey")
         except HTTPException:
             current_identity_key = None
+    pack_slide_count = 0
+    if pack:
+        raw_slides = pack.get("carousel") if isinstance(pack.get("carousel"), list) else pack.get("slides")
+        pack_slide_count = len(raw_slides) if isinstance(raw_slides, list) else 0
+    outdated_pack_schema = bool(
+        pack
+        and (
+            pack.get("schemaVersion") != PACK_SCHEMA_VERSION
+            or pack_slide_count != PACK_SLIDE_COUNT
+        )
+    )
     outdated = bool(
         pack
         and (
+            outdated_pack_schema
+            or
             (
                 current_identity_key
                 and pack.get("sourceIdentityKey")
                 and pack.get("sourceIdentityKey") != current_identity_key
-            )
-            or (
-                pack.get("schemaVersion") != PACK_SCHEMA_VERSION
-                and profile
-                and pack.get("sourceAvatarId")
-                and profile.get("avatarId")
-                and pack.get("sourceAvatarId") != profile.get("avatarId")
             )
         )
     )
@@ -7972,6 +7987,8 @@ def get_pack(script_id: str) -> dict:
         "productionProfile": profile,
         "outdatedAvatar": outdated,
         "outdatedIdentity": outdated,
+        "outdatedPackSchema": outdated_pack_schema,
+        "requiredSlideCount": PACK_SLIDE_COUNT,
     }
 
 

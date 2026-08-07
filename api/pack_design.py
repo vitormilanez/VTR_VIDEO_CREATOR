@@ -10,7 +10,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-PACK_SCHEMA_VERSION = "institute-carousel-v1"
+PACK_SCHEMA_VERSION = "institute-carousel-v2"
 PACK_SLIDE_COUNT = 7
 
 PACK_LAYOUTS = (

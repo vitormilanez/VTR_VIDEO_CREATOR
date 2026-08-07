@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from api import server
 from api.services.pack_context import build_pack_context, identity_key, pack_identity
+from tests.test_pack_design import sample_pack
 
 
 class PackContextTests(unittest.TestCase):
@@ -64,8 +65,7 @@ class PackContextTests(unittest.TestCase):
             "ok": True,
             "provider": "claude",
             "pack": {
-                "schemaVersion": server.PACK_SCHEMA_VERSION,
-                "carousel": [],
+                **sample_pack(),
                 "avatarAsset": {
                     "avatarId": "avatar-1",
                     "avatarName": "Principal",
@@ -98,6 +98,24 @@ class PackContextTests(unittest.TestCase):
         cache_payload = cache_get.call_args.args[1]
         self.assertEqual(cache_payload["context"]["idea"]["ideaId"], "idea-1")
         self.assertEqual(cache_payload["identityKey"], "identity-key")
+        self.assertEqual(cache_payload["slideCount"], server.PACK_SLIDE_COUNT)
+
+    def test_pack_endpoint_marks_old_six_slide_pack_stale(self) -> None:
+        old_pack = sample_pack()
+        old_pack["schemaVersion"] = "institute-carousel-v1"
+        old_pack["carousel"] = old_pack["carousel"][:6]
+        old_pack["slides"] = old_pack["carousel"]
+        with patch.object(server, "_find_script", return_value={"id": "script-1"}), patch.object(
+            server, "_get_visual_pack", return_value=old_pack
+        ), patch.object(server, "_production_profile", return_value={"avatarId": "avatar-1"}), patch.object(
+            server,
+            "_pack_generation_context",
+            return_value=({"identityKey": old_pack.get("sourceIdentityKey")}, {}),
+        ):
+            response = server.get_pack("script-1")
+        self.assertTrue(response["outdatedPackSchema"])
+        self.assertTrue(response["outdatedAvatar"])
+        self.assertEqual(response["requiredSlideCount"], server.PACK_SLIDE_COUNT)
 
 
 if __name__ == "__main__":

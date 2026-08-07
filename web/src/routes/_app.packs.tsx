@@ -59,7 +59,7 @@ export const Route = createFileRoute("/_app/packs")({
       { property: "og:title", content: "Pack de conteudo | AI Video Creator" },
       {
         property: "og:description",
-        content: "Seis slides, legenda pronta e identidade visual consistente.",
+        content: "Sete slides, legenda pronta e identidade visual consistente.",
       },
     ],
   }),
@@ -67,6 +67,8 @@ export const Route = createFileRoute("/_app/packs")({
 });
 
 type Pack = GeneratedPack;
+
+const REQUIRED_CAROUSEL_SLIDES = 7;
 
 const layoutLabels: Record<PackLayout, string> = {
   hero_photo: "Capa com foto",
@@ -163,15 +165,20 @@ function PacksPage() {
   const [saving, setSaving] = useState(false);
   const [savingPhotoIndex, setSavingPhotoIndex] = useState<number | null>(null);
   const [outdatedAvatar, setOutdatedAvatar] = useState(false);
+  const [outdatedPackSchema, setOutdatedPackSchema] = useState(false);
 
   const script = scripts.find((item) => item.id === selectedId);
   const videoJob = script ? jobs.find((job) => job.scriptId === script.id) : undefined;
   const scheduledPost = script ? posts.find((post) => post.scriptId === script.id) : undefined;
+  const packIsLegacy =
+    pack !== null &&
+    (pack.carousel.length !== REQUIRED_CAROUSEL_SLIDES || outdatedPackSchema);
 
   useEffect(() => {
     if (!script) {
       setPack(null);
       setOutdatedAvatar(false);
+      setOutdatedPackSchema(false);
       return;
     }
     let cancelled = false;
@@ -180,7 +187,8 @@ function PacksPage() {
       .then((data) => {
         if (!cancelled) {
           setPack(data.pack);
-          setOutdatedAvatar(data.outdatedIdentity ?? data.outdatedAvatar);
+          setOutdatedAvatar(Boolean((data.outdatedIdentity ?? data.outdatedAvatar) && !data.outdatedPackSchema));
+          setOutdatedPackSchema(data.outdatedPackSchema ?? false);
         }
       })
       .catch((error) => {
@@ -224,6 +232,7 @@ function PacksPage() {
       const response = await generatePack(script);
       setPack(response.pack);
       setOutdatedAvatar(false);
+      setOutdatedPackSchema(false);
       toast.success("Carrossel de 7 slides criado.", { id: notice });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar o Pack.", {
@@ -242,6 +251,7 @@ function PacksPage() {
       const response = await refreshPackAvatar(script.id);
       setPack(response.pack);
       setOutdatedAvatar(false);
+      setOutdatedPackSchema(false);
       toast.success("Identidade do Pack atualizada sem nova chamada ao Claude.", { id: notice });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a identidade.", { id: notice });
@@ -252,6 +262,10 @@ function PacksPage() {
 
   async function saveLocal() {
     if (!script || !pack) return;
+    if (packIsLegacy) {
+      toast.error("Este Pack ainda esta no formato antigo. Clique em Gerar versao com 7 slides antes de salvar PNGs.");
+      return;
+    }
     setSaving(true);
     const notice = toast.loading("Renderizando os slides em alta resolucao...");
     try {
@@ -318,7 +332,7 @@ function PacksPage() {
             ) : (
               <Wand2 className="mr-1 h-3.5 w-3.5" />
             )}
-            {pack ? "Gerar nova versao" : "Gerar Pack"}
+            {packIsLegacy ? "Gerar versao com 7 slides" : pack ? "Gerar nova versao" : "Gerar Pack"}
           </Button>
           {outdatedAvatar && pack ? (
             <Button size="sm" variant="outline" onClick={() => void refreshIdentity()} disabled={generating}>
@@ -329,7 +343,7 @@ function PacksPage() {
             size="sm"
             variant="secondary"
             onClick={saveLocal}
-            disabled={!script || !pack || saving}
+            disabled={!script || !pack || saving || packIsLegacy}
           >
             {saving ? (
               <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
@@ -364,8 +378,8 @@ function PacksPage() {
               <div className="min-w-0">
                 <div className="mb-3 flex flex-wrap items-center gap-2">
                   <StatusBadge
-                    label={pack ? "Carrossel pronto" : "Aguardando geracao"}
-                    tone="info"
+                    label={packIsLegacy ? "Versao antiga" : pack ? "Carrossel pronto" : "Aguardando geracao"}
+                    tone={packIsLegacy ? "warn" : "info"}
                   />
                   {script ? <StatusBadge {...riskLabel[script.risco]} /> : null}
                   {script ? <StatusBadge {...prioridadeLabel[script.prioridade]} /> : null}
@@ -377,7 +391,7 @@ function PacksPage() {
                   {script?.titulo ?? "Selecione um roteiro"}
                 </h2>
                 <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-                  Seis slides com uma ideia por tela, leitura em poucos segundos e composicao visual
+                  7 slides com uma ideia por tela, leitura em poucos segundos e composicao visual
                   fixa.
                 </p>
               </div>
@@ -426,6 +440,15 @@ function PacksPage() {
 
           {script && pack ? (
             <>
+              {packIsLegacy ? (
+                <section className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 shadow-sm">
+                  <div className="font-semibold">Este Pack tem {pack.carousel.length} de {REQUIRED_CAROUSEL_SLIDES} slides.</div>
+                  <p className="mt-1">
+                    Ele foi salvo antes do novo contrato com slide explicativo de contexto. Gere uma nova versao
+                    para criar 7 slides e liberar o salvamento dos PNGs.
+                  </p>
+                </section>
+              ) : null}
               <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <Card>
                   <CardHeader className="pb-2">
@@ -444,7 +467,9 @@ function PacksPage() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="text-sm text-muted-foreground">
-                    {pack.carousel.length} slides editoriais
+                    {packIsLegacy
+                      ? `${pack.carousel.length} de ${REQUIRED_CAROUSEL_SLIDES} slides — gere nova versao`
+                      : `${pack.carousel.length} slides editoriais`}
                   </CardContent>
                 </Card>
                 <Card>

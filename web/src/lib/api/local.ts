@@ -590,6 +590,8 @@ export async function fetchPack(scriptId: string): Promise<{
   productionProfile: ProductionProfile | null;
   outdatedAvatar: boolean;
   outdatedIdentity?: boolean;
+  outdatedPackSchema?: boolean;
+  requiredSlideCount?: number;
 }> {
   const response = await requestJson<{
     ok: boolean;
@@ -597,12 +599,16 @@ export async function fetchPack(scriptId: string): Promise<{
     productionProfile: ProductionProfile | null;
     outdatedAvatar: boolean;
     outdatedIdentity?: boolean;
+    outdatedPackSchema?: boolean;
+    requiredSlideCount?: number;
   }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
   return {
     pack: response.pack,
     productionProfile: response.productionProfile,
     outdatedAvatar: response.outdatedAvatar,
     outdatedIdentity: response.outdatedIdentity,
+    outdatedPackSchema: response.outdatedPackSchema,
+    requiredSlideCount: response.requiredSlideCount,
   };
 }
 
