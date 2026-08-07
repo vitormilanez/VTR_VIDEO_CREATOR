@@ -40,7 +40,20 @@ from pydantic import BaseModel, Field
 from api.cut_service import cancel_cut_job as cancel_cut_worker
 from api.cut_service import prepare_cut_job, process_cut_project
 from api.job_store import JobStore
-from api.services.heygen_catalog import build_catalog, default_voice_id
+from api.pack_design import (
+    FALLBACK_LAYOUTS,
+    FIELD_NAMES,
+    PACK_LAYOUTS,
+    PACK_SCHEMA_VERSION,
+    PACK_SLIDE_COUNT,
+    PHOTO_LIBRARY,
+    empty_fields,
+    normalize_slide,
+    photo_asset,
+    slide_headline,
+    validate_pack_contract,
+)
+from api.services.heygen_catalog import build_catalog, default_voice_id, normalize_avatar_look
 from api.services.script_performance import (
     LEGACY_OUTRO,
     PERFORMANCE_SCHEMA,
@@ -55,7 +68,11 @@ from api.services.script_performance import (
     speech_speed,
     strip_known_outros,
 )
-from api.services.video_generation import DIRECT_VIDEO_DURATIONS, direct_video_payload
+from api.services.video_generation import (
+    DIRECT_VIDEO_DURATIONS,
+    direct_video_payload,
+    normalize_caption_srt,
+)
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
 from integrations.instagram_client import InstagramClient
@@ -71,6 +88,8 @@ HEYGEN_AVATAR_CACHE = ROOT / "data" / "heygen_avatar_cache.json"
 OPERATIONAL_DB = ROOT / "data" / "operations.db"
 CUT_UPLOADS = ROOT / "data" / "cut_uploads"
 CUT_OUTPUTS = ROOT / "data" / "cuts"
+PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
+PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
 MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
@@ -144,9 +163,287 @@ def _ai_db() -> sqlite3.Connection:
             response_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS production_profiles (
+            script_id TEXT PRIMARY KEY,
+            avatar_id TEXT NOT NULL,
+            voice_id TEXT NOT NULL,
+            speech_mode TEXT NOT NULL,
+            generation_mode TEXT NOT NULL,
+            avatar_mode TEXT NOT NULL DEFAULT 'single',
+            avatar_set_id TEXT,
+            primary_avatar_id TEXT,
+            position_count INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS avatar_sets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            voice_id TEXT NOT NULL,
+            looks_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS visual_packs (
+            script_id TEXT PRIMARY KEY,
+            pack_json TEXT NOT NULL,
+            source_avatar_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
+    # Existing local databases predate Avatar Sets. Keep them usable without
+    # requiring a destructive migration or touching the Google Sheets schema.
+    for column, definition in (
+        ("avatar_mode", "TEXT NOT NULL DEFAULT 'single'"),
+        ("avatar_set_id", "TEXT"),
+        ("primary_avatar_id", "TEXT"),
+        ("position_count", "INTEGER NOT NULL DEFAULT 1"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE production_profiles ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    conn.commit()
     return conn
+
+
+def _production_profile(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT script_id, avatar_id, voice_id, speech_mode, generation_mode,
+                   avatar_mode, avatar_set_id, primary_avatar_id, position_count, updated_at
+            FROM production_profiles
+            WHERE script_id = ?
+            """,
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        "scriptId": row["script_id"],
+        "avatarId": row["avatar_id"],
+        "voiceId": row["voice_id"],
+        "speechMode": row["speech_mode"],
+        "generationMode": row["generation_mode"],
+        "avatarMode": row["avatar_mode"] or "single",
+        "avatarSetId": row["avatar_set_id"],
+        "primaryAvatarId": row["primary_avatar_id"] or row["avatar_id"],
+        "positionCount": int(row["position_count"] or 2),
+        "updatedAt": row["updated_at"],
+    }
+
+
+AVATAR_SET_ROLES = frozenset({"primary", "front", "close", "three_quarter", "standing", "wide"})
+
+
+def _normalize_avatar_set_looks(looks: list[dict[str, Any]]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    roles: set[str] = set()
+    avatar_ids: set[str] = set()
+    for raw in looks:
+        avatar_id = str(raw.get("avatarId") or raw.get("avatar_id") or "").strip()
+        role = str(raw.get("role") or "").strip()
+        label = re.sub(r"\s+", " ", str(raw.get("label") or role)).strip()
+        if not avatar_id:
+            raise HTTPException(status_code=422, detail="Cada look do Avatar Set precisa de avatarId.")
+        if role not in AVATAR_SET_ROLES:
+            raise HTTPException(status_code=422, detail=f"Role de Avatar Set invalida: {role or 'vazio'}.")
+        if role in roles:
+            raise HTTPException(status_code=422, detail=f"O role '{role}' aparece mais de uma vez no Avatar Set.")
+        roles.add(role)
+        avatar_ids.add(avatar_id)
+        normalized.append({"avatarId": avatar_id, "role": role, "label": label or role})
+    if len(normalized) < 2 or len(avatar_ids) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="Um Avatar Set precisa de pelo menos duas posições/looks diferentes do mesmo avatar.",
+        )
+    return normalized
+
+
+def _avatar_set(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "voiceId": row["voice_id"],
+        "looks": json.loads(str(row["looks_json"])),
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _list_avatar_sets() -> list[dict[str, Any]]:
+    conn = _ai_db()
+    try:
+        rows = conn.execute("SELECT id, name, voice_id, looks_json, updated_at FROM avatar_sets ORDER BY name COLLATE NOCASE").fetchall()
+    finally:
+        conn.close()
+    return [_avatar_set(row) for row in rows]
+
+
+def _get_avatar_set(avatar_set_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT id, name, voice_id, looks_json, updated_at FROM avatar_sets WHERE id = ?",
+            (avatar_set_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return _avatar_set(row) if row else None
+
+
+def _save_avatar_set(
+    *,
+    name: str,
+    voice_id: str,
+    looks: list[dict[str, Any]],
+    avatar_set_id: str | None = None,
+) -> dict[str, Any]:
+    clean_name = re.sub(r"\s+", " ", name).strip()
+    clean_voice_id = str(voice_id).strip()
+    if not clean_name:
+        raise HTTPException(status_code=422, detail="Dê um nome ao Avatar Set.")
+    if not clean_voice_id:
+        raise HTTPException(status_code=422, detail="Avatar Set precisa de voiceId.")
+    normalized_looks = _normalize_avatar_set_looks(looks)
+    saved = {
+        "id": avatar_set_id or f"avatar-set-{uuid.uuid4().hex[:12]}",
+        "name": clean_name[:160],
+        "voiceId": clean_voice_id[:160],
+        "looks": normalized_looks,
+        "updatedAt": _now(),
+    }
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO avatar_sets(id, name, voice_id, looks_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                voice_id = excluded.voice_id,
+                looks_json = excluded.looks_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                saved["id"],
+                saved["name"],
+                saved["voiceId"],
+                json.dumps(saved["looks"], ensure_ascii=False),
+                saved["updatedAt"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return saved
+
+
+def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    avatar_mode = str(profile.get("avatarMode") or "single")
+    if avatar_mode not in {"single", "set"}:
+        raise HTTPException(status_code=422, detail="avatarMode deve ser 'single' ou 'set'.")
+    avatar_set_id = str(profile.get("avatarSetId") or "").strip() or None
+    primary_avatar_id = str(profile.get("primaryAvatarId") or profile.get("avatarId") or "").strip()
+    if avatar_mode == "set":
+        avatar_set = _get_avatar_set(avatar_set_id or "")
+        if not avatar_set:
+            raise HTTPException(status_code=422, detail="Avatar Set não encontrado.")
+        set_avatar_ids = {look["avatarId"] for look in avatar_set["looks"]}
+        if primary_avatar_id not in set_avatar_ids:
+            raise HTTPException(status_code=422, detail="primaryAvatarId precisa pertencer ao Avatar Set.")
+    if not primary_avatar_id:
+        raise HTTPException(status_code=422, detail="Selecione um avatar principal.")
+    saved = {
+        "scriptId": str(profile["scriptId"]),
+        "avatarId": primary_avatar_id,
+        "voiceId": str(profile["voiceId"]),
+        "speechMode": str(profile["speechMode"]),
+        "generationMode": str(profile["generationMode"]),
+        "avatarMode": avatar_mode,
+        "avatarSetId": avatar_set_id,
+        "primaryAvatarId": primary_avatar_id,
+        "positionCount": 2 if avatar_mode == "set" else 1,
+        "updatedAt": _now(),
+    }
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO production_profiles(
+                script_id, avatar_id, voice_id, speech_mode, generation_mode,
+                avatar_mode, avatar_set_id, primary_avatar_id, position_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                avatar_id = excluded.avatar_id,
+                voice_id = excluded.voice_id,
+                speech_mode = excluded.speech_mode,
+                generation_mode = excluded.generation_mode,
+                avatar_mode = excluded.avatar_mode,
+                avatar_set_id = excluded.avatar_set_id,
+                primary_avatar_id = excluded.primary_avatar_id,
+                position_count = excluded.position_count,
+                updated_at = excluded.updated_at
+            """,
+            (
+                saved["scriptId"],
+                saved["avatarId"],
+                saved["voiceId"],
+                saved["speechMode"],
+                saved["generationMode"],
+                saved["avatarMode"],
+                saved["avatarSetId"],
+                saved["primaryAvatarId"],
+                saved["positionCount"],
+                saved["updatedAt"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return saved
+
+
+def _get_visual_pack(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT pack_json FROM visual_packs WHERE script_id = ?",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return json.loads(str(row["pack_json"]))
+
+
+def _save_visual_pack(script_id: str, pack: dict[str, Any]) -> dict[str, Any]:
+    source_avatar_id = str(pack.get("sourceAvatarId") or "")
+    if not source_avatar_id:
+        raise HTTPException(status_code=422, detail="Pack visual sem avatar de origem.")
+    pack["updatedAt"] = _now()
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO visual_packs(script_id, pack_json, source_avatar_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                pack_json = excluded.pack_json,
+                source_avatar_id = excluded.source_avatar_id,
+                updated_at = excluded.updated_at
+            """,
+            (script_id, json.dumps(pack, ensure_ascii=False), source_avatar_id, pack["updatedAt"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return pack
 
 
 def _ai_cache_key(operation: str, payload: Any) -> str:
@@ -1179,7 +1476,16 @@ def heygen_catalog() -> dict:
     """Catalogo de avatares e vozes privados disponiveis para producao."""
     _, looks, _from_cache = _private_avatar_library()
     catalog = build_catalog(looks, HEYGEN_CATALOG["voices"])
-    catalog["defaultAvatarId"] = None
+    settings = _load_settings().get("heygen", {})
+    available_ids = {avatar["id"] for avatar in catalog["avatars"]}
+    preferred_ids = [
+        str(settings.get("defaultAvatarId") or ""),
+        *[str(avatar_id) for avatar_id in settings.get("favoriteAvatarIds") or []],
+    ]
+    catalog["defaultAvatarId"] = next(
+        (avatar_id for avatar_id in preferred_ids if avatar_id in available_ids),
+        None,
+    )
     catalog["defaultVoiceId"] = _heygen_default_voice_id()
     catalog["speechPresets"] = SPEECH_PRESETS
     catalog["generationModes"] = ["direct", "video_agent"]
@@ -1628,6 +1934,28 @@ class VideoPreviewCreateIn(BaseModel):
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
 
 
+class ProductionProfileIn(BaseModel):
+    avatarId: str = Field(min_length=1, max_length=160)
+    voiceId: str = Field(min_length=1, max_length=160)
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
+    generationMode: Literal["direct", "video_agent"] = "direct"
+    avatarMode: Literal["single", "set"] = "single"
+    avatarSetId: str | None = Field(default=None, max_length=160)
+    primaryAvatarId: str | None = Field(default=None, max_length=160)
+
+
+class AvatarLookIn(BaseModel):
+    avatarId: str = Field(min_length=1, max_length=160)
+    role: Literal["primary", "front", "close", "three_quarter", "standing", "wide"]
+    label: str = Field(min_length=1, max_length=120)
+
+
+class AvatarSetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    voiceId: str = Field(min_length=1, max_length=160)
+    looks: list[AvatarLookIn] = Field(min_length=2, max_length=12)
+
+
 SHORT_DIRECT_VIDEO_DURATIONS = DIRECT_VIDEO_DURATIONS
 SHORT_VIDEO_VOICE_SPEEDS = {key: float(value["speed"]) for key, value in SPEECH_PRESETS.items()}
 
@@ -1642,6 +1970,7 @@ def _direct_video_payload(
     speech_mode: str,
     captions: bool,
     optimize_pronunciation: bool,
+    caption_source_matches_spoken: bool = True,
 ) -> dict[str, Any]:
     """Monta um video curto deterministico, sem impor duracao artificial."""
     return direct_video_payload(
@@ -1653,7 +1982,77 @@ def _direct_video_payload(
         speech_mode=speech_mode,
         captions=captions,
         optimize_pronunciation=optimize_pronunciation,
+        caption_source_matches_spoken=caption_source_matches_spoken,
     )
+
+
+@app.get("/api/scripts/{script_id}/production-profile")
+def get_script_production_profile(script_id: str) -> dict:
+    """Intencao de producao escolhida na tela do roteiro, antes do job pago."""
+    _find_script(script_id)
+    return {"ok": True, "profile": _production_profile(script_id)}
+
+
+@app.put("/api/scripts/{script_id}/production-profile")
+def save_script_production_profile(script_id: str, payload: ProductionProfileIn) -> dict:
+    """Persiste avatar/voz/modo associados ao roteiro sem tocar no Sheets."""
+    _find_script(script_id)
+    profile = _save_production_profile(
+        {
+            "scriptId": script_id,
+            "avatarId": payload.avatarId,
+            "voiceId": payload.voiceId,
+            "speechMode": payload.speechMode,
+            "generationMode": payload.generationMode,
+            "avatarMode": payload.avatarMode,
+            "avatarSetId": payload.avatarSetId,
+            "primaryAvatarId": payload.primaryAvatarId,
+        }
+    )
+    return {"ok": True, "profile": profile}
+
+
+@app.get("/api/avatar-sets")
+def list_avatar_sets() -> dict:
+    """Lista conjuntos de looks locais; não consulta nem gera vídeo na HeyGen."""
+    return {"ok": True, "avatarSets": _list_avatar_sets()}
+
+
+@app.post("/api/avatar-sets")
+def create_avatar_set(payload: AvatarSetIn) -> dict:
+    """Cria um Avatar Set local com duas ou mais posições reais."""
+    saved = _save_avatar_set(
+        name=payload.name,
+        voice_id=payload.voiceId,
+        looks=[look.model_dump() for look in payload.looks],
+    )
+    return {"ok": True, "avatarSet": saved}
+
+
+@app.put("/api/avatar-sets/{avatar_set_id}")
+def update_avatar_set(avatar_set_id: str, payload: AvatarSetIn) -> dict:
+    if not _get_avatar_set(avatar_set_id):
+        raise HTTPException(status_code=404, detail="Avatar Set não encontrado.")
+    saved = _save_avatar_set(
+        name=payload.name,
+        voice_id=payload.voiceId,
+        looks=[look.model_dump() for look in payload.looks],
+        avatar_set_id=avatar_set_id,
+    )
+    return {"ok": True, "avatarSet": saved}
+
+
+@app.delete("/api/avatar-sets/{avatar_set_id}")
+def delete_avatar_set(avatar_set_id: str) -> dict:
+    conn = _ai_db()
+    try:
+        cursor = conn.execute("DELETE FROM avatar_sets WHERE id = ?", (avatar_set_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Avatar Set não encontrado.")
+    return {"ok": True, "deleted": avatar_set_id}
 
 
 class NaturalizeScriptIn(BaseModel):
@@ -2152,11 +2551,33 @@ def ai_costs() -> dict:
 def create_video(payload: VideoCreateIn) -> dict:
     """Cria um job real no HeyGen somente apos o clique de enviar para producao."""
     now = _now()
-    idempotency_key = payload.idempotencyKey or (
-        f"video:{payload.scriptId}:initial"
-        if not payload.forceNewVersion
-        else f"video:{payload.scriptId}:version:{uuid.uuid4().hex}"
+    # Preserve the historical "existing video" response for callers that have
+    # not supplied any editable text. Requests with production text always go
+    # through the stricter pre-reservation compliance path below.
+    if not payload.forceNewVersion and not any(
+        (value or "").strip() for value in (payload.narrationText, payload.displayText, payload.spokenText)
+    ):
+        existing = next(
+            (
+                job
+                for job in _job_store().list("video")
+                if job.get("scriptId") == payload.scriptId
+                and (job.get("status") != "erro" or not bool(job.get("retrySafe")))
+            ),
+            None,
+        )
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail="Este roteiro ja possui um video. Abra a producao existente ou use 'Criar nova versao' para gerar outro video.",
+            )
+    script = _find_script(payload.scriptId)
+    final_display_text, final_spoken_text = _finalize_video_texts(payload, script)
+    idempotency_key = payload.idempotencyKey or _production_configuration_key(
+        payload, final_display_text, final_spoken_text
     )
+    if payload.forceNewVersion and not payload.idempotencyKey:
+        idempotency_key = f"{idempotency_key}:version:{uuid.uuid4().hex}"
     reserved_job = {
         "id": f"v-{uuid.uuid4().hex[:12]}",
         "scriptId": payload.scriptId,
@@ -2177,9 +2598,9 @@ def create_video(payload: VideoCreateIn) -> dict:
             "captions": payload.captions,
             "optimizePronunciation": payload.optimizePronunciation,
             "styleId": payload.styleId,
-            "narrationText": payload.narrationText,
-            "displayText": payload.displayText,
-            "spokenText": payload.spokenText,
+            "narrationText": final_display_text,
+            "displayText": final_display_text,
+            "spokenText": final_spoken_text,
             "outroText": payload.outroText,
         },
     }
@@ -2212,7 +2633,7 @@ def create_video(payload: VideoCreateIn) -> dict:
             ),
         )
     try:
-        return _create_video_job(payload, reserved_job)
+        return _create_video_job(payload, reserved_job, script=script, final_texts=(final_display_text, final_spoken_text))
     except HTTPException as exc:
         current = _job_store().get("video", reserved_job["id"]) or reserved_job
         current["status"] = "erro"
@@ -2227,20 +2648,21 @@ def create_video(payload: VideoCreateIn) -> dict:
         raise
 
 
-def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
+def _create_video_job(
+    payload: VideoCreateIn,
+    job: dict[str, Any],
+    *,
+    script: dict[str, Any] | None = None,
+    final_texts: tuple[str, str] | None = None,
+) -> dict:
     command = _heygen_cli()
-    script = _find_script(payload.scriptId)
+    script = script or _find_script(payload.scriptId)
     if script.get("status") != "aprovado_clinicamente":
         raise HTTPException(
             status_code=409,
             detail="O roteiro precisa concluir a revisão de fala e estar marcado como Pronto antes do HeyGen.",
         )
-    final_narration = _validate_final_narration(
-        script,
-        payload.narrationText,
-        payload.durationSeconds,
-        payload.outroText,
-    )
+    final_display_text, final_spoken_text = final_texts or _finalize_video_texts(payload, script)
     try:
         balance_before, currency_before = _heygen_wallet(command)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
@@ -2257,15 +2679,23 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
     if avatar_id not in allowed_avatar_ids:
         raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
 
+    _save_production_profile(
+        {
+            "scriptId": payload.scriptId,
+            "avatarId": avatar_id,
+            "voiceId": voice_id,
+            "speechMode": payload.speechMode,
+            "generationMode": payload.generationMode,
+        }
+    )
     job["productionSettings"]["avatarId"] = avatar_id
     job["productionSettings"]["voiceId"] = voice_id
-    job["productionSettings"]["displayText"] = performance_display_text(
-        payload.displayText or final_narration
-    )
-    job["productionSettings"]["spokenText"] = payload.spokenText or prepare_script_for_heygen_voice(
-        final_narration,
-        add_sentence_breaks=False,
-    )
+    job["productionSettings"]["displayText"] = final_display_text
+    job["productionSettings"]["spokenText"] = final_spoken_text
+    captions_need_normalization = payload.captions and final_display_text != final_spoken_text
+    job["productionSettings"]["captionStrategy"] = (
+        "sidecar_srt_normalized" if captions_need_normalization else "sidecar_srt"
+    ) if payload.captions else "disabled"
     job["submissionState"] = "submitting"
     job["atualizadoEm"] = _now()
     _job_store().upsert("video", job)
@@ -2278,13 +2708,14 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
         _job_store().upsert("video", job)
         direct_payload = _direct_video_payload(
             script=script,
-            narration_text=payload.spokenText or final_narration,
+            narration_text=final_spoken_text,
             avatar_id=avatar_id,
             voice_id=voice_id,
             orientation=payload.orientation,
             speech_mode=payload.speechMode,
             captions=payload.captions,
             optimize_pronunciation=payload.optimizePronunciation,
+            caption_source_matches_spoken=not captions_need_normalization,
         )
         response = _run_heygen_json(
             command,
@@ -2311,7 +2742,7 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
                 speech_mode=payload.speechMode,
                 captions=payload.captions,
                 optimize_pronunciation=payload.optimizePronunciation,
-                narration_text=final_narration,
+                narration_text=final_display_text,
                 outro_text=payload.outroText,
             ),
             "--avatar-id",
@@ -2349,13 +2780,11 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
 
 @app.post("/api/videos/preview")
 def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
-    """Gera uma previa paga de aproximadamente 10s, separada do video final."""
+    """Gera uma previa tecnica de 10s sempre pelo Direct Avatar."""
     now = _now()
-    idempotency_key = payload.idempotencyKey or f"preview:{payload.scriptId}:{uuid.uuid4().hex}"
-    preview_display_text = preview_text(payload.displayText)
-    preview_spoken_text = payload.spokenText or prepare_script_for_heygen_voice(
-        preview_display_text,
-        add_sentence_breaks=False,
+    preview_display_text, preview_spoken_text = _finalize_preview_texts(payload)
+    idempotency_key = payload.idempotencyKey or _preview_configuration_key(
+        payload, preview_display_text, preview_spoken_text
     )
     reserved_job = {
         "id": f"vp-{uuid.uuid4().hex[:12]}",
@@ -2373,7 +2802,7 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
             "orientation": payload.orientation,
             "durationSeconds": 10,
             "speechMode": payload.speechMode,
-            "generationMode": payload.generationMode,
+            "generationMode": "direct",
             "captions": payload.captions,
             "optimizePronunciation": payload.optimizePronunciation,
             "displayText": preview_display_text,
@@ -2401,8 +2830,23 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
         allowed_avatar_ids = {look.get("id") for look in ready_looks}
         if payload.avatarId not in allowed_avatar_ids:
             raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
+        _save_production_profile(
+            {
+                "scriptId": payload.scriptId,
+                "avatarId": payload.avatarId,
+                "voiceId": payload.voiceId,
+                "speechMode": payload.speechMode,
+                "generationMode": "direct",
+            }
+        )
         job["submissionState"] = "submitting"
+        job["productionSettings"]["generationMode"] = "direct"
         job["productionSettings"]["voiceSpeed"] = speech_speed(payload.speechMode)
+        job["productionSettings"]["captionStrategy"] = (
+            "sidecar_srt_normalized"
+            if payload.captions and preview_display_text != preview_spoken_text
+            else "sidecar_srt" if payload.captions else "disabled"
+        )
         _job_store().upsert("video", job)
         direct_payload = _direct_video_payload(
             script=script,
@@ -2413,6 +2857,7 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
             speech_mode=payload.speechMode,
             captions=payload.captions,
             optimize_pronunciation=False,
+            caption_source_matches_spoken=preview_display_text == preview_spoken_text,
         )
         response = _run_heygen_json(command, ["video", "create"], payload=direct_payload, timeout=60)
         video_id = _find_value(response, "video_id", "videoId", "id")
@@ -2469,6 +2914,13 @@ def refresh_video(job_id: str) -> dict:
     job["remoteVideoId"] = _find_value(response, "video_id", "videoId") or job.get("remoteVideoId")
     job["videoUrl"] = _find_value(response, "video_url", "videoUrl", "video_page_url", "videoPageUrl") or job.get("videoUrl")
     job["thumbnailUrl"] = _find_value(response, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
+    caption_srt = _find_value(response, "caption_srt", "captionSrt", "srt")
+    if isinstance(caption_srt, str) and caption_srt.strip():
+        # Keep a corrected sidecar ready for a future local burn-in pipeline.
+        job["captionSrt"] = normalize_caption_srt(caption_srt)
+    caption_srt_url = _find_value(response, "caption_url", "captionUrl", "srt_url", "srtUrl")
+    if caption_srt_url:
+        job["captionSrtUrl"] = caption_srt_url
     duration = _find_value(response, "duration", "duration_seconds", "durationSeconds")
     if duration not in (None, ""):
         try:
@@ -5075,6 +5527,7 @@ def update_script(item_id: str, payload: ScriptIn) -> dict:
 # Geracao real do Pack de Conteudo com Claude (server-side)
 # --------------------------------------------------------------------------- #
 class PackIn(BaseModel):
+    scriptId: str | None = Field(default=None, max_length=120)
     titulo: str
     tema: str = ""
     categoria: str = "educativo"
@@ -5085,6 +5538,14 @@ class PackIn(BaseModel):
     cta: str = ""
     cuidadosMedicos: str = ""
     formatoSugerido: str = "Reels"
+
+
+class PackSlideLayoutIn(BaseModel):
+    layout: str = Field(min_length=1, max_length=80)
+
+
+class PackSlidePhotoIn(BaseModel):
+    photoAssetId: str | None = Field(default=None, max_length=120)
 
 
 def _pack_text(pack: dict[str, Any]) -> str:
@@ -5177,72 +5638,393 @@ def _validate_final_narration(
     return final_text
 
 
+def _validate_production_compliance(text: str, *, field: str) -> None:
+    """Blocks unsafe wording in every text channel that can reach HeyGen."""
+    normalized = performance_display_text(text)
+    compliance = _pack_compliance({"text": normalized})
+    if compliance["blocked"]:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{field} bloqueado antes do HeyGen: "
+                f"{'; '.join(compliance['issues'])}."
+            ),
+        )
+
+
+def _finalize_video_texts(payload: VideoCreateIn, script: dict[str, Any]) -> tuple[str, str]:
+    source_display = payload.displayText or payload.narrationText
+    final_display = performance_display_text(
+        _validate_final_narration(
+            script,
+            source_display,
+            payload.durationSeconds,
+            payload.outroText,
+        )
+    )
+    final_spoken = re.sub(
+        r"\s+",
+        " ",
+        payload.spokenText.strip() if payload.spokenText and payload.spokenText.strip() else "",
+    ) or prepare_script_for_heygen_voice(final_display, add_sentence_breaks=False)
+    _validate_production_compliance(final_display, field="Texto exibido")
+    _validate_production_compliance(final_spoken, field="Texto enviado a voz")
+    return final_display, final_spoken
+
+
+def _finalize_preview_texts(payload: VideoPreviewCreateIn) -> tuple[str, str]:
+    final_display = performance_display_text(preview_text(payload.displayText))
+    final_spoken = preview_text(payload.spokenText) if payload.spokenText else prepare_script_for_heygen_voice(
+        final_display,
+        add_sentence_breaks=False,
+    )
+    _validate_production_compliance(final_display, field="Texto exibido da previa")
+    _validate_production_compliance(final_spoken, field="Texto enviado a voz da previa")
+    return final_display, final_spoken
+
+
+def _production_configuration_key(payload: VideoCreateIn, display_text: str, spoken_text: str) -> str:
+    configuration = {
+        "scriptId": payload.scriptId,
+        "avatarId": payload.avatarId,
+        "voiceId": payload.voiceId,
+        "durationSeconds": payload.durationSeconds,
+        "generationMode": payload.generationMode,
+        "speechMode": payload.speechMode,
+        "displayText": display_text,
+        "spokenText": spoken_text,
+        "ctaMode": payload.ctaMode,
+        "outroText": payload.outroText,
+        "captions": payload.captions,
+        "orientation": payload.orientation,
+        "styleId": payload.styleId,
+    }
+    digest = hashlib.sha256(json.dumps(configuration, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return f"video:{payload.scriptId}:{digest[:32]}"
+
+
+def _preview_configuration_key(payload: VideoPreviewCreateIn, display_text: str, spoken_text: str) -> str:
+    configuration = {
+        "scriptId": payload.scriptId,
+        "avatarId": payload.avatarId,
+        "voiceId": payload.voiceId,
+        "orientation": payload.orientation,
+        "speechMode": payload.speechMode,
+        "displayText": display_text,
+        "spokenText": spoken_text,
+        "captions": payload.captions,
+    }
+    digest = hashlib.sha256(json.dumps(configuration, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return f"preview:{payload.scriptId}:{digest[:32]}"
+
+
+_PACK_ITEM_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"title": {"type": "string"}, "text": {"type": "string"}},
+    "required": ["title", "text"],
+}
+
+_PACK_FIELDS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        **{
+            name: {"type": "string"}
+            for name in FIELD_NAMES
+            if name not in {"item1", "item2", "item3", "photoId"}
+        },
+        "item1": _PACK_ITEM_SCHEMA,
+        "item2": _PACK_ITEM_SCHEMA,
+        "item3": _PACK_ITEM_SCHEMA,
+        "photoId": {"type": "string", "enum": ["", *PHOTO_LIBRARY.keys()]},
+    },
+    "required": list(FIELD_NAMES),
+}
+
+_PACK_SLIDE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "layoutId": {"type": "string", "enum": list(PACK_LAYOUTS)},
+        "variant": {
+            "type": "string",
+            "enum": ["dark", "deep", "light", "warm", "photo-left", "photo-right", "text-top", "text-bottom"],
+        },
+        "fields": _PACK_FIELDS_SCHEMA,
+    },
+    "required": ["layoutId", "variant", "fields"],
+}
+
 _PACK_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "carousel": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
-                "required": ["title", "body"],
-            },
-        },
-        "staticPost": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {"headline": {"type": "string"}, "subline": {"type": "string"}},
-            "required": ["headline", "subline"],
-        },
+        "schemaVersion": {"type": "string", "enum": [PACK_SCHEMA_VERSION]},
         "caption": {"type": "string"},
-        "stories": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
-                "required": ["title", "body"],
-            },
-        },
-        "checklist": {"type": "array", "items": {"type": "string"}},
+        "hashtags": {"type": "array", "items": {"type": "string"}},
+        "slides": {"type": "array", "items": _PACK_SLIDE_SCHEMA},
     },
-    "required": ["carousel", "staticPost", "caption", "stories", "checklist"],
+    "required": ["schemaVersion", "caption", "hashtags", "slides"],
 }
 
-_PACK_SYSTEM = """Voce e um editor de conteudo medico do Dr. Guilherme, focado em \
-obesidade, GLP-1, Mounjaro, Ozempic, metabolismo e comportamento alimentar, em \
-portugues-BR.
+_PACK_SYSTEM = """Voce e o editor de carrosseis do Instituto Guilherme Martins.
+Sua unica tarefa e transformar um roteiro medico em um carrossel de 6 slides,
+em portugues do Brasil, usando o schema estruturado fornecido.
 
-Regras de compliance OBRIGATORIAS em TODAS as pecas:
-- Nao prescrever medicamentos nem citar doses (mg, ml, comprimidos).
-- Nao prometer resultado ("cura", "milagre", "garantido", "emagrece rapido").
-- Nao fazer sensacionalismo medico.
-- Reforcar avaliacao individual com profissional.
-- Tratar obesidade como condicao multifatorial, com linguagem acolhedora.
-- Conteudo educativo, nao prescritivo.
+OBJETIVO DE COPY: leitura instantanea e entendimento na primeira passada.
+- Uma unica ideia por slide.
+- Headline curta, concreta e com no maximo 11 palavras.
+- Frases ativas; prefira palavras comuns e verbos concretos.
+- Explique termos medicos em linguagem cotidiana.
+- Corte introducoes, adjetivos vazios, repeticoes e frases de efeito genericas.
+- Nao repita a headline no body.
+- Nao use emoji, markdown, rotulos como "Slide 1" ou texto sobre o design.
+- A pessoa precisa captar a mensagem central de cada tela em ate 3 segundos.
 
-A partir do roteiro fornecido, gere um pacote de conteudo para redes sociais:
-- carousel: 5 a 7 slides educativos (title curto + body 1-2 frases).
-- staticPost: headline forte + subline (1 frase).
-- caption: legenda pronta para Instagram/LinkedIn, com quebras de linha.
-- stories: 3 a 5 telas curtas (title + body), incluindo uma com pergunta/enquete.
-- checklist: 4 a 6 itens do que o pacote entrega.
-Responda apenas no formato JSON pedido."""
+COMPLIANCE:
+- Nao prescreva medicamento, dose ou conduta individual.
+- Nao prometa resultado e nao use alarmismo.
+- Proibido: segredo, milagre, antes/depois, voce esta fazendo errado e julgamento sobre peso.
+- Trate obesidade como condicao multifatorial.
+- O CTA termina com disclaimer educativo e orienta avaliacao individual.
+- Nunca invente numero, estatistica, mito ou comparacao. Sem fonte real, escolha outro layout.
+
+COMPOSICAO:
+- Exatamente 6 slides, todos com layoutId diferente.
+- Slide 1: hero_photo ou photo_overlay. Slide 6: cta_photo.
+- Slides 2 a 5: escolha livre entre os 12 layouts conforme a funcao narrativa.
+- Maximo 3 slides com foto; nunca dois full bleed seguidos.
+- Maximo 2 fundos escuros consecutivos.
+- Sequencia: gancho -> tensao -> explicacao/evidencia -> ponto central -> aplicacao/autoridade -> CTA.
+- photoId deve vir apenas da biblioteca enviada no pedido.
+- Layout e texto devem obedecer aos limites descritos no pedido.
+- Voce nao gera HTML, CSS ou imagens."""
+
+
+def _find_pack_avatar_asset(avatar_id: str) -> dict[str, Any]:
+    """Resolve avatar HeyGen para um arquivo local; nunca persiste URL assinada."""
+    _, private_looks, _from_cache = _private_avatar_library(allow_cache=False)
+    for raw_look in private_looks:
+        avatar = normalize_avatar_look(raw_look) if isinstance(raw_look, dict) else None
+        if avatar and avatar.get("id") == avatar_id and avatar.get("status") == "completed":
+            preview_url = str(avatar.get("previewImageUrl") or "")
+            if not preview_url:
+                raise HTTPException(
+                    status_code=409,
+                    detail="O avatar escolhido nao possui imagem de preview no catalogo HeyGen.",
+                )
+            return _cache_pack_avatar_asset(avatar, preview_url)
+    raise HTTPException(status_code=400, detail="Avatar do roteiro nao encontrado no catalogo HeyGen.")
+
+
+def _cache_pack_avatar_asset(avatar: dict[str, Any], preview_url: str) -> dict[str, Any]:
+    parsed = urlparse(preview_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=502, detail="Preview do avatar HeyGen veio com URL invalida.")
+    PACK_AVATAR_ASSETS.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(preview_url.encode("utf-8")).hexdigest()[:16]
+    extension = Path(parsed.path).suffix.lower()
+    if extension not in {".jpg", ".jpeg", ".png", ".webp"}:
+        extension = ".jpg"
+    asset_path = PACK_AVATAR_ASSETS / f"{_slug(str(avatar.get('id')))}-{digest}{extension}"
+    if not asset_path.exists():
+        try:
+            response = requests.get(preview_url, timeout=30)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Falha ao baixar preview do avatar: {exc}") from exc
+        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        if content_type == "image/png" and asset_path.suffix != ".png":
+            asset_path = asset_path.with_suffix(".png")
+        elif content_type == "image/webp" and asset_path.suffix != ".webp":
+            asset_path = asset_path.with_suffix(".webp")
+        elif content_type in {"image/jpeg", "image/jpg"} and asset_path.suffix not in {".jpg", ".jpeg"}:
+            asset_path = asset_path.with_suffix(".jpg")
+        asset_path.write_bytes(response.content)
+    return {
+        "avatarId": avatar["id"],
+        "avatarName": avatar.get("name") or "Avatar sem nome",
+        "cachedAssetPath": str(asset_path.relative_to(ROOT)),
+    }
+
+
+def _pack_photo_assets() -> list[dict[str, Any]]:
+    """Biblioteca aprovada, com IDs estaveis e metadados de enquadramento."""
+    assets: list[dict[str, Any]] = []
+    for photo_id, meta in PHOTO_LIBRARY.items():
+        path = ROOT / str(meta["file"])
+        if not path.is_file():
+            continue
+        assets.append(
+            {
+                "id": photo_id,
+                "name": meta["name"],
+                "description": meta["description"],
+                "cachedAssetPath": meta["file"],
+                "facePointX": meta["facePointX"],
+                "facePointY": meta["facePointY"],
+                "brightness": meta["brightness"],
+                "url": f"/api/packs/photo-assets/{photo_id}",
+            }
+        )
+    return assets
+
+
+def _pack_photo_asset(asset_id: str) -> dict[str, Any]:
+    asset = photo_asset(asset_id)
+    if not asset or not (ROOT / str(asset["cachedAssetPath"])).is_file():
+        raise HTTPException(status_code=404, detail="Foto do Pack nao encontrada.")
+    return {**asset, "url": f"/api/packs/photo-assets/{asset_id}"}
+
+
+def _pack_design_plan(pack: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schemaVersion": pack.get("schemaVersion") or PACK_SCHEMA_VERSION,
+        "carousel": [
+            {
+                "layoutId": slide.get("layoutId") or slide.get("layout"),
+                "variant": slide.get("variant"),
+                "photoId": (slide.get("fields") or {}).get("photoId"),
+                "headline": slide_headline(slide),
+            }
+            for slide in pack.get("carousel", [])
+            if isinstance(slide, dict)
+        ],
+    }
+
+
+def _normalize_pack_design(pack: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(pack)
+    raw_carousel = normalized.get("carousel")
+    if not isinstance(raw_carousel, list):
+        raw_carousel = normalized.get("slides") if isinstance(normalized.get("slides"), list) else []
+    carousel = [normalize_slide(slide, index) for index, slide in enumerate(raw_carousel) if isinstance(slide, dict)]
+    normalized["schemaVersion"] = normalized.get("schemaVersion") or PACK_SCHEMA_VERSION
+    normalized["designDirection"] = "institute_carousel_v1"
+    normalized["carousel"] = carousel
+    normalized["slides"] = carousel
+    normalized.setdefault("hashtags", [])
+    normalized.setdefault("stories", [])
+    if carousel:
+        first_fields = carousel[0]["fields"]
+        normalized.setdefault(
+            "staticPost",
+            {
+                "headline": first_fields.get("headline", ""),
+                "subline": first_fields.get("subheadline", ""),
+                "layout": "big_statement",
+            },
+        )
+    else:
+        normalized.setdefault("staticPost", {"headline": "", "subline": "", "layout": "big_statement"})
+    normalized.setdefault(
+        "checklist",
+        [
+            "6 slides em sequencia narrativa",
+            "12 layouts de marca disponiveis",
+            "Copy curta e validada por campo",
+            "PNG 1080 x 1350 pronto para Instagram",
+        ],
+    )
+    return normalized
+
+
+def _validate_pack_content_counts(pack: dict[str, Any]) -> None:
+    errors = validate_pack_contract(pack)
+    if errors:
+        raise HTTPException(status_code=502, detail="; ".join(errors))
+
+
+def _attach_pack_metadata(
+    pack: dict[str, Any],
+    *,
+    script_id: str,
+    avatar_asset: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    enriched = _normalize_pack_design(pack)
+    enriched["sourceScriptId"] = script_id
+    if avatar_asset:
+        enriched["sourceAvatarId"] = avatar_asset.get("avatarId")
+        enriched["avatarAsset"] = avatar_asset
+    enriched["designPlan"] = _pack_design_plan(enriched)
+    return enriched
+
+
+def _recent_pack_context(limit: int = 5) -> list[dict[str, Any]]:
+    conn = _ai_db()
+    try:
+        rows = conn.execute(
+            "SELECT pack_json FROM visual_packs ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    context: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            pack = json.loads(str(row["pack_json"]))
+        except json.JSONDecodeError:
+            continue
+        carousel = pack.get("carousel") if isinstance(pack, dict) else None
+        if not isinstance(carousel, list):
+            continue
+        context.append(
+            {
+                "layouts": [
+                    slide.get("layoutId") or slide.get("layout")
+                    for slide in carousel
+                    if isinstance(slide, dict) and (slide.get("layoutId") or slide.get("layout"))
+                ],
+                "headlines": [
+                    slide_headline(slide)
+                    for slide in carousel[:3]
+                    if isinstance(slide, dict)
+                ],
+            }
+        )
+    return context
+
+
+@app.get("/api/packs/photo-assets")
+def list_pack_photo_assets() -> dict:
+    return {"ok": True, "assets": _pack_photo_assets()}
+
+
+@app.get("/api/packs/photo-assets/{asset_id}")
+def get_pack_photo_asset(asset_id: str) -> FileResponse:
+    asset = _pack_photo_asset(asset_id)
+    path = ROOT / asset["cachedAssetPath"]
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Arquivo da foto do Pack nao encontrado.")
+    return FileResponse(path)
 
 
 @app.post("/api/packs/generate")
 def generate_pack(payload: PackIn) -> dict:
-    """Gera o pack de conteudo real via Claude a partir de um roteiro."""
+    """Gera um carrossel de 6 slides com copy curta e layout deterministico."""
+    script_id = payload.scriptId
+    if not script_id:
+        raise HTTPException(status_code=422, detail="Informe scriptId para gerar o Pack visual.")
+    _find_script(script_id)
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise HTTPException(
             status_code=503,
             detail="Defina ANTHROPIC_API_KEY no arquivo .env para gerar com o Claude.",
         )
-    cache_payload = payload.model_dump()
+    recent_context = _recent_pack_context()
+    cache_payload = {
+        **payload.model_dump(),
+        "recentPackContext": recent_context,
+        "schemaVersion": PACK_SCHEMA_VERSION,
+    }
     cached = _ai_cache_get("packs.generate", cache_payload)
     if cached:
+        pack = cached.get("pack") if isinstance(cached, dict) else None
+        if isinstance(pack, dict):
+            pack = _attach_pack_metadata(pack, script_id=script_id)
+            _save_visual_pack(script_id, pack)
+            cached["pack"] = pack
         return cached
     import anthropic
 
@@ -5258,30 +6040,214 @@ def generate_pack(payload: PackIn) -> dict:
         f"Cuidados medicos: {payload.cuidadosMedicos}\n"
         f"Formato do video: {payload.formatoSugerido}"
     )
-    try:
-        client = anthropic.Anthropic()
-        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+    diversity = json.dumps(recent_context, ensure_ascii=False, indent=2)
+    photo_context = json.dumps(
+        [
+            {"id": photo_id, "description": meta["description"]}
+            for photo_id, meta in PHOTO_LIBRARY.items()
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+    layout_context = json.dumps(
+        {
+            "layouts": list(PACK_LAYOUTS),
+            "fallback": list(FALLBACK_LAYOUTS),
+            "hardLimits": {
+                "eyebrow": 22,
+                "headline": "use o limite especifico do layout; nunca mais de 11 palavras",
+                "body": "110 a 200 caracteres conforme o layout",
+                "itemTitle": 24,
+                "itemText": 90,
+                "quote": 90,
+                "cta": 22,
+                "statistic": 6,
+                "disclaimer": 90,
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    base_prompt = (
+        f"ROTEIRO DE ORIGEM:\n{roteiro}\n\n"
+        f"BIBLIOTECA DE FOTOS (use somente estes IDs):\n{photo_context}\n\n"
+        f"VOCABULARIO E LIMITES:\n{layout_context}\n\n"
+        f"ULTIMOS CARROSSEIS — evite repetir a mesma sequencia e os mesmos ganchos:\n{diversity}\n\n"
+        "Entregue uma narrativa ultra eficiente. Cada tela deve ser entendida isoladamente e levar naturalmente a proxima. "
+        "Use fields irrelevantes ao layout como string vazia ou item vazio."
+    )
+
+    def request_pack(client: Any, model: str, correction_errors: list[str] | None = None) -> tuple[Any, dict[str, Any]]:
+        correction = ""
+        if correction_errors:
+            correction = (
+                "\n\nA PRIMEIRA RESPOSTA FOI REJEITADA. Corrija todos os erros abaixo sem alterar o fato central:\n- "
+                + "\n- ".join(correction_errors)
+            )
         message = client.messages.create(
             model=model,
-            max_tokens=2000,
-            system=_PACK_SYSTEM,
+            max_tokens=1400,
+            system=[
+                {
+                    "type": "text",
+                    "text": _PACK_SYSTEM,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             output_config={"format": {"type": "json_schema", "schema": _PACK_SCHEMA}},
-            messages=[{"role": "user", "content": f"ROTEIRO:\n{roteiro}"}],
+            messages=[{"role": "user", "content": base_prompt + correction}],
         )
+        text = "".join(getattr(block, "text", "") for block in message.content)
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail="Resposta do Claude nao veio em JSON valido.") from exc
+        return message, parsed
+
+    try:
+        client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_PACK_MODEL", "claude-haiku-4-5")
+        message, pack = request_pack(client, model)
+        _record_anthropic_usage("packs.generate", model, message)
+        validation_errors = validate_pack_contract(pack)
+        if validation_errors:
+            message, pack = request_pack(client, model, validation_errors)
+            _record_anthropic_usage("packs.generate.repair", model, message)
+            validation_errors = validate_pack_contract(pack)
+        if validation_errors:
+            raise HTTPException(
+                status_code=502,
+                detail="Claude nao respeitou o contrato do carrossel apos uma correcao: "
+                + "; ".join(validation_errors),
+            )
     except anthropic.APIStatusError as exc:
         raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
+    except HTTPException:
+        raise
     except Exception as exc:  # rede / credencial
         raise HTTPException(status_code=502, detail=f"Falha ao chamar o Claude: {exc}")
 
-    texto = "".join(getattr(b, "text", "") for b in message.content)
-    try:
-        pack = json.loads(texto)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="Resposta do Claude nao veio em JSON valido.")
+    pack = _attach_pack_metadata(pack, script_id=script_id)
+    _save_visual_pack(script_id, pack)
     response = {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
-    _record_anthropic_usage("packs.generate", model, message)
     _ai_cache_put("packs.generate", cache_payload, response)
     return response
+
+
+@app.get("/api/packs/{script_id}")
+def get_pack(script_id: str) -> dict:
+    _find_script(script_id)
+    pack = _get_visual_pack(script_id)
+    profile = _production_profile(script_id)
+    outdated = bool(
+        pack
+        and pack.get("schemaVersion") != PACK_SCHEMA_VERSION
+        and profile
+        and pack.get("sourceAvatarId")
+        and profile.get("avatarId")
+        and pack.get("sourceAvatarId") != profile.get("avatarId")
+    )
+    return {"ok": True, "pack": pack, "productionProfile": profile, "outdatedAvatar": outdated}
+
+
+@app.put("/api/packs/{script_id}/carousel/{slide_index}/layout")
+def update_pack_carousel_layout(
+    script_id: str,
+    slide_index: int,
+    payload: PackSlideLayoutIn,
+) -> dict:
+    """Atualiza somente o layout fechado escolhido pelo usuario para um slide."""
+    _find_script(script_id)
+    if payload.layout not in PACK_LAYOUTS:
+        raise HTTPException(status_code=422, detail="Layout de slide invalido.")
+    pack = _get_visual_pack(script_id)
+    if not pack:
+        raise HTTPException(status_code=404, detail="Pack visual nao encontrado para este roteiro.")
+    carousel = pack.get("carousel")
+    if not isinstance(carousel, list) or not 0 <= slide_index < len(carousel):
+        raise HTTPException(status_code=404, detail="Slide do carrossel nao encontrado.")
+    slide = carousel[slide_index]
+    if not isinstance(slide, dict):
+        raise HTTPException(status_code=422, detail="Slide do carrossel invalido.")
+
+    slide["layoutId"] = payload.layout
+    slide["layout"] = payload.layout
+    pack["designPlan"] = _pack_design_plan(pack)
+    _save_visual_pack(script_id, pack)
+    return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
+
+
+@app.put("/api/packs/{script_id}/carousel/{slide_index}/photo")
+def update_pack_carousel_photo(
+    script_id: str,
+    slide_index: int,
+    payload: PackSlidePhotoIn,
+) -> dict:
+    """Associa uma foto local da biblioteca ao slide, sem alterar seu texto ou layout."""
+    _find_script(script_id)
+    pack = _get_visual_pack(script_id)
+    if not pack:
+        raise HTTPException(status_code=404, detail="Pack visual nao encontrado para este roteiro.")
+    carousel = pack.get("carousel")
+    if not isinstance(carousel, list) or not 0 <= slide_index < len(carousel):
+        raise HTTPException(status_code=404, detail="Slide do carrossel nao encontrado.")
+    slide = carousel[slide_index]
+    if not isinstance(slide, dict):
+        raise HTTPException(status_code=422, detail="Slide do carrossel invalido.")
+
+    if payload.photoAssetId:
+        asset = _pack_photo_asset(payload.photoAssetId)
+        slide["photoAsset"] = {
+            "id": asset["id"],
+            "name": asset["name"],
+            "cachedAssetPath": asset["cachedAssetPath"],
+            "facePointX": asset["facePointX"],
+            "facePointY": asset["facePointY"],
+            "brightness": asset["brightness"],
+        }
+        fields = dict(slide.get("fields") or empty_fields())
+        fields["photoId"] = asset["id"]
+        slide["fields"] = fields
+    else:
+        slide.pop("photoAsset", None)
+        fields = dict(slide.get("fields") or empty_fields())
+        fields["photoId"] = ""
+        slide["fields"] = fields
+    pack["designPlan"] = _pack_design_plan(pack)
+    _save_visual_pack(script_id, pack)
+    return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
+
+
+@app.post("/api/packs/{script_id}/refresh-avatar")
+def refresh_pack_avatar(script_id: str) -> dict:
+    _find_script(script_id)
+    pack = _get_visual_pack(script_id)
+    if not pack:
+        raise HTTPException(status_code=404, detail="Pack visual nao encontrado para este roteiro.")
+    if pack.get("schemaVersion") == PACK_SCHEMA_VERSION:
+        return {
+            "ok": True,
+            "pack": pack,
+            "compliance": _pack_compliance(pack),
+            "productionProfile": _production_profile(script_id),
+            "outdatedAvatar": False,
+        }
+    profile = _production_profile(script_id)
+    if not profile or not profile.get("avatarId"):
+        raise HTTPException(
+            status_code=409,
+            detail="Escolha um avatar no Roteiro antes de gerar um Pack visual.",
+        )
+    avatar_asset = _find_pack_avatar_asset(str(profile["avatarId"]))
+    refreshed = _attach_pack_metadata(pack, script_id=script_id, avatar_asset=avatar_asset)
+    _save_visual_pack(script_id, refreshed)
+    return {
+        "ok": True,
+        "pack": refreshed,
+        "compliance": _pack_compliance(refreshed),
+        "productionProfile": profile,
+        "outdatedAvatar": False,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -5291,24 +6257,49 @@ PACKS_DIR = ROOT / "content" / "packs"
 
 
 class PackSlide(BaseModel):
+    layoutId: str | None = None
+    variant: str = "light"
+    fields: dict[str, Any] = Field(default_factory=empty_fields)
+    # Campos legados mantidos para abrir Packs salvos antes do novo renderer.
     title: str = ""
     body: str = ""
+    layout: str = "explainer"
+    visualIntent: str = "educational"
+    highlight: str = ""
+    avatar: dict[str, Any] = {}
+    background: str = "clinical_light"
+    photoAsset: dict[str, Any] | None = None
 
 
 class PackStaticPost(BaseModel):
     headline: str = ""
     subline: str = ""
+    layout: str = "big_statement"
+    visualIntent: str = "educational"
+    avatar: dict[str, Any] = {}
+    background: str = "clinical_light"
+    photoAsset: dict[str, Any] | None = None
 
 
 class PackBody(BaseModel):
-    carousel: list[PackSlide] = []
-    staticPost: PackStaticPost = PackStaticPost()
+    schemaVersion: str = PACK_SCHEMA_VERSION
+    designDirection: str = "institute_carousel_v1"
+    carousel: list[PackSlide] = Field(default_factory=list)
+    slides: list[PackSlide] = Field(default_factory=list)
+    staticPost: PackStaticPost = Field(default_factory=PackStaticPost)
     caption: str = ""
-    stories: list[PackSlide] = []
-    checklist: list[str] = []
+    hashtags: list[str] = Field(default_factory=list)
+    stories: list[PackSlide] = Field(default_factory=list)
+    checklist: list[str] = Field(default_factory=list)
+    sourceScriptId: str | None = None
+    sourceAvatarId: str | None = None
+    avatarAsset: dict[str, Any] | None = None
+    designPlan: dict[str, Any] | None = None
+    updatedAt: str | None = None
 
 
 class PackExportIn(BaseModel):
+    scriptId: str | None = None
     titulo: str
     tema: str = ""
     categoria: str = "educativo"
@@ -5354,6 +6345,16 @@ def export_pack(payload: PackExportIn) -> dict:
     img_root = folder / "1-imagens"
     txt_root = folder / "2-textos"
     pack = payload.pack
+    pack_dump = pack.model_dump()
+    carousel_rows = [normalize_slide(slide, index) for index, slide in enumerate(pack_dump.get("carousel") or pack_dump.get("slides") or [])]
+    is_institute_pack = pack.schemaVersion == PACK_SCHEMA_VERSION
+    if is_institute_pack:
+        contract_errors = validate_pack_contract(
+            {"slides": carousel_rows, "caption": pack.caption, "hashtags": pack.hashtags}
+        )
+        if contract_errors:
+            raise HTTPException(status_code=422, detail="Pack bloqueado antes da exportacao: " + "; ".join(contract_errors))
+    compliance = _pack_compliance(pack_dump)
 
     try:
         folder.mkdir(parents=True, exist_ok=True)
@@ -5363,22 +6364,40 @@ def export_pack(payload: PackExportIn) -> dict:
 
         # --- 2-textos: um arquivo por peca, sem repeticao ---
         carrossel_txt = "\n\n".join(
-            f"── SLIDE {i:02d} ──\n{s.title}\n\n{s.body}"
-            for i, s in enumerate(pack.carousel, start=1)
+            f"── SLIDE {i:02d} · {slide['layoutId']} ──\n{slide_headline(slide)}\n\n{slide['fields'].get('body') or slide['fields'].get('subheadline') or ''}"
+            for i, slide in enumerate(carousel_rows, start=1)
         )
         (txt_root / "carrossel.txt").write_text(carrossel_txt + "\n", encoding="utf-8")
-
-        stories_txt = "\n\n".join(
-            f"── STORY {i:02d} · {s.title} ──\n{s.body}"
-            for i, s in enumerate(pack.stories, start=1)
+        hashtags = " ".join(tag if tag.startswith("#") else f"#{tag}" for tag in pack.hashtags)
+        legenda = pack.caption.strip() + (f"\n\n{hashtags}" if hashtags else "")
+        (txt_root / "legenda.txt").write_text(legenda + "\n", encoding="utf-8")
+        if not is_institute_pack:
+            stories_txt = "\n\n".join(
+                f"── STORY {i:02d} · {s.title} ──\n{s.body}"
+                for i, s in enumerate(pack.stories, start=1)
+            )
+            (txt_root / "stories.txt").write_text(stories_txt + "\n", encoding="utf-8")
+            (txt_root / "post-fixo.txt").write_text(
+                f"{pack.staticPost.headline}\n\n{pack.staticPost.subline}\n", encoding="utf-8"
+            )
+        (folder / "PACK.md").write_text(
+            json.dumps(
+                {
+                    "sourceScriptId": pack.sourceScriptId or payload.scriptId,
+                    "sourceAvatarId": pack.sourceAvatarId,
+                    "avatarAsset": pack.avatarAsset,
+                    "schemaVersion": pack.schemaVersion,
+                    "designDirection": pack.designDirection,
+                    "designPlan": pack.designPlan,
+                    "compliance": compliance,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        (txt_root / "stories.txt").write_text(stories_txt + "\n", encoding="utf-8")
-
-        (txt_root / "legenda.txt").write_text(pack.caption + "\n", encoding="utf-8")
-        (txt_root / "post-fixo.txt").write_text(
-            f"{pack.staticPost.headline}\n\n{pack.staticPost.subline}\n", encoding="utf-8"
-        )
-        textos = 4
+        textos = 3 if is_institute_pack else 5
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Falha ao salvar o pack: {exc}")
 
@@ -5388,14 +6407,14 @@ def export_pack(payload: PackExportIn) -> dict:
     try:
         from api.slides import render_pack_images
 
-        carrossel = [s.model_dump() for s in pack.carousel]
-        if carrossel:
-            carrossel[0]["tema"] = payload.tema or payload.categoria
         resultado = render_pack_images(
             img_root,
-            carrossel,
+            carousel_rows,
             [s.model_dump() for s in pack.stories],
-            pack.staticPost.model_dump(),
+            None if is_institute_pack else pack.staticPost.model_dump(),
+            design_direction=pack.designDirection,
+            avatar_asset=pack.avatarAsset,
+            render_extras=not is_institute_pack,
         )
         imagens = int(resultado.get("images", 0))
     except Exception as exc:  # playwright ausente / falha de render
@@ -5411,21 +6430,14 @@ def export_pack(payload: PackExportIn) -> dict:
         "",
         "## O que postar",
         "",
-        f"**1. Carrossel** — `1-imagens/carrossel/` ({len(pack.carousel)} imagens, 1080×1350)",
+        f"**1. Carrossel** — `1-imagens/carrossel/` ({len(carousel_rows)} imagens, 1080×1350)",
         "   Suba na ordem (carrossel-01 → carrossel-%02d) e use a legenda abaixo."
-        % len(pack.carousel),
+        % len(carousel_rows),
         "",
         "**2. Legenda** — `2-textos/legenda.txt`",
-        "   Copie e cole na publicação. Já vem com hashtags.",
+        "   Copie e cole na publicação. As hashtags ficam no final.",
         "",
-        f"**3. Stories** — `1-imagens/stories/` ({len(pack.stories)} imagens, 1080×1920)",
-        "   Publique no dia seguinte apontando para o post.",
-        "   Na tela de enquete, adicione o sticker de enquete do Instagram.",
-        "",
-        "**4. Post fixo (opcional)** — `1-imagens/post-fixo.png` (1080×1080)",
-        "   Peça única, para reforçar a mensagem principal.",
-        "",
-        f"**5. Vídeo** — gere na aba *Produção de vídeos* do app (formato: {payload.formatoSugerido}).",
+        f"**3. Vídeo** — gere na aba *Produção de vídeos* do app (formato: {payload.formatoSugerido}).",
         "",
         "## Pastas",
         "",
