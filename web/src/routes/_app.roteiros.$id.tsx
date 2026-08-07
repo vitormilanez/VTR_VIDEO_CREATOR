@@ -73,6 +73,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import {
   ArrowLeft,
   Captions,
   CheckCircle2,
@@ -527,6 +533,22 @@ function RoteiroDetalhe() {
     setDraft((d) => (d ? { ...d, [key]: value } : d));
   }
 
+  function setProductionDuration(nextDuration: 10 | 15 | 30 | 45 | 60) {
+    setDurationSeconds(nextDuration);
+    if (nextDuration === 10) {
+      setDisplayText((current) => removeNarrationOutro(current, outroText));
+      setSpokenText((current) => removeNarrationOutro(current, outroText));
+      setNarrationText((current) => removeNarrationOutro(current, outroText));
+      setOutroText("");
+      setSpeechMode("direto");
+    } else if (!outroText.trim()) {
+      setOutroText(DEFAULT_OUTRO);
+      setDisplayText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
+      setSpokenText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
+      setNarrationText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
+    }
+  }
+
   const complianceFields = {
     titulo: draft.titulo,
     hook: draft.hook,
@@ -860,235 +882,203 @@ function RoteiroDetalhe() {
             ) : null}
           </div>
 
-          <NextStepBanner
-            title={
-              latestJob
-                ? "Este roteiro já tem vídeo criado"
-                : dirty
-                  ? "Salvar ajustes e enviar para o HeyGen"
-                  : "Enviar roteiro para produção"
-            }
-            description={
-              latestJob
-                ? "Você pode abrir a produção existente ou gerar uma nova versão se quiser testar outro avatar, duração ou fala."
-                : "Revise a fala final do avatar, confira avatar/voz e envie para criar o vídeo."
-            }
-            actionLabel={
-              latestJob ? "Ver vídeo" : dirty ? "Salvar e enviar" : "Enviar para produção"
-            }
-            onAction={
-              latestJob
-                ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } })
-                : () => void enviarProducao(false)
-            }
-            disabled={!latestJob && Boolean(productionBlockedReason)}
-            disabledReason={!latestJob ? productionBlockedReason || undefined : undefined}
-            meta={
-              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                <span className="rounded-full bg-background px-2.5 py-1">
-                  {narrationWords} palavras
-                </span>
-                <span className="rounded-full bg-background px-2.5 py-1">
-                  ~{estimatedSpeechSeconds}s de fala
-                </span>
-                <span className="rounded-full bg-background px-2.5 py-1">
-                  {dirty ? "Alterações pendentes" : "Roteiro salvo"}
-                </span>
-              </div>
-            }
-          />
-
-          {latestPreview ? (
-            <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4 text-sm">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="font-semibold">
-                    Prévia técnica de avatar e voz — Direct Avatar
+          <div id="roteiro-editar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
+            <SectionHeading
+              index={1}
+              title="Roteiro"
+              description="A fala final aprovada é a fonte do vídeo. O contexto editorial fica recolhido."
+            />
+            <div className="mt-4 space-y-4">
+              <Field label="Título">
+                <Input value={draft.titulo} onChange={(e) => set("titulo", e.target.value)} />
+              </Field>
+              <div>
+                <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <Label htmlFor="display-text">Fala final</Label>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      Texto que o avatar deve falar. Use a grafia correta para legenda e revisão.
+                    </p>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Avalia avatar, voz, ritmo e pronúncia; não representa a composição visual do
-                    Video Agent.
-                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        const restored = buildNarrationText(
+                          draft,
+                          durationSeconds === 10 ? "" : outroText,
+                        );
+                        setNarrationText(restored);
+                        setDisplayText(restored);
+                        setSpokenText(restored);
+                      }}
+                    >
+                      <RotateCcw className="mr-1 h-4 w-4" />
+                      Restaurar
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={naturalizing || displayText.trim().length < 20}
+                      onClick={() => void naturalizarFala()}
+                    >
+                      <Sparkles className="mr-1 h-4 w-4" />
+                      {naturalizing
+                        ? "Ajustando..."
+                        : narrationWords > maximumWordsForDuration(durationSeconds)
+                          ? `Encurtar para ${durationSeconds}s com Claude`
+                          : "Melhorar com Claude"}
+                    </Button>
+                    <Button type="button" size="sm" onClick={salvarRoteiro} disabled={!dirty || saving}>
+                      <Save className="mr-1 h-4 w-4" />
+                      Salvar
+                    </Button>
+                  </div>
                 </div>
-                <Button size="sm" variant="secondary" asChild>
-                  <Link to="/producao/$id" params={{ id: latestPreview.id }}>
-                    Abrir prévia
-                  </Link>
-                </Button>
-              </div>
-            </div>
-          ) : null}
-
-          {captureHook && siblingCaptureScripts.length > 1 ? (
-            <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4">
-              <div className="mb-3 text-sm font-semibold">Compare os 3 roteiros de 10s</div>
-              <div className="grid gap-2 sm:grid-cols-3">
-                {siblingCaptureScripts.map((candidate, index) => (
-                  <Link
-                    key={candidate.id}
-                    to="/roteiros/$id"
-                    params={{ id: candidate.id }}
-                    className={`rounded-lg border p-3 text-sm transition-colors ${
-                      candidate.id === script.id
-                        ? "border-status-info bg-background"
-                        : "bg-background/60 hover:border-status-info/50"
+                <Textarea
+                  id="display-text"
+                  rows={9}
+                  value={displayText}
+                  onChange={(event) => {
+                    setDisplayText(event.target.value);
+                    setNarrationText(event.target.value);
+                  }}
+                  className="leading-6"
+                />
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                  <span>
+                    {narrationWords} palavras · ~{estimatedSpeechSeconds}s
+                  </span>
+                  <span
+                    className={cn(
+                      "rounded-full px-2.5 py-1 font-medium",
+                      blockingQualityIssues.length
+                        ? "bg-status-warn/10 text-status-warn-foreground"
+                        : qualityIssues.length
+                          ? "bg-status-info/10 text-status-info-foreground"
+                          : "bg-status-success/10 text-status-success-foreground",
+                    )}
+                  >
+                    {blockingQualityIssues.length
+                      ? "Revisão necessária"
+                      : qualityIssues.length
+                        ? "Aviso de duração"
+                        : "✓ Conteúdo seguro"}
+                  </span>
+                </div>
+                {qualityIssues.length > 0 ? (
+                  <div
+                    className={`mt-2 rounded-md border px-3 py-2 text-[11px] leading-4 ${
+                      blockingQualityIssues.length
+                        ? "border-status-danger/30 bg-status-danger/10 text-status-danger"
+                        : "border-status-info/30 bg-status-info/10 text-status-info"
                     }`}
                   >
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-status-info">
-                      Teste {index + 1}
+                    <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 font-semibold">
+                        <TriangleAlert className="h-3.5 w-3.5" />
+                        {blockingQualityIssues.length
+                          ? "Revise antes de enviar ao HeyGen"
+                          : "Aviso antes do envio"}
+                      </div>
+                      {qualityIssues.some((issue) => issue.includes("frase final")) ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          className="h-7 px-2 text-[11px]"
+                          onClick={() =>
+                            setDisplayText(normalizeNarrationOutro(displayText, outroText))
+                          }
+                        >
+                          Corrigir encerramento
+                        </Button>
+                      ) : null}
                     </div>
-                    <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
-                      {candidate.textoFalado}
-                    </p>
-                  </Link>
-                ))}
+                    <ul className="space-y-0.5 pl-5">
+                      {qualityIssues.map((issue) => (
+                        <li key={issue} className="list-disc">
+                          {issue}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
               </div>
+              <Accordion type="single" collapsible>
+                <AccordionItem value="context">
+                  <AccordionTrigger>Ver contexto do roteiro</AccordionTrigger>
+                  <AccordionContent>
+                    <div className="grid gap-3 pt-2 md:grid-cols-2">
+                      <Field label="Tema">
+                        <Input value={draft.tema} onChange={(e) => set("tema", e.target.value)} />
+                      </Field>
+                      <Field label="Hook">
+                        <Textarea rows={2} value={draft.hook} onChange={(e) => set("hook", e.target.value)} />
+                      </Field>
+                      <Field label="Dor / conflito">
+                        <Textarea rows={2} value={draft.dorConflito} onChange={(e) => set("dorConflito", e.target.value)} />
+                      </Field>
+                      <Field label="Explicação simples">
+                        <Textarea rows={3} value={draft.explicacaoSimples} onChange={(e) => set("explicacaoSimples", e.target.value)} />
+                      </Field>
+                      <Field label="Virada / provocação">
+                        <Textarea rows={3} value={draft.virada} onChange={(e) => set("virada", e.target.value)} />
+                      </Field>
+                      <Field label="Encerramento">
+                        <Textarea rows={2} value={draft.cta} onChange={(e) => set("cta", e.target.value)} />
+                      </Field>
+                      <Field label="Cuidados médicos">
+                        <Textarea rows={2} value={draft.cuidadosMedicos} onChange={(e) => set("cuidadosMedicos", e.target.value)} />
+                      </Field>
+                      <Field label="Formato">
+                        <Input value={draft.formatoSugerido} onChange={(e) => set("formatoSugerido", e.target.value)} />
+                      </Field>
+                      <Field label="Prioridade">
+                        <Select value={draft.prioridade} onValueChange={(v) => set("prioridade", v as Prioridade)}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="alta">Alta</SelectItem>
+                            <SelectItem value="media">Media</SelectItem>
+                            <SelectItem value="baixa">Baixa</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                      <Field label="Status">
+                        <Select value={draft.status} onValueChange={(v) => set("status", v as ScriptStatus)}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="aguardando_validacao">Rascunho</SelectItem>
+                            <SelectItem value="em_revisao">Em edição</SelectItem>
+                            <SelectItem value="aprovado_clinicamente">Pronto</SelectItem>
+                            <SelectItem value="rejeitado">Arquivado</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
             </div>
-          ) : null}
-
-          {durationSeconds > 15 ? <WorkflowJump /> : null}
-
-          {durationSeconds > 15 ? (
-            <div
-              id="roteiro-editar"
-              className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
-            >
-              <div className="mb-4">
-                <h3 className="font-display text-sm font-semibold">1. Briefing do roteiro</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Campos que orientam a IA e preservam o contexto médico. A fala final fica na etapa
-                  de vídeo.
-                </p>
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                <Field label="Titulo">
-                  <Input value={draft.titulo} onChange={(e) => set("titulo", e.target.value)} />
-                </Field>
-                <Field label="Tema">
-                  <Input value={draft.tema} onChange={(e) => set("tema", e.target.value)} />
-                </Field>
-                <Field label="Hook">
-                  <Textarea
-                    rows={2}
-                    value={draft.hook}
-                    onChange={(e) => set("hook", e.target.value)}
-                  />
-                </Field>
-                <Field label="Dor / conflito">
-                  <Textarea
-                    rows={2}
-                    value={draft.dorConflito}
-                    onChange={(e) => set("dorConflito", e.target.value)}
-                  />
-                </Field>
-                <Field label="Explicacao simples">
-                  <Textarea
-                    rows={3}
-                    value={draft.explicacaoSimples}
-                    onChange={(e) => set("explicacaoSimples", e.target.value)}
-                  />
-                </Field>
-                <Field label="Virada / provocacao">
-                  <Textarea
-                    rows={3}
-                    value={draft.virada}
-                    onChange={(e) => set("virada", e.target.value)}
-                  />
-                </Field>
-                <Field label="CTA">
-                  <Textarea
-                    rows={2}
-                    value={draft.cta}
-                    onChange={(e) => set("cta", e.target.value)}
-                  />
-                </Field>
-                <Field label="Cuidados medicos">
-                  <Textarea
-                    rows={2}
-                    value={draft.cuidadosMedicos}
-                    onChange={(e) => set("cuidadosMedicos", e.target.value)}
-                  />
-                </Field>
-                <Field label="Formato">
-                  <Input
-                    value={draft.formatoSugerido}
-                    onChange={(e) => set("formatoSugerido", e.target.value)}
-                  />
-                </Field>
-                <Field label="Prioridade">
-                  <Select
-                    value={draft.prioridade}
-                    onValueChange={(v) => set("prioridade", v as Prioridade)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="alta">Alta</SelectItem>
-                      <SelectItem value="media">Media</SelectItem>
-                      <SelectItem value="baixa">Baixa</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
-                <Field label="Status">
-                  <Select
-                    value={draft.status}
-                    onValueChange={(v) => set("status", v as ScriptStatus)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="aguardando_validacao">Rascunho</SelectItem>
-                      <SelectItem value="em_revisao">Em edicao</SelectItem>
-                      <SelectItem value="aprovado_clinicamente">Pronto</SelectItem>
-                      <SelectItem value="rejeitado">Arquivado</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
-              </div>
-            </div>
-          ) : null}
+          </div>
 
           <div
             id="roteiro-produzir"
             className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
           >
-            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h3 className="font-display text-sm font-semibold">
-                  {durationSeconds === 10 ? "Hook e vídeo" : "2. Fala final e vídeo"}
-                </h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Edite exatamente o que o avatar vai falar e escolha visual, duração e ritmo.
-                </p>
-              </div>
-              <div
-                className={`rounded-md border px-2.5 py-1.5 text-right text-[11px] ${
-                  blockingQualityIssues.length
-                    ? "border-status-warn/40 bg-status-warn/10 text-status-warn-foreground"
-                    : qualityIssues.length
-                      ? "border-status-info/30 bg-status-info/10 text-status-info-foreground"
-                      : "border-status-success/30 bg-status-success/10 text-status-success-foreground"
-                }`}
-              >
-                <div className="font-semibold">
-                  {blockingQualityIssues.length
-                    ? "Revisão necessária"
-                    : qualityIssues.length
-                      ? "Aviso de duração"
-                      : "Fala pronta"}
-                </div>
-                <div className="mt-0.5 opacity-80">
-                  {narrationWords} palavras · ~{estimatedSpeechSeconds}s
-                </div>
-              </div>
-            </div>
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-3 md:col-span-2">
+            <SectionHeading
+              index={2}
+              title="Produção"
+              description="Escolha quem aparece, a duração e mantenha parâmetros técnicos recolhidos."
+            />
+            <div className="mt-4 space-y-4">
+              <div className="space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div>
-                    <Label className="text-xs">Avatar e posições</Label>
+                    <Label className="text-xs">Avatar</Label>
                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                       Escolha um look único ou duas posições da mesma identidade.
                     </p>
@@ -1190,116 +1180,24 @@ function RoteiroDetalhe() {
                   </p>
                 ) : null}
               </div>
-              <div className="md:col-span-2">
-                <ScenePlanEditor
-                  scriptId={id}
-                  loading={scenePlanLoading}
-                  plan={scenePlan}
-                  fallbackText={displayText || narrationText}
-                  displayText={displayText || narrationText}
-                  spokenText={spokenText}
-                  durationSeconds={durationSeconds}
-                  performancePlan={performancePlan}
-                  availableRoles={sceneRoles}
-                  onSaved={setScenePlan}
-                />
-                <VisualPlanDirector
-                  scriptId={id}
-                  scenePlan={scenePlan}
-                  visualPlan={visualPlan}
-                  loading={visualPlanLoading}
-                  displayText={displayText || narrationText}
-                  spokenText={spokenText}
-                  durationSeconds={durationSeconds}
-                  performancePlan={performancePlan}
-                  onSaved={setVisualPlan}
-                  videoSlideRender={videoSlideRender}
-                  videoSlideRenderLoading={videoSlideRenderLoading}
-                  onRendered={setVideoSlideRender}
-                />
-                <SceneGenerationSummary
-                  plan={sceneGenerationPlan}
-                  loading={sceneGenerationPlanLoading}
-                  durationSeconds={durationSeconds}
-                  avatarMode={avatarMode}
-                />
-              </div>
-              <Field label="Formato do vídeo">
-                <Select
-                  value={orientation}
-                  onValueChange={(value) => setOrientation(value as "portrait" | "landscape")}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="portrait">Vertical - Reels e TikTok</SelectItem>
-                    <SelectItem value="landscape">Horizontal - YouTube</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <div className="space-y-1">
-                <Label className="text-xs">Voz</Label>
-                <div className="flex min-h-14 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
-                  {selectedVoiceName}
-                </div>
-              </div>
-              <Field label="Modo de geração">
-                <Select
-                  value={generationMode}
-                  onValueChange={(value) => setGenerationMode(value as "direct" | "video_agent")}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem
-                      value="direct"
-                      disabled={selectedAvatar?.supportsDirectAvatar === false}
-                    >
-                      Direct Avatar
-                    </SelectItem>
-                    <SelectItem value="video_agent">Video Agent</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
               <div className="space-y-2">
-                <Field label="Duração aproximada">
-                  <Select
-                    value={String(durationSeconds)}
-                    onValueChange={(value) => {
-                      const nextDuration = Number(value) as 10 | 15 | 30 | 45 | 60;
-                      setDurationSeconds(nextDuration);
-                      if (nextDuration === 10) {
-                        setDisplayText((current) => removeNarrationOutro(current, outroText));
-                        setSpokenText((current) => removeNarrationOutro(current, outroText));
-                        setNarrationText((current) => removeNarrationOutro(current, outroText));
-                        setOutroText("");
-                        setSpeechMode("direto");
-                      } else if (!outroText.trim()) {
-                        setOutroText(DEFAULT_OUTRO);
-                        setDisplayText((current) =>
-                          normalizeNarrationOutro(current, DEFAULT_OUTRO),
-                        );
-                        setSpokenText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
-                        setNarrationText((current) =>
-                          normalizeNarrationOutro(current, DEFAULT_OUTRO),
-                        );
-                      }
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="10">10 segundos - impacto rápido</SelectItem>
-                      <SelectItem value="15">15 segundos - ultracurto</SelectItem>
-                      <SelectItem value="30">30 segundos - rápido</SelectItem>
-                      <SelectItem value="45">45 segundos - maior consumo</SelectItem>
-                      <SelectItem value="60">60 segundos - alto consumo</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
+                <Label className="text-xs">Duração</Label>
+                <div className="flex flex-wrap gap-2">
+                  {([10, 15, 30, 45, 60] as const).map((seconds) => (
+                    <button
+                      key={seconds}
+                      type="button"
+                      aria-pressed={durationSeconds === seconds}
+                      onClick={() => setProductionDuration(seconds)}
+                      className={cn(
+                        "h-9 rounded-md border px-3 text-sm font-medium transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        durationSeconds === seconds && "border-primary bg-primary/10 text-primary",
+                      )}
+                    >
+                      {seconds}s
+                    </button>
+                  ))}
+                </div>
                 <p className="text-[11px] leading-4 text-muted-foreground">
                   {durationSeconds <= 15
                     ? "A duração final acompanha a fala, sem silêncio para completar o tempo."
@@ -1307,258 +1205,113 @@ function RoteiroDetalhe() {
                 </p>
                 {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
               </div>
-              <Field label="Jeito de falar">
-                <Select
-                  value={speechMode}
-                  onValueChange={(value) =>
-                    setSpeechMode(value as "natural" | "fiel" | "direto" | "enfatico")
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="natural">Natural - conversa fluida</SelectItem>
-                    <SelectItem value="fiel">Fiel - segue o roteiro</SelectItem>
-                    <SelectItem value="direto">Direto - curto e dinâmico</SelectItem>
-                    <SelectItem value="enfatico">Enfático - mais presença</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label="CTA falado">
-                <Select
-                  value={ctaMode}
-                  onValueChange={(value) =>
-                    setCtaMode(value as "auto" | "manual" | "none" | "visual")
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="auto">Automático com Claude</SelectItem>
-                    <SelectItem value="manual">Manual</SelectItem>
-                    <SelectItem value="none">Sem CTA falado</SelectItem>
-                    <SelectItem value="visual">Apenas visual</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              {generationMode === "direct" ? (
-                <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2.5">
-                  <div className="text-xs font-medium">Clipe contínuo</div>
-                  <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-                    O avatar fala em uma tomada direta para 10, 15, 30, 45 ou 60 segundos.
-                  </p>
-                </div>
-              ) : (
-                <Field label="Direção visual">
-                  <Select
-                    value={styleId || "clean"}
-                    onValueChange={(value) => setStyleId(value === "clean" ? "" : value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="clean">Clean - visual clínico</SelectItem>
-                      {styles
-                        .filter((style) =>
-                          orientation === "portrait"
-                            ? style.aspect_ratio === "9:16"
-                            : style.aspect_ratio === "16:9",
-                        )
-                        .map((style) => (
-                          <SelectItem key={style.style_id} value={style.style_id}>
-                            Cinematic - {style.name}
-                          </SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
-                </Field>
-              )}
-            </div>
-            <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-2">
-              <FriendlySwitch
-                icon={<Captions className="h-4 w-4" />}
-                label="Legendas automáticas"
-                description="Texto em português acompanhando a fala"
-                checked={captions}
-                onCheckedChange={setCaptions}
-              />
-              <FriendlySwitch
-                icon={<Sparkles className="h-4 w-4" />}
-                label="Melhorar pronúncia"
-                description="Ajusta siglas, remédios e números para a voz"
-                checked={optimizePronunciation}
-                onCheckedChange={setOptimizePronunciation}
-              />
-            </div>
-            {ctaMode !== "manual" ? (
-              <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
-                <div className="text-xs font-medium">
-                  {ctaMode === "auto"
-                    ? "CTA definido na naturalização"
-                    : ctaMode === "visual"
-                      ? "CTA apenas visual"
-                      : "Sem CTA falado"}
-                </div>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  O texto falado não recebe a frase final fixa automaticamente.
-                </p>
-              </div>
-            ) : durationSeconds === 10 ? (
-              <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
-                <div className="text-xs font-medium">Sem frase final nos vídeos de 10 segundos</div>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  A fala termina diretamente no ponto de maior impacto do hook.
-                </p>
-              </div>
-            ) : (
-              <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
-                <Label htmlFor="outro-text" className="text-xs font-medium">
-                  Escolha a frase final do vídeo
-                </Label>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  A frase será colocada uma única vez no fim da fala. Você pode editar livremente.
-                </p>
-                <div className="mt-2 flex gap-2">
-                  <Input
-                    id="outro-text"
-                    value={outroText}
-                    onChange={(event) => setOutroText(event.target.value)}
-                    onBlur={() =>
-                      setDisplayText((current) => normalizeNarrationOutro(current, outroText))
-                    }
-                    placeholder="Ex.: Me siga para mais dicas."
-                    maxLength={180}
-                  />
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={() =>
-                      setDisplayText((current) => normalizeNarrationOutro(current, outroText))
-                    }
-                  >
-                    Aplicar
-                  </Button>
-                </div>
-              </div>
-            )}
-            <div className="mt-4 border-t pt-4">
-              <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
-                <div>
-                  <Label htmlFor="display-text">Texto exibido</Label>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    Use a grafia correta aqui. Este texto alimenta interface, legenda e subtitles.
-                  </p>
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      const restored = buildNarrationText(
-                        draft,
-                        durationSeconds === 10 ? "" : outroText,
-                      );
-                      setNarrationText(restored);
-                      setDisplayText(restored);
-                      setSpokenText(restored);
-                    }}
-                  >
-                    <RotateCcw className="mr-1 h-4 w-4" />
-                    Restaurar
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    disabled={naturalizing || displayText.trim().length < 20}
-                    onClick={() => void naturalizarFala()}
-                  >
-                    <Sparkles className="mr-1 h-4 w-4" />
-                    {naturalizing
-                      ? "Ajustando..."
-                      : narrationWords > maximumWordsForDuration(durationSeconds)
-                        ? `Encurtar para ${durationSeconds}s com IA`
-                        : "Deixar natural com IA"}
-                  </Button>
-                </div>
-              </div>
-              <Textarea
-                id="display-text"
-                rows={8}
-                value={displayText}
-                onChange={(event) => {
-                  setDisplayText(event.target.value);
-                  setNarrationText(event.target.value);
-                }}
-                className="leading-6"
-              />
-              <div className="mt-3">
-                <Label htmlFor="spoken-text">Texto enviado à voz</Label>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  Ajustes fonéticos ficam somente aqui, nunca na legenda.
-                </p>
-                <Textarea
-                  id="spoken-text"
-                  rows={5}
-                  value={spokenText}
-                  onChange={(event) => setSpokenText(event.target.value)}
-                  className="mt-2 leading-6"
-                />
-              </div>
-              {performancePlan ? (
-                <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-                  <span className="font-medium text-foreground">Plano de performance:</span>{" "}
-                  {performancePlan.tone} · {performancePlan.pace} · {performancePlan.emotion} ·
-                  speed {performancePlan.recommendedVoiceSpeed}. Pausas e ênfases orientam a edição;
-                  o HeyGen ainda usa o preset de voz selecionado.
-                </div>
-              ) : null}
-              {qualityIssues.length > 0 ? (
-                <div
-                  className={`mt-2 rounded-md border px-3 py-2 text-[11px] leading-4 ${
-                    blockingQualityIssues.length
-                      ? "border-status-danger/30 bg-status-danger/10 text-status-danger"
-                      : "border-status-info/30 bg-status-info/10 text-status-info"
-                  }`}
-                >
-                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 font-semibold">
-                      <TriangleAlert className="h-3.5 w-3.5" />
-                      {blockingQualityIssues.length
-                        ? "Revise antes de enviar ao HeyGen"
-                        : "Aviso antes do envio"}
+              <Accordion type="single" collapsible>
+                <AccordionItem value="advanced-production">
+                  <AccordionTrigger>Configurações avançadas</AccordionTrigger>
+                  <AccordionContent>
+                    <div className="grid gap-3 pt-2 md:grid-cols-2">
+                      <Field label="Orientação">
+                        <Select value={orientation} onValueChange={(value) => setOrientation(value as "portrait" | "landscape")}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="portrait">Vertical - Reels e TikTok</SelectItem>
+                            <SelectItem value="landscape">Horizontal - YouTube</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Voz</Label>
+                        <div className="flex min-h-10 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
+                          {selectedVoiceName}
+                        </div>
+                      </div>
+                      <Field label="Modo de geração">
+                        <Select value={generationMode} onValueChange={(value) => setGenerationMode(value as "direct" | "video_agent")}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="direct" disabled={selectedAvatar?.supportsDirectAvatar === false}>Direct Avatar</SelectItem>
+                            <SelectItem value="video_agent">Video Agent</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                      <Field label="Jeito de falar">
+                        <Select value={speechMode} onValueChange={(value) => setSpeechMode(value as "natural" | "fiel" | "direto" | "enfatico")}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="natural">Natural - conversa fluida</SelectItem>
+                            <SelectItem value="fiel">Fiel - segue o roteiro</SelectItem>
+                            <SelectItem value="direto">Direto - curto e dinâmico</SelectItem>
+                            <SelectItem value="enfatico">Enfático - mais presença</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                      <Field label="Encerramento falado">
+                        <Select value={ctaMode} onValueChange={(value) => setCtaMode(value as "auto" | "manual" | "none" | "visual")}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">Automático com Claude</SelectItem>
+                            <SelectItem value="manual">Manual</SelectItem>
+                            <SelectItem value="none">Sem encerramento falado</SelectItem>
+                            <SelectItem value="visual">Apenas visual</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                      {generationMode === "video_agent" ? (
+                        <Field label="Direção visual HeyGen">
+                          <Select value={styleId || "clean"} onValueChange={(value) => setStyleId(value === "clean" ? "" : value)}>
+                            <SelectTrigger><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="clean">Clean - visual clínico</SelectItem>
+                              {styles
+                                .filter((style) => orientation === "portrait" ? style.aspect_ratio === "9:16" : style.aspect_ratio === "16:9")
+                                .map((style) => (
+                                  <SelectItem key={style.style_id} value={style.style_id}>
+                                    Cinematic - {style.name}
+                                  </SelectItem>
+                                ))}
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                      ) : null}
                     </div>
-                    {qualityIssues.some((issue) => issue.includes("frase final")) ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="secondary"
-                        className="h-7 px-2 text-[11px]"
-                        onClick={() =>
-                          setDisplayText(normalizeNarrationOutro(displayText, outroText))
-                        }
-                      >
-                        Corrigir encerramento
-                      </Button>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <FriendlySwitch icon={<Captions className="h-4 w-4" />} label="Legendas automáticas" description="Texto em português acompanhando a fala" checked={captions} onCheckedChange={setCaptions} />
+                      <FriendlySwitch icon={<Sparkles className="h-4 w-4" />} label="Melhorar pronúncia" description="Ajusta siglas, remédios e números para a voz" checked={optimizePronunciation} onCheckedChange={setOptimizePronunciation} />
+                    </div>
+                    {ctaMode === "manual" && durationSeconds !== 10 ? (
+                      <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
+                        <Label htmlFor="outro-text" className="text-xs font-medium">Frase final do vídeo</Label>
+                        <div className="mt-2 flex gap-2">
+                          <Input
+                            id="outro-text"
+                            value={outroText}
+                            onChange={(event) => setOutroText(event.target.value)}
+                            onBlur={() => setDisplayText((current) => normalizeNarrationOutro(current, outroText))}
+                            placeholder="Ex.: Me siga para mais dicas."
+                            maxLength={180}
+                          />
+                          <Button type="button" variant="secondary" onClick={() => setDisplayText((current) => normalizeNarrationOutro(current, outroText))}>
+                            Aplicar
+                          </Button>
+                        </div>
+                      </div>
                     ) : null}
-                  </div>
-                  <ul className="space-y-0.5 pl-5">
-                    {qualityIssues.map((issue) => (
-                      <li key={issue} className="list-disc">
-                        {issue}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              <div className="mt-2 flex justify-between text-[11px] text-muted-foreground">
-                <span>{narrationWords} palavras</span>
-                <span>Aproximadamente {estimatedSpeechSeconds}s de fala</span>
-              </div>
+                    <div className="mt-3">
+                      <Label htmlFor="spoken-text">Texto enviado à voz</Label>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        Ajustes fonéticos ficam somente aqui, nunca na legenda.
+                      </p>
+                      <Textarea id="spoken-text" rows={5} value={spokenText} onChange={(event) => setSpokenText(event.target.value)} className="mt-2 leading-6" />
+                    </div>
+                    {performancePlan ? (
+                      <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                        <span className="font-medium text-foreground">Plano de performance:</span>{" "}
+                        {performancePlan.tone} · {performancePlan.pace} · {performancePlan.emotion} · speed {performancePlan.recommendedVoiceSpeed}.
+                      </div>
+                    ) : null}
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
               <div className="mt-2 flex items-start gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />A fala
                 exata será validada antes do envio ao HeyGen. Se houver dose, promessa ou instrução
@@ -1568,16 +1321,120 @@ function RoteiroDetalhe() {
           </div>
 
           <div
-            id="roteiro-revisar"
+            id="roteiro-direcao"
             className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
           >
-            <h3 className="mb-2 font-display text-sm font-semibold">3. Revisar com highlight</h3>
-            <div className="space-y-2 text-sm leading-relaxed">
-              <Preview label="Hook" text={draft.hook} palavras={palavras} />
-              <Preview label="Dor / conflito" text={draft.dorConflito} palavras={palavras} />
-              <Preview label="Explicacao" text={draft.explicacaoSimples} palavras={palavras} />
-              <Preview label="Virada" text={draft.virada} palavras={palavras} />
-              <Preview label="CTA" text={draft.cta} palavras={palavras} />
+            <SectionHeading index={3} title="Direção" description="Prepare cenas, looks e apoios visuais sem expor o contrato técnico por padrão." />
+            <div className="mt-4">
+              <ScenePlanEditor
+                scriptId={id}
+                loading={scenePlanLoading}
+                plan={scenePlan}
+                fallbackText={displayText || narrationText}
+                displayText={displayText || narrationText}
+                spokenText={spokenText}
+                durationSeconds={durationSeconds}
+                performancePlan={performancePlan}
+                availableRoles={sceneRoles}
+                onSaved={setScenePlan}
+              />
+              <VisualPlanDirector
+                scriptId={id}
+                scenePlan={scenePlan}
+                visualPlan={visualPlan}
+                loading={visualPlanLoading}
+                displayText={displayText || narrationText}
+                spokenText={spokenText}
+                durationSeconds={durationSeconds}
+                performancePlan={performancePlan}
+                onSaved={setVisualPlan}
+                videoSlideRender={videoSlideRender}
+                videoSlideRenderLoading={videoSlideRenderLoading}
+                onRendered={setVideoSlideRender}
+              />
+              <Accordion type="single" collapsible className="mt-3">
+                <AccordionItem value="scene-generation-details">
+                  <AccordionTrigger>Detalhes técnicos da geração por cena</AccordionTrigger>
+                  <AccordionContent>
+                    <SceneGenerationSummary
+                      plan={sceneGenerationPlan}
+                      loading={sceneGenerationPlanLoading}
+                      durationSeconds={durationSeconds}
+                      avatarMode={avatarMode}
+                    />
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+            </div>
+          </div>
+
+          <div id="roteiro-gerar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
+            <SectionHeading index={4} title="Gerar" description="Confirme que fala, avatar, direção e compliance estão prontos antes de gastar créditos." />
+            <div className="mt-4 space-y-3">
+              <NextStepBanner
+                title={latestJob ? "Este roteiro já tem vídeo criado" : dirty ? "Salvar ajustes e enviar para o HeyGen" : "Enviar roteiro para produção"}
+                description={latestJob ? "Você pode abrir a produção existente ou gerar uma nova versão se quiser testar outro avatar, duração ou fala." : "Revise a fala final do avatar, confira avatar/voz e envie para criar o vídeo."}
+                actionLabel={latestJob ? "Ver vídeo" : dirty ? "Salvar e enviar" : "Enviar para produção"}
+                onAction={latestJob ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } }) : () => void enviarProducao(false)}
+                disabled={!latestJob && Boolean(productionBlockedReason)}
+                disabledReason={!latestJob ? productionBlockedReason || undefined : undefined}
+                meta={
+                  <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <span className="rounded-full bg-background px-2.5 py-1">{narrationWords} palavras</span>
+                    <span className="rounded-full bg-background px-2.5 py-1">~{estimatedSpeechSeconds}s de fala</span>
+                    <span className="rounded-full bg-background px-2.5 py-1">{dirty ? "Alterações pendentes" : "Roteiro salvo"}</span>
+                  </div>
+                }
+              />
+              {latestPreview ? (
+                <div className="rounded-lg border border-status-info/30 bg-status-info/5 p-3 text-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="font-semibold">Prévia técnica de avatar e voz</div>
+                      <p className="mt-1 text-xs text-muted-foreground">Valida voz e enquadramento; não representa toda a composição final.</p>
+                    </div>
+                    <Button size="sm" variant="secondary" asChild>
+                      <Link to="/producao/$id" params={{ id: latestPreview.id }}>Abrir prévia</Link>
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              {captureHook && siblingCaptureScripts.length > 1 ? (
+                <Accordion type="single" collapsible>
+                  <AccordionItem value="capture-variants">
+                    <AccordionTrigger>Comparar roteiros de 10s</AccordionTrigger>
+                    <AccordionContent>
+                      <div className="grid gap-2 pt-2 sm:grid-cols-3">
+                        {siblingCaptureScripts.map((candidate, index) => (
+                          <Link
+                            key={candidate.id}
+                            to="/roteiros/$id"
+                            params={{ id: candidate.id }}
+                            className={`rounded-lg border p-3 text-sm transition-colors ${candidate.id === script.id ? "border-status-info bg-background" : "bg-background/60 hover:border-status-info/50"}`}
+                          >
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-status-info">Teste {index + 1}</div>
+                            <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{candidate.textoFalado}</p>
+                          </Link>
+                        ))}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              ) : null}
+              <Accordion type="single" collapsible>
+                <AccordionItem value="review-highlight">
+                  <AccordionTrigger>Ver revisão com highlight</AccordionTrigger>
+                  <AccordionContent>
+                    <div className="space-y-2 pt-2 text-sm leading-relaxed">
+                      <Preview label="Hook" text={draft.hook} palavras={palavras} />
+                      <Preview label="Dor / conflito" text={draft.dorConflito} palavras={palavras} />
+                      <Preview label="Explicação" text={draft.explicacaoSimples} palavras={palavras} />
+                      <Preview label="Virada" text={draft.virada} palavras={palavras} />
+                      <Preview label="Encerramento" text={draft.cta} palavras={palavras} />
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
             </div>
           </div>
         </div>
@@ -1605,6 +1462,26 @@ function RoteiroDetalhe() {
         </div>
       </div>
     </AppShell>
+  );
+}
+
+function SectionHeading({
+  index,
+  title,
+  description,
+}: {
+  index: number;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div>
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-status-info">
+        {String(index).padStart(2, "0")}
+      </div>
+      <h3 className="font-display text-sm font-semibold">{title}</h3>
+      <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+    </div>
   );
 }
 
@@ -2254,7 +2131,7 @@ const VIDEO_VISUAL_LAYOUT_OPTIONS: Array<{ value: VideoVisualLayout; label: stri
   { value: "doctor_quote", label: "Citação médica" },
   { value: "photo_overlay", label: "Foto com overlay" },
   { value: "do_dont", label: "Faça / não faça" },
-  { value: "cta_photo", label: "CTA com foto" },
+  { value: "cta_photo", label: "Encerramento com foto" },
 ];
 
 function VisualPlanDirector({
@@ -2552,34 +2429,6 @@ function SceneGenerationSummary({
 
 function orientationLabel(orientation: "portrait" | "landscape") {
   return orientation === "portrait" ? "Vertical" : "Horizontal";
-}
-
-function WorkflowJump() {
-  const items = [
-    { href: "#roteiro-editar", label: "Editar", helper: "campos do roteiro" },
-    { href: "#roteiro-produzir", label: "Produzir", helper: "avatar e fala" },
-    { href: "#roteiro-revisar", label: "Revisar", helper: "highlight" },
-    { href: "#roteiro-compliance", label: "Compliance", helper: "bloqueios" },
-  ];
-  return (
-    <nav className="grid gap-2 rounded-xl border bg-muted/25 p-2 sm:grid-cols-4">
-      {items.map((item, index) => (
-        <a
-          key={item.href}
-          href={item.href}
-          className="flex min-h-14 items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-card"
-        >
-          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-background text-xs font-semibold shadow-sm">
-            {index + 1}
-          </span>
-          <span className="min-w-0">
-            <span className="block text-sm font-medium">{item.label}</span>
-            <span className="block truncate text-[11px] text-muted-foreground">{item.helper}</span>
-          </span>
-        </a>
-      ))}
-    </nav>
-  );
 }
 
 function buildScriptTimeline(
