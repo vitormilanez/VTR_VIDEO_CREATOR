@@ -73,6 +73,7 @@ from api.services.video_generation import (
     direct_video_payload,
     normalize_caption_srt,
 )
+from api.services.scene_generation import build_scene_generation_result
 from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
@@ -2362,6 +2363,33 @@ def save_script_scene_plan(script_id: str, payload: ScenePlanIn) -> dict:
     _find_script(script_id)
     plan = _save_scene_plan(script_id, [scene.model_dump() for scene in payload.scenes])
     return {"ok": True, "scenePlan": plan}
+
+
+@app.get("/api/scripts/{script_id}/scene-generation/plan")
+def get_scene_generation_plan(
+    script_id: str,
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural",
+    orientation: Literal["portrait", "landscape"] = "portrait",
+) -> dict:
+    """Expõe o contrato futuro por cena sem criar job ou chamar a HeyGen."""
+    _find_script(script_id)
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de montar a geração por cena.")
+    profile = _production_profile(script_id)
+    if not profile or not profile.get("voiceId"):
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes de montar a geração por cena.")
+    try:
+        result = build_scene_generation_result(
+            script_id=script_id,
+            scene_plan=scene_plan,
+            voice_id=str(profile["voiceId"]),
+            speech_mode=speechMode,
+            orientation=orientation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "generation": result.to_dict()}
 
 
 @app.post("/api/scripts/{script_id}/scene-plan/direct")

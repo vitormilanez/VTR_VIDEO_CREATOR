@@ -462,6 +462,24 @@ export interface ScenePlan {
   updatedAt: string;
 }
 
+export interface SceneGenerationRequest {
+  sceneId: string;
+  order: number;
+  avatarId: string;
+  voiceId: string;
+  spokenText: string;
+  speechMode: "natural" | "fiel" | "direto" | "enfatico";
+  orientation: "portrait" | "landscape";
+}
+
+export interface SceneGenerationResult {
+  scriptId: string;
+  status: "not_submitted";
+  provider: "heygen";
+  sceneCount: number;
+  requests: SceneGenerationRequest[];
+}
+
 export interface SceneDirectionSuggestion {
   text: string;
   lookRole: AvatarSetRole;
@@ -731,6 +749,24 @@ export async function saveScenePlan(
     { method: "PUT", body: JSON.stringify({ scenes }) },
   );
   return response.scenePlan;
+}
+
+export async function fetchSceneGenerationPlan(
+  scriptId: string,
+  options?: {
+    speechMode?: SceneGenerationRequest["speechMode"];
+    orientation?: SceneGenerationRequest["orientation"];
+  },
+): Promise<SceneGenerationResult> {
+  const query = new URLSearchParams({
+    speechMode: options?.speechMode || "natural",
+    orientation: options?.orientation || "portrait",
+  });
+  const response = await requestJson<{ ok: boolean; generation: SceneGenerationResult }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/scene-generation/plan?${query.toString()}`,
+    { method: "GET" },
+  );
+  return response.generation;
 }
 
 export async function generateSceneDirection(
