@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { EmptyState } from "@/components/empty-state";
@@ -17,7 +17,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { familiaLabel, prioridadeLabel, riskLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { exportPack } from "@/lib/api/local";
+import {
+  exportPack,
+  fetchPack,
+  fetchPackPhotoAssets,
+  generatePack,
+  refreshPackAvatar,
+  updatePackCarouselLayout,
+  updatePackCarouselPhoto,
+  type GeneratedPack,
+  type PackLayout,
+  type PackPhotoAsset,
+} from "@/lib/api/local";
 import type { Script } from "@/lib/mock-data";
 import {
   CalendarPlus,
@@ -26,12 +37,16 @@ import {
   FileText,
   FolderDown,
   Loader2,
+  RefreshCcw,
   Image,
+  ImageOff,
   Instagram,
   Layers3,
   MessageSquareText,
   PanelsTopLeft,
+  TriangleAlert,
   Video,
+  Wand2,
 } from "lucide-react";
 
 export const Route = createFileRoute("/_app/packs")({
@@ -49,13 +64,20 @@ export const Route = createFileRoute("/_app/packs")({
   component: PacksPage,
 });
 
-type Pack = {
-  carousel: Array<{ title: string; body: string }>;
-  staticPost: { headline: string; subline: string };
-  caption: string;
-  stories: Array<{ title: string; body: string }>;
-  checklist: string[];
-};
+type Pack = GeneratedPack;
+
+const slideLayoutOptions: Array<{ value: PackLayout; label: string }> = [
+  { value: "hero_avatar", label: "Capa com avatar" },
+  { value: "avatar_split", label: "Avatar dividido" },
+  { value: "big_statement", label: "Frase de impacto" },
+  { value: "myth_fact", label: "Mito ou fato" },
+  { value: "number_stat", label: "Numero ou dado" },
+  { value: "three_points", label: "Tres pontos" },
+  { value: "quote_card", label: "Cartao de citacao" },
+  { value: "editorial_photo", label: "Editorial com foto" },
+  { value: "minimal_explainer", label: "Explicacao minimalista" },
+  { value: "cta_avatar", label: "CTA com avatar" },
+];
 
 function clean(value?: string) {
   return value?.trim() || "";
@@ -218,12 +240,62 @@ function PacksPage() {
   const navigate = useNavigate();
   const [selectedId, setSelectedId] = useState(search.scriptId ?? scripts[0]?.id ?? "");
   const [salvando, setSalvando] = useState(false);
+  const [loadingPack, setLoadingPack] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [refreshingAvatar, setRefreshingAvatar] = useState(false);
+  const [pack, setPack] = useState<Pack | null>(null);
+  const [outdatedAvatar, setOutdatedAvatar] = useState(false);
+  const [currentAvatarName, setCurrentAvatarName] = useState("");
+  const [savingSlideIndex, setSavingSlideIndex] = useState<number | null>(null);
+  const [savingPhotoIndex, setSavingPhotoIndex] = useState<number | null>(null);
+  const [photoAssets, setPhotoAssets] = useState<PackPhotoAsset[]>([]);
 
   const script = scripts.find((item) => item.id === selectedId);
   const mockPack = useMemo(() => (script ? buildPack(script) : null), [script]);
-  const pack: Pack | null = mockPack;
   const videoJob = script ? jobs.find((job) => job.scriptId === script.id) : undefined;
   const scheduledPost = script ? posts.find((post) => post.scriptId === script.id) : undefined;
+
+  useEffect(() => {
+    if (!script) {
+      setPack(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadingPack(true);
+    fetchPack(script.id)
+      .then((data) => {
+        if (cancelled) return;
+        setPack(data.pack);
+        setOutdatedAvatar(data.outdatedAvatar);
+        setCurrentAvatarName(data.pack?.avatarAsset?.avatarName || "");
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPack(null);
+          toast.error(err instanceof Error ? err.message : "Nao foi possivel carregar o Pack.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingPack(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [script]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPackPhotoAssets()
+      .then((assets) => {
+        if (!cancelled) setPhotoAssets(assets);
+      })
+      .catch(() => {
+        if (!cancelled) setPhotoAssets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function selectScript(id: string) {
     setSelectedId(id);
@@ -247,12 +319,134 @@ function PacksPage() {
     }
   }
 
+  async function gerarPackVisual() {
+    if (!script) return;
+    setGenerating(true);
+    const aviso = toast.loading("Gerando Pack visual com Claude...");
+    try {
+      const res = await generatePack(script);
+      setPack(res.pack);
+      setOutdatedAvatar(false);
+      setCurrentAvatarName(res.pack.avatarAsset?.avatarName || "");
+      toast.success("Pack visual gerado.", { id: aviso });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar o Pack.", {
+        id: aviso,
+      });
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function atualizarAvatarDoPack() {
+    if (!script) return;
+    setRefreshingAvatar(true);
+    const aviso = toast.loading("Atualizando Pack com avatar atual...");
+    try {
+      const res = await refreshPackAvatar(script.id);
+      setPack(res.pack);
+      setOutdatedAvatar(false);
+      setCurrentAvatarName(res.pack.avatarAsset?.avatarName || "");
+      toast.success("Pack rerenderizado com o avatar atual, sem chamar Claude.", { id: aviso });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel atualizar o avatar.", {
+        id: aviso,
+      });
+    } finally {
+      setRefreshingAvatar(false);
+    }
+  }
+
+  async function escolherLayoutDoSlide(slideIndex: number, layout: PackLayout) {
+    if (!script || !pack || pack.carousel[slideIndex]?.layout === layout) return;
+    const previousPack = pack;
+    setSavingSlideIndex(slideIndex);
+    setPack({
+      ...pack,
+      carousel: pack.carousel.map((slide, index) =>
+        index === slideIndex ? { ...slide, layout } : slide,
+      ),
+    });
+    try {
+      const res = await updatePackCarouselLayout(script.id, slideIndex, layout);
+      setPack(res.pack);
+      toast.success(`Modelo do slide ${slideIndex + 1} atualizado.`);
+    } catch (err) {
+      setPack(previousPack);
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel atualizar o slide.");
+    } finally {
+      setSavingSlideIndex(null);
+    }
+  }
+
+  async function escolherFotoDoSlide(slideIndex: number, photoAssetId: string | null) {
+    if (!script || !pack || pack.carousel[slideIndex]?.photoAsset?.id === photoAssetId) return;
+    const previousPack = pack;
+    const selectedAsset = photoAssets.find((asset) => asset.id === photoAssetId);
+    setSavingPhotoIndex(slideIndex);
+    setPack({
+      ...pack,
+      carousel: pack.carousel.map((slide, index) =>
+        index === slideIndex
+          ? {
+              ...slide,
+              photoAsset: selectedAsset
+                ? {
+                    id: selectedAsset.id,
+                    name: selectedAsset.name,
+                    cachedAssetPath: selectedAsset.cachedAssetPath,
+                  }
+                : null,
+            }
+          : slide,
+      ),
+    });
+    try {
+      const res = await updatePackCarouselPhoto(script.id, slideIndex, photoAssetId);
+      setPack(res.pack);
+      toast.success(`Foto do slide ${slideIndex + 1} atualizada.`);
+    } catch (err) {
+      setPack(previousPack);
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel atualizar a foto.");
+    } finally {
+      setSavingPhotoIndex(null);
+    }
+  }
+
   return (
     <AppShell
       title="Pack de conteudo"
       actions={
         <>
-          <Button size="sm" onClick={salvarLocal} disabled={!script || salvando}>
+          <Button size="sm" onClick={gerarPackVisual} disabled={!script || generating}>
+            {generating ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Wand2 className="mr-1 h-3.5 w-3.5" />
+            )}
+            {pack ? "Gerar nova versao" : "Gerar Pack"}
+          </Button>
+          {outdatedAvatar ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={atualizarAvatarDoPack}
+              disabled={refreshingAvatar}
+            >
+              {refreshingAvatar ? (
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCcw className="mr-1 h-3.5 w-3.5" />
+              )}
+              Atualizar Pack com avatar atual
+            </Button>
+          ) : null}
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={salvarLocal}
+            disabled={!script || !pack || salvando}
+          >
             {salvando ? (
               <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
             ) : (
@@ -260,7 +454,7 @@ function PacksPage() {
             )}
             Salvar local
           </Button>
-          <Button asChild size="sm" variant="secondary">
+          <Button asChild size="sm" variant="ghost">
             <Link to="/roteiros">
               <FileText className="mr-1 h-3.5 w-3.5" /> Roteiros
             </Link>
@@ -285,16 +479,25 @@ function PacksPage() {
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
               <div className="min-w-0">
                 <div className="mb-3 flex flex-wrap items-center gap-2">
-                  <StatusBadge label="Pack offline" tone="info" />
+                  <StatusBadge label={pack ? "Pack visual" : "Aguardando geracao"} tone="info" />
                   {script ? <StatusBadge {...riskLabel[script.risco]} /> : null}
                   {script ? <StatusBadge {...prioridadeLabel[script.prioridade]} /> : null}
+                  {pack?.designDirection ? (
+                    <StatusBadge label={pack.designDirection.replaceAll("_", " ")} tone="success" />
+                  ) : null}
+                  {outdatedAvatar ? <StatusBadge label="Avatar desatualizado" tone="warn" /> : null}
                 </div>
                 <h2 className="font-display text-xl font-semibold tracking-tight">
                   {script?.titulo ?? "Selecione um roteiro"}
                 </h2>
                 <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-                  Uma ideia vira um conjunto de pecas para revisar, produzir e agendar.
+                  O Pack herda o avatar escolhido no roteiro e usa layouts fechados do renderer.
                 </p>
+                {currentAvatarName ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Avatar do Pack: {currentAvatarName}
+                  </p>
+                ) : null}
               </div>
               <div>
                 <Select value={selectedId} onValueChange={selectScript}>
@@ -313,8 +516,66 @@ function PacksPage() {
             </div>
           </section>
 
+          {script && !pack ? (
+            <EmptyState
+              icon={
+                loadingPack ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <PanelsTopLeft className="h-4 w-4" />
+                )
+              }
+              title={loadingPack ? "Carregando Pack" : "Nenhum Pack visual gerado"}
+              description={
+                loadingPack
+                  ? "Buscando o Pack salvo para este roteiro."
+                  : "Gere o Pack com Claude depois de escolher um avatar na tela do Roteiro."
+              }
+              action={
+                <Button size="sm" onClick={gerarPackVisual} disabled={generating || loadingPack}>
+                  {generating ? (
+                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Wand2 className="mr-1 h-3.5 w-3.5" />
+                  )}
+                  Gerar Pack
+                </Button>
+              }
+            />
+          ) : null}
+
           {script && pack ? (
             <>
+              {outdatedAvatar ? (
+                <div className="rounded-xl border border-status-warn/40 bg-status-warn/10 p-4 text-sm text-status-warn-foreground">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-start gap-2">
+                      <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                      <div>
+                        <div className="font-semibold">Este Pack foi criado com outro avatar.</div>
+                        <p className="mt-1 text-xs opacity-85">
+                          A atualização reutiliza conteúdo, designPlan, textos e layouts; apenas
+                          resolve a nova imagem e renderiza novamente.
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={atualizarAvatarDoPack}
+                      disabled={refreshingAvatar}
+                    >
+                      {refreshingAvatar ? (
+                        <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCcw className="mr-1 h-3.5 w-3.5" />
+                      )}
+                      Atualizar Pack com avatar atual
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
               <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                 <Card>
                   <CardHeader className="pb-2">
@@ -388,12 +649,123 @@ function PacksPage() {
                           <div className="mb-3 text-xs font-semibold uppercase text-muted-foreground">
                             Slide {index + 1}
                           </div>
+                          <div className="mb-3 flex flex-wrap items-center gap-2">
+                            <Select
+                              value={slide.layout ?? "minimal_explainer"}
+                              onValueChange={(value) =>
+                                escolherLayoutDoSlide(index, value as PackLayout)
+                              }
+                              disabled={savingSlideIndex === index}
+                            >
+                              <SelectTrigger
+                                className="h-8 w-[190px] text-xs"
+                                aria-label={`Modelo do slide ${index + 1}`}
+                              >
+                                <SelectValue placeholder="Escolher modelo" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {slideLayoutOptions.map((option) => (
+                                  <SelectItem key={option.value} value={option.value}>
+                                    {option.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            {savingSlideIndex === index ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                            ) : null}
+                            <Select
+                              value={slide.photoAsset?.id ?? "none"}
+                              onValueChange={(value) =>
+                                escolherFotoDoSlide(index, value === "none" ? null : value)
+                              }
+                              disabled={savingPhotoIndex === index || photoAssets.length === 0}
+                            >
+                              <SelectTrigger
+                                className="h-8 w-[148px] text-xs"
+                                aria-label={`Foto do slide ${index + 1}`}
+                              >
+                                <SelectValue placeholder="Foto do acervo" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="none">Sem foto</SelectItem>
+                                {photoAssets.map((asset) => (
+                                  <SelectItem key={asset.id} value={asset.id}>
+                                    {asset.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            {slide.photoAsset ? (
+                              <img
+                                src={
+                                  photoAssets.find((asset) => asset.id === slide.photoAsset?.id)
+                                    ?.url
+                                }
+                                alt="Foto escolhida"
+                                className="h-8 w-8 rounded object-cover"
+                              />
+                            ) : null}
+                            {savingPhotoIndex === index ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                            ) : null}
+                            {slide.avatar?.show ? (
+                              <span className="rounded-md bg-status-info/10 px-2 py-0.5 text-[11px] text-status-info">
+                                avatar
+                              </span>
+                            ) : null}
+                          </div>
+                          {photoAssets.length ? (
+                            <div
+                              className="mb-4 flex max-w-full gap-1 overflow-x-auto pb-1"
+                              aria-label={`Fotos disponíveis para o slide ${index + 1}`}
+                            >
+                              <button
+                                type="button"
+                                title="Sem foto"
+                                aria-label="Sem foto"
+                                onClick={() => escolherFotoDoSlide(index, null)}
+                                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded border transition-colors ${
+                                  !slide.photoAsset
+                                    ? "border-primary bg-primary/10 text-primary"
+                                    : "border-border bg-muted text-muted-foreground hover:border-primary/50"
+                                }`}
+                              >
+                                <ImageOff className="h-3.5 w-3.5" />
+                              </button>
+                              {photoAssets.map((asset) => (
+                                <button
+                                  key={asset.id}
+                                  type="button"
+                                  title={asset.name}
+                                  aria-label={`Usar ${asset.name}`}
+                                  onClick={() => escolherFotoDoSlide(index, asset.id)}
+                                  className={`h-9 w-9 shrink-0 overflow-hidden rounded border transition-colors ${
+                                    slide.photoAsset?.id === asset.id
+                                      ? "border-primary ring-2 ring-primary/30"
+                                      : "border-border hover:border-primary/50"
+                                  }`}
+                                >
+                                  <img
+                                    src={asset.url}
+                                    alt=""
+                                    className="h-full w-full object-cover"
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
                           <h3 className="font-display text-lg font-semibold leading-tight">
                             {slide.title}
                           </h3>
                           <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
                             {slide.body}
                           </p>
+                          {slide.highlight ? (
+                            <p className="mt-3 text-xs font-medium text-foreground">
+                              Destaque: {slide.highlight}
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                     ))}
@@ -471,13 +843,20 @@ function PacksPage() {
 
                 <TabsContent value="stories">
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                    {pack.stories.map((story) => (
+                    {pack.stories.map((story, index) => (
                       <div
-                        key={story.title}
+                        key={`${story.title}-${index}`}
                         className="aspect-[9/16] rounded-lg border bg-card p-4 shadow-sm"
                       >
-                        <div className="text-xs font-semibold uppercase text-muted-foreground">
-                          {story.title}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-semibold uppercase text-muted-foreground">
+                            {story.title}
+                          </div>
+                          {story.layout ? (
+                            <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                              {story.layout}
+                            </span>
+                          ) : null}
                         </div>
                         <p className="mt-8 font-display text-xl font-semibold leading-tight">
                           {story.body}
@@ -493,6 +872,29 @@ function PacksPage() {
                       <CardTitle className="text-sm">Checklist do pacote</CardTitle>
                     </CardHeader>
                     <CardContent>
+                      <div className="mb-4 grid gap-2 text-sm md:grid-cols-3">
+                        <div className="rounded-lg border bg-background p-3">
+                          <div className="text-xs text-muted-foreground">Direcao visual</div>
+                          <div className="mt-1 font-medium">
+                            {pack.designDirection?.replaceAll("_", " ") || "medical modern"}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border bg-background p-3">
+                          <div className="text-xs text-muted-foreground">Avatar herdado</div>
+                          <div className="mt-1 font-medium">
+                            {pack.avatarAsset?.avatarName || pack.sourceAvatarId || "Nao resolvido"}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border bg-background p-3">
+                          <div className="text-xs text-muted-foreground">Layouts usados</div>
+                          <div className="mt-1 font-medium">
+                            {
+                              new Set(pack.carousel.map((slide) => slide.layout).filter(Boolean))
+                                .size
+                            }
+                          </div>
+                        </div>
+                      </div>
                       <div className="grid gap-2 md:grid-cols-2">
                         {pack.checklist.map((item) => (
                           <div key={item} className="flex items-start gap-2 text-sm">

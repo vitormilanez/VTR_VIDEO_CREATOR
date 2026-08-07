@@ -189,7 +189,26 @@ class StableIdTests(unittest.TestCase):
         self.assertEqual(payload["voice_settings"]["locale"], "pt-BR")
         self.assertNotIn("\n", payload["script"])
         self.assertNotIn("duration", payload)
-        self.assertEqual(payload["caption"]["style"], "default")
+        self.assertEqual(payload["caption"]["file_format"], "srt")
+
+    def test_direct_caption_sidecar_avoids_burn_in_for_phonetic_voice_text(self) -> None:
+        payload = server._direct_video_payload(
+            script={"titulo": "GLP-1"},
+            narration_text="Maundjáro pode exigir avaliacao individual.",
+            avatar_id="avatar-1",
+            voice_id="voice-1",
+            orientation="portrait",
+            speech_mode="natural",
+            captions=True,
+            optimize_pronunciation=False,
+            caption_source_matches_spoken=False,
+        )
+        self.assertEqual(payload["caption"]["file_format"], "srt")
+        self.assertFalse(payload["caption"]["burned_in"])
+        self.assertEqual(
+            server.normalize_caption_srt("1\n00:00:00,000 --> 00:00:01,000\nMaundjáro e G L P um\n"),
+            "1 00:00:00,000 --> 00:00:01,000 Mounjaro e GLP-1",
+        )
 
     def test_speech_presets_match_production_modes(self) -> None:
         self.assertEqual(server.SPEECH_PRESETS["natural"]["speed"], 0.96)
@@ -1022,6 +1041,7 @@ class StableIdTests(unittest.TestCase):
             def complete_submission(
                 _payload: server.VideoCreateIn,
                 job: dict,
+                **_kwargs: object,
             ) -> dict:
                 job["submissionState"] = "submitted"
                 job["remoteSessionId"] = "session-1"
@@ -1030,20 +1050,120 @@ class StableIdTests(unittest.TestCase):
 
             payload = server.VideoCreateIn(
                 scriptId="s-1",
-                forceNewVersion=True,
                 idempotencyKey="stable-api-request-123",
+                durationSeconds=10,
+                narrationText="Este conteúdo educativo reforça que decisões de saúde precisam de avaliação individual e conversa cuidadosa com profissional qualificado em cada situação.",
+                outroText="",
             )
             try:
-                with patch.object(
-                    server,
-                    "_create_video_job",
-                    side_effect=complete_submission,
-                ) as submit:
+                with (
+                    patch.object(
+                        server,
+                        "_find_script",
+                        return_value={
+                            "id": "s-1",
+                            "status": "aprovado_clinicamente",
+                            "hook": "Este conteúdo educativo reforça que decisões de saúde precisam de avaliação individual e conversa cuidadosa com profissional qualificado em cada situação.",
+                        },
+                    ),
+                    patch.object(
+                        server,
+                        "_create_video_job",
+                        side_effect=complete_submission,
+                    ) as submit,
+                ):
                     first = server.create_video(payload)
                     second = server.create_video(payload)
                 self.assertEqual(first["job"]["id"], second["job"]["id"])
                 self.assertTrue(second["deduplicated"])
                 self.assertEqual(submit.call_count, 1)
+            finally:
+                server.OPERATIONAL_DB = original_database
+                server.VIDEO_JOBS = original_jobs
+
+    def test_production_configuration_keys_are_stable_and_change_with_content(self) -> None:
+        base = server.VideoCreateIn(
+            scriptId="s-1",
+            avatarId="avatar-a",
+            voiceId="voice-a",
+            durationSeconds=10,
+            narrationText="Conteúdo educativo com avaliação individual e conversa com profissional de saúde.",
+            displayText="Conteúdo educativo com avaliação individual e conversa com profissional de saúde.",
+            spokenText="Conteúdo educativo com avaliação individual e conversa com profissional de saúde.",
+            outroText="",
+        )
+        first = server._production_configuration_key(base, base.displayText or "", base.spokenText or "")
+        second = server._production_configuration_key(base, base.displayText or "", base.spokenText or "")
+        changed_avatar = base.model_copy(update={"avatarId": "avatar-b"})
+        changed_spoken = base.model_copy(update={"spokenText": "Texto diferente para a voz."})
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, server._production_configuration_key(changed_avatar, changed_avatar.displayText or "", changed_avatar.spokenText or ""))
+        self.assertNotEqual(first, server._production_configuration_key(changed_spoken, changed_spoken.displayText or "", changed_spoken.spokenText or ""))
+        with patch.object(server.uuid, "uuid4", side_effect=[type("Uuid", (), {"hex": "a" * 32})(), type("Uuid", (), {"hex": "b" * 32})()]):
+            self.assertNotEqual(
+                f"{first}:version:{server.uuid.uuid4().hex}",
+                f"{first}:version:{server.uuid.uuid4().hex}",
+            )
+
+    def test_spoken_text_compliance_blocks_before_heygen_submission(self) -> None:
+        safe_display = "Este conteúdo é educativo e reforça que decisões de saúde precisam de avaliação individual com profissional qualificado em cada situação."
+        unsafe_spoken_texts = [
+            "Tome 10 mg todos os dias para começar.",
+            "Use este medicamento sem consultar ninguém.",
+            "Este tratamento entrega resultado garantido rapidamente.",
+        ]
+        for unsafe_spoken in unsafe_spoken_texts:
+            payload = server.VideoCreateIn(
+                scriptId="s-safe",
+                avatarId="avatar-1",
+                voiceId="voice-1",
+                durationSeconds=10,
+                narrationText=safe_display,
+                displayText=safe_display,
+                spokenText=unsafe_spoken,
+                outroText="",
+            )
+            with (
+                patch.object(server, "_find_script", return_value={"id": "s-safe", "status": "aprovado_clinicamente"}),
+                patch.object(server, "_run_heygen_json") as heygen_call,
+                patch.object(server, "_private_avatar_library") as avatar_library,
+            ):
+                with self.assertRaises(server.HTTPException) as raised:
+                    server._create_video_job(payload, {"id": "v-safe", "productionSettings": {}})
+            self.assertEqual(raised.exception.status_code, 422)
+            heygen_call.assert_not_called()
+            avatar_library.assert_not_called()
+
+    def test_preview_uses_direct_mode_and_validates_spoken_text_before_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original_database = server.OPERATIONAL_DB
+            original_jobs = server.VIDEO_JOBS
+            server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+            server.VIDEO_JOBS = Path(temporary) / "missing-video-jobs.json"
+            safe_display = "Este conteúdo educativo explica por que avaliação individual importa antes de qualquer decisão sobre tratamento."
+            try:
+                unsafe = server.VideoPreviewCreateIn(
+                    scriptId="s-preview",
+                    avatarId="avatar-1",
+                    voiceId="voice-1",
+                    generationMode="video_agent",
+                    displayText=safe_display,
+                    spokenText="Tome 10 mg agora para garantir resultado.",
+                )
+                with patch.object(server, "_run_heygen_json") as heygen_call:
+                    with self.assertRaises(server.HTTPException):
+                        server.create_video_preview(unsafe)
+                heygen_call.assert_not_called()
+
+                safe = unsafe.model_copy(update={"spokenText": safe_display})
+                with (
+                    patch.object(server, "_find_script", return_value={"id": "s-preview", "status": "aprovado_clinicamente"}),
+                    patch.object(server, "_heygen_cli", return_value="heygen"),
+                    patch.object(server, "_private_avatar_library", return_value=([], [{"id": "avatar-1", "status": "completed"}], False)),
+                    patch.object(server, "_run_heygen_json", return_value={"data": {"video_id": "preview-1"}}),
+                ):
+                    result = server.create_video_preview(safe)
+                self.assertEqual(result["job"]["productionSettings"]["generationMode"], "direct")
             finally:
                 server.OPERATIONAL_DB = original_database
                 server.VIDEO_JOBS = original_jobs

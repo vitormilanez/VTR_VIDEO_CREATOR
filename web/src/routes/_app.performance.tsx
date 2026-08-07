@@ -136,9 +136,7 @@ function PerformancePage() {
 
       {porTema.length > 0 ? (
         <div className="mt-6 rounded-xl border bg-card shadow-sm">
-          <div className="border-b px-4 py-2.5 font-display text-sm font-semibold">
-            Por tema
-          </div>
+          <div className="border-b px-4 py-2.5 font-display text-sm font-semibold">Por tema</div>
           <Table>
             <TableHeader>
               <TableRow>

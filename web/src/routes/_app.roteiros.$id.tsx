@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel, HighlightedText } from "@/components/compliance-panel";
@@ -21,7 +21,9 @@ import {
   createHeyGenVideo,
   fetchHeyGenCatalog,
   fetchHeyGenStyles,
+  fetchProductionProfile,
   naturalizeScript,
+  saveProductionProfile,
   saveScript,
   type HeyGenCatalog,
   type HeyGenStyle,
@@ -113,6 +115,7 @@ function RoteiroDetalhe() {
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [styles, setStyles] = useState<HeyGenStyle[]>([]);
+  const [profileLoaded, setProfileLoaded] = useState(false);
   const [avatarId, setAvatarId] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
@@ -144,6 +147,7 @@ function RoteiroDetalhe() {
     recommendedVoiceSpeed: number;
   } | null>(null);
   const [naturalizing, setNaturalizing] = useState(false);
+  const lastSavedProfileKey = useRef("");
   const existingJobs = useMemo(
     () =>
       videoJobs
@@ -192,17 +196,50 @@ function RoteiroDetalhe() {
     }
   }, [script]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setProfileLoaded(false);
+    setAvatarId("");
+    setVoiceId("");
+    lastSavedProfileKey.current = "";
+    fetchProductionProfile(id)
+      .then((profile) => {
+        if (cancelled) return;
+        if (profile) {
+          setAvatarId(profile.avatarId);
+          setVoiceId(profile.voiceId);
+          setSpeechMode(profile.speechMode);
+          setGenerationMode(profile.generationMode);
+          lastSavedProfileKey.current = [
+            profile.avatarId,
+            profile.voiceId,
+            profile.speechMode,
+            profile.generationMode,
+          ].join("|");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) toast.error("Nao consegui carregar o perfil de producao deste roteiro.");
+      })
+      .finally(() => {
+        if (!cancelled) setProfileLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
   const loadCatalog = (showSuccess = false) => {
     setCatalogLoading(true);
     setCatalogError(null);
     fetchHeyGenCatalog()
       .then((data) => {
         setCatalog(data);
-        const firstAvatar = data.avatars[0];
-        setAvatarId((current) => current || firstAvatar?.id || "");
+        const preferredAvatar =
+          data.avatars.find((avatar) => avatar.id === data.defaultAvatarId) || data.avatars[0];
+        setAvatarId((current) => current || preferredAvatar?.id || "");
         setVoiceId(
-          (current) =>
-            current || firstAvatar?.defaultVoiceId || data.defaultVoiceId || data.voices[0]?.id || "",
+          (current) => current || preferredAvatar?.defaultVoiceId || data.defaultVoiceId || "",
         );
         if (showSuccess) {
           toast.success(
@@ -248,13 +285,47 @@ function RoteiroDetalhe() {
     () => catalog?.avatars.find((avatar) => avatar.id === avatarId),
     [avatarId, catalog?.avatars],
   );
+  const selectedVoiceName = useMemo(
+    () =>
+      catalog?.voices.find((voice) => voice.id === voiceId)?.name ||
+      (selectedAvatar ? `Voz de ${selectedAvatar.name}` : "Voz do avatar"),
+    [catalog?.voices, selectedAvatar, voiceId],
+  );
+
+  function chooseAvatar(nextAvatarId: string) {
+    setAvatarId(nextAvatarId);
+    const nextAvatar = catalog?.avatars.find((avatar) => avatar.id === nextAvatarId);
+    if (nextAvatar?.defaultVoiceId) setVoiceId(nextAvatar.defaultVoiceId);
+  }
 
   useEffect(() => {
-    if (selectedAvatar?.defaultVoiceId) setVoiceId(selectedAvatar.defaultVoiceId);
-    if (selectedAvatar && generationMode === "direct" && selectedAvatar.supportsDirectAvatar === false) {
+    if (
+      selectedAvatar &&
+      generationMode === "direct" &&
+      selectedAvatar.supportsDirectAvatar === false
+    ) {
       setGenerationMode("video_agent");
     }
   }, [generationMode, selectedAvatar]);
+
+  useEffect(() => {
+    if (!profileLoaded || !avatarId || !voiceId) return;
+    const key = [avatarId, voiceId, speechMode, generationMode].join("|");
+    if (key === lastSavedProfileKey.current) return;
+    const timeout = window.setTimeout(() => {
+      saveProductionProfile(id, { avatarId, voiceId, speechMode, generationMode })
+        .then((profile) => {
+          lastSavedProfileKey.current = [
+            profile.avatarId,
+            profile.voiceId,
+            profile.speechMode,
+            profile.generationMode,
+          ].join("|");
+        })
+        .catch(() => toast.error("Nao consegui salvar o perfil de producao."));
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [avatarId, generationMode, id, profileLoaded, speechMode, voiceId]);
 
   if (!script || !draft) {
     return (
@@ -293,13 +364,15 @@ function RoteiroDetalhe() {
       ? 'Conclua a revisão e altere o status do roteiro para "Pronto".'
       : catalogLoading
         ? "Carregando avatares e vozes da HeyGen."
-        : !avatarId
-          ? "Selecione um avatar pronto."
-          : !voiceId
-            ? "Selecione uma voz."
-            : saving
-              ? "Salvando roteiro."
-              : null;
+        : !profileLoaded
+          ? "Carregando perfil de producao do roteiro."
+          : !avatarId
+            ? "Selecione um avatar pronto."
+            : !voiceId
+              ? "Selecione uma voz."
+              : saving
+                ? "Salvando roteiro."
+                : null;
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
@@ -421,14 +494,13 @@ function RoteiroDetalhe() {
         voiceId,
         orientation,
         speechMode,
-        generationMode,
         captions,
         optimizePronunciation,
         displayText,
         spokenText,
       });
       addVideoJob(job);
-      toast.success("Prévia enviada ao HeyGen.");
+      toast.success("Prévia técnica Direct Avatar enviada ao HeyGen.");
       navigate({ to: "/producao/$id", params: { id: job.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar a previa.");
@@ -497,7 +569,7 @@ function RoteiroDetalhe() {
           ) : (
             <>
               <ConfirmAction
-                title="Gerar prévia de 10 segundos?"
+                title="Gerar prévia técnica de 10 segundos?"
                 description="Este clique envia somente o começo naturalizado ao HeyGen e pode consumir créditos da conta."
                 confirmLabel="Gerar prévia"
                 onConfirm={() => void gerarPrevia()}
@@ -606,9 +678,12 @@ function RoteiroDetalhe() {
             <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4 text-sm">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <div className="font-semibold">Prévia de 10 segundos disponível</div>
+                  <div className="font-semibold">
+                    Prévia técnica de avatar e voz — Direct Avatar
+                  </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Esta prévia não substitui o vídeo final.
+                    Avalia avatar, voz, ritmo e pronúncia; não representa a composição visual do
+                    Video Agent.
                   </p>
                 </div>
                 <Button size="sm" variant="secondary" asChild>
@@ -801,7 +876,7 @@ function RoteiroDetalhe() {
                   avatars={catalog?.avatars || []}
                   loading={catalogLoading}
                   error={catalogError}
-                  onChange={setAvatarId}
+                  onChange={chooseAvatar}
                 />
                 {catalogError ? (
                   <p className="text-[11px] leading-4 text-status-danger">
@@ -824,20 +899,12 @@ function RoteiroDetalhe() {
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Voz">
-                <Select value={voiceId} onValueChange={setVoiceId} disabled={catalogLoading}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Selecione a voz" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(catalog?.voices || HEYGEN_CATALOG_FALLBACK_VOICES).map((voice) => (
-                      <SelectItem key={voice.id} value={voice.id}>
-                        {voice.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
+              <div className="space-y-1">
+                <Label className="text-xs">Voz</Label>
+                <div className="flex min-h-14 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
+                  {selectedVoiceName}
+                </div>
+              </div>
               <Field label="Modo de geração">
                 <Select
                   value={generationMode}
@@ -872,9 +939,13 @@ function RoteiroDetalhe() {
                         setSpeechMode("direto");
                       } else if (!outroText.trim()) {
                         setOutroText(DEFAULT_OUTRO);
-                        setDisplayText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
+                        setDisplayText((current) =>
+                          normalizeNarrationOutro(current, DEFAULT_OUTRO),
+                        );
                         setSpokenText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
-                        setNarrationText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
+                        setNarrationText((current) =>
+                          normalizeNarrationOutro(current, DEFAULT_OUTRO),
+                        );
                       }
                     }}
                   >
@@ -1102,8 +1173,9 @@ function RoteiroDetalhe() {
               {performancePlan ? (
                 <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                   <span className="font-medium text-foreground">Plano de performance:</span>{" "}
-                  {performancePlan.tone} · {performancePlan.pace} · {performancePlan.emotion} · speed{" "}
-                  {performancePlan.recommendedVoiceSpeed}
+                  {performancePlan.tone} · {performancePlan.pace} · {performancePlan.emotion} ·
+                  speed {performancePlan.recommendedVoiceSpeed}. Pausas e ênfases orientam a edição;
+                  o HeyGen ainda usa o preset de voz selecionado.
                 </div>
               ) : null}
               {qualityIssues.length > 0 ? (

@@ -7,7 +7,9 @@ export function buildScriptFromIdea(
 ): Script {
   const theme = cleanTheme(idea.titulo);
   const medication = idea.familia === "medicamento" || hasMedicationTerms(theme);
-  const fromArticle = /artigo|cient/i.test(idea.tipo || "") || /estudo|artigo|coorte|observacional/i.test(idea.angulo);
+  const fromArticle =
+    /artigo|cient/i.test(idea.tipo || "") ||
+    /estudo|artigo|coorte|observacional/i.test(idea.angulo);
   const audiencePain = cleanSentence(
     idea.publicoDor || "A pessoa quer uma resposta simples para um tema que depende de contexto.",
   );
@@ -83,7 +85,8 @@ function buildExplanation(
 ): string {
   if (fromArticle) {
     return [
-      angle || "Explique o achado do artigo em linguagem simples, sem transformar associação em promessa.",
+      angle ||
+        "Explique o achado do artigo em linguagem simples, sem transformar associação em promessa.",
       "Traduza o estudo para o público: o que foi observado, em quem foi observado, qual número importa e qual limite precisa aparecer.",
       "A mensagem central deve ser: evidência promissora ajuda a fazer perguntas melhores, mas não substitui consulta, rastreio ou decisão individual.",
     ].join(" ");

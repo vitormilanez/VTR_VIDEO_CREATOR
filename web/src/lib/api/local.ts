@@ -310,11 +310,86 @@ export async function saveCalendarPost(post: CalendarPost): Promise<CalendarPost
 }
 
 export interface GeneratedPack {
-  carousel: Array<{ title: string; body: string }>;
-  staticPost: { headline: string; subline: string };
+  designDirection?: "editorial_premium" | "medical_modern" | "dark_provocative" | "human_lifestyle";
+  carousel: PackSlide[];
+  staticPost: {
+    headline: string;
+    subline: string;
+    layout?: PackLayout;
+    visualIntent?: PackVisualIntent;
+    background?: PackBackground;
+    avatar?: PackAvatarPlan;
+    photoAsset?: Omit<PackPhotoAsset, "url"> | null;
+  };
   caption: string;
-  stories: Array<{ title: string; body: string }>;
+  stories: PackSlide[];
   checklist: string[];
+  sourceScriptId?: string | null;
+  sourceAvatarId?: string | null;
+  avatarAsset?: {
+    avatarId: string;
+    avatarName: string;
+    cachedAssetPath: string;
+  } | null;
+  designPlan?: Record<string, unknown> | null;
+  updatedAt?: string | null;
+}
+
+export type PackLayout =
+  | "hero_avatar"
+  | "avatar_split"
+  | "big_statement"
+  | "myth_fact"
+  | "number_stat"
+  | "three_points"
+  | "quote_card"
+  | "editorial_photo"
+  | "minimal_explainer"
+  | "cta_avatar";
+
+export type PackVisualIntent =
+  "provocative" | "educational" | "reassuring" | "contrast" | "authority" | "action";
+
+export type PackBackground =
+  | "dark_gradient"
+  | "clinical_light"
+  | "teal_soft"
+  | "editorial_ink"
+  | "warm_neutral"
+  | "data_panel";
+
+export interface PackAvatarPlan {
+  show: boolean;
+  position: "left" | "right" | "center" | "none";
+  crop: "head" | "waist" | "full";
+  scale: number;
+}
+
+export interface PackPhotoAsset {
+  id: string;
+  name: string;
+  cachedAssetPath: string;
+  url?: string;
+}
+
+export interface PackSlide {
+  title: string;
+  body: string;
+  layout?: PackLayout;
+  visualIntent?: PackVisualIntent;
+  highlight?: string;
+  avatar?: PackAvatarPlan;
+  background?: PackBackground;
+  photoAsset?: Omit<PackPhotoAsset, "url"> | null;
+}
+
+export interface ProductionProfile {
+  scriptId: string;
+  avatarId: string;
+  voiceId: string;
+  speechMode: "natural" | "fiel" | "direto" | "enfatico";
+  generationMode: "direct" | "video_agent";
+  updatedAt?: string;
 }
 
 export interface PackCompliance {
@@ -330,18 +405,98 @@ export async function generatePack(
   const res = await fetch(`${BASE}/api/packs/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(script),
+    body: JSON.stringify({ ...script, scriptId: script.id }),
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel gerar o pack."));
   return (await res.json()) as { pack: GeneratedPack; compliance: PackCompliance };
 }
 
+export async function fetchPack(scriptId: string): Promise<{
+  pack: GeneratedPack | null;
+  productionProfile: ProductionProfile | null;
+  outdatedAvatar: boolean;
+}> {
+  const response = await requestJson<{
+    ok: boolean;
+    pack: GeneratedPack | null;
+    productionProfile: ProductionProfile | null;
+    outdatedAvatar: boolean;
+  }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
+  return {
+    pack: response.pack,
+    productionProfile: response.productionProfile,
+    outdatedAvatar: response.outdatedAvatar,
+  };
+}
+
+export async function refreshPackAvatar(scriptId: string): Promise<{
+  pack: GeneratedPack;
+  compliance: PackCompliance;
+  productionProfile: ProductionProfile | null;
+  outdatedAvatar: boolean;
+}> {
+  const response = await requestJson<{
+    ok: boolean;
+    pack: GeneratedPack;
+    compliance: PackCompliance;
+    productionProfile: ProductionProfile | null;
+    outdatedAvatar: boolean;
+  }>(`/api/packs/${encodeURIComponent(scriptId)}/refresh-avatar`, { method: "POST" });
+  return response;
+}
+
+/** Salva o modelo visual escolhido manualmente para um slide do carrossel. */
+export async function updatePackCarouselLayout(
+  scriptId: string,
+  slideIndex: number,
+  layout: PackLayout,
+): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+  const response = await requestJson<{
+    ok: boolean;
+    pack: GeneratedPack;
+    compliance: PackCompliance;
+  }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/layout`, {
+    method: "PUT",
+    body: JSON.stringify({ layout }),
+  });
+  return { pack: response.pack, compliance: response.compliance };
+}
+
+export async function fetchPackPhotoAssets(): Promise<PackPhotoAsset[]> {
+  const response = await requestJson<{ ok: boolean; assets: PackPhotoAsset[] }>(
+    "/api/packs/photo-assets",
+    { method: "GET" },
+  );
+  return response.assets;
+}
+
+export async function updatePackCarouselPhoto(
+  scriptId: string,
+  slideIndex: number,
+  photoAssetId: string | null,
+): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+  const response = await requestJson<{
+    ok: boolean;
+    pack: GeneratedPack;
+    compliance: PackCompliance;
+  }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/photo`, {
+    method: "PUT",
+    body: JSON.stringify({ photoAssetId }),
+  });
+  return { pack: response.pack, compliance: response.compliance };
+}
+
 export interface PackForExport {
-  carousel: Array<{ title: string; body: string }>;
-  staticPost: { headline: string; subline: string };
+  designDirection?: GeneratedPack["designDirection"];
+  carousel: PackSlide[];
+  staticPost: GeneratedPack["staticPost"];
   caption: string;
-  stories: Array<{ title: string; body: string }>;
+  stories: PackSlide[];
   checklist: string[];
+  sourceScriptId?: string | null;
+  sourceAvatarId?: string | null;
+  avatarAsset?: GeneratedPack["avatarAsset"];
+  designPlan?: GeneratedPack["designPlan"];
 }
 
 /** Salva o pack completo numa pasta local (content/packs/...). */
@@ -354,6 +509,7 @@ export async function exportPack(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       titulo: script.titulo,
+      scriptId: script.id,
       tema: script.tema,
       categoria: script.categoria,
       risco: script.risco,
@@ -368,6 +524,25 @@ export async function exportPack(
     folder: string;
     files: number;
   };
+}
+
+export async function fetchProductionProfile(scriptId: string): Promise<ProductionProfile | null> {
+  const response = await requestJson<{ ok: boolean; profile: ProductionProfile | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/production-profile`,
+    { method: "GET" },
+  );
+  return response.profile;
+}
+
+export async function saveProductionProfile(
+  scriptId: string,
+  profile: Omit<ProductionProfile, "scriptId" | "updatedAt">,
+): Promise<ProductionProfile> {
+  const response = await requestJson<{ ok: boolean; profile: ProductionProfile }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/production-profile`,
+    { method: "PUT", body: JSON.stringify(profile) },
+  );
+  return response.profile;
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
@@ -532,6 +707,32 @@ export async function refreshHeyGenAvatar(jobId: string): Promise<AvatarJob> {
   return response.job;
 }
 
+function stableProductionKey(
+  prefix: "video" | "preview",
+  configuration: Record<string, unknown>,
+): string {
+  const source = JSON.stringify(
+    Object.keys(configuration)
+      .sort()
+      .reduce<Record<string, unknown>>((result, key) => {
+        result[key] = configuration[key] ?? null;
+        return result;
+      }, {}),
+  );
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${prefix}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function newVersionKey(baseKey: string): string {
+  const nonce =
+    globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${baseKey}:version:${nonce}`;
+}
+
 export async function createHeyGenVideo(
   scriptId: string,
   selection: {
@@ -553,10 +754,13 @@ export async function createHeyGenVideo(
     idempotencyKey?: string;
   },
 ): Promise<VideoJob> {
+  const baseKey = stableProductionKey("video", {
+    scriptId,
+    ...selection,
+    idempotencyKey: undefined,
+  });
   const idempotencyKey =
-    selection.idempotencyKey ??
-    globalThis.crypto?.randomUUID?.() ??
-    `video-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    selection.idempotencyKey ?? (selection.forceNewVersion ? newVersionKey(baseKey) : baseKey);
   const res = await fetch(`${BASE}/api/videos`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -611,7 +815,6 @@ export async function createHeyGenPreview(
     voiceId: string;
     orientation: "portrait" | "landscape";
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
-    generationMode: "direct" | "video_agent";
     captions: boolean;
     optimizePronunciation: boolean;
     displayText: string;
@@ -621,12 +824,16 @@ export async function createHeyGenPreview(
 ): Promise<VideoJob> {
   const idempotencyKey =
     selection.idempotencyKey ??
-    globalThis.crypto?.randomUUID?.() ??
-    `preview-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    stableProductionKey("preview", {
+      scriptId,
+      ...selection,
+      generationMode: "direct",
+      idempotencyKey: undefined,
+    });
   const res = await fetch(`${BASE}/api/videos/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scriptId, ...selection, idempotencyKey }),
+    body: JSON.stringify({ scriptId, ...selection, generationMode: "direct", idempotencyKey }),
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel gerar a previa."));
   return ((await res.json()) as { job: VideoJob }).job;
