@@ -139,6 +139,20 @@ def test_repair_pack_copy_fits_layout_limits_before_validation() -> None:
     repaired = repair_pack_copy(pack)
 
     assert validate_pack_contract(repaired) == []
+
+
+def test_repair_pack_copy_fills_missing_required_scalar_fields() -> None:
+    pack = sample_pack()
+    pack["slides"][6]["fields"]["cta"] = ""
+    pack["slides"][6]["fields"]["disclaimer"] = ""
+    pack["slides"][5]["fields"]["caption"] = ""
+
+    repaired = repair_pack_copy(pack)
+
+    assert repaired["slides"][6]["fields"]["cta"] == "Salve para revisar"
+    assert repaired["slides"][6]["fields"]["disclaimer"] == "Conteudo educativo. Nao substitui avaliacao medica."
+    assert repaired["slides"][5]["fields"]["caption"] == "Dr. Guilherme Martins"
+    assert validate_pack_contract(repaired) == []
     assert len(repaired["slides"][0]["fields"]["eyebrow"]) <= 22
     assert len(repaired["slides"][2]["fields"]["item1"]["text"]) <= 42
     assert len(repaired["slides"][6]["fields"]["body"]) <= 70

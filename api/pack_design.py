@@ -330,6 +330,46 @@ def _repair_layout_semantics(slide: dict[str, Any]) -> None:
 def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[str, Any]) -> None:
     """Preenche blocos obrigatorios ausentes sem inventar dados especificos."""
     item_limits = spec.get("item_max", {})
+    scalar_fallbacks = {
+        "eyebrow": fields.get("headline") or "Contexto",
+        "headline": fields.get("body") or fields.get("quote") or fields.get("cta") or "Informacao importante",
+        "body": fields.get("subheadline") or fields.get("caption") or "Entenda o contexto antes de tomar decisoes.",
+        "statistic": "1",
+        "quote": fields.get("headline") or fields.get("body") or "Cada caso precisa de avaliacao individual.",
+        "caption": fields.get("footer") or "Dr. Guilherme Martins",
+        "cta": "Salve para revisar",
+        "footer": "Arraste para o lado",
+        "disclaimer": "Conteudo educativo. Nao substitui avaliacao medica.",
+        "photoId": "seated-front",
+    }
+    if layout_id == "cta_photo":
+        scalar_fallbacks.update(
+            {
+                "headline": fields.get("headline") or "Converse com seu medico",
+                "body": fields.get("body") or "Use esta informacao para revisar sintomas e duvidas.",
+                "cta": fields.get("cta") or "Salve para revisar",
+                "disclaimer": fields.get("disclaimer") or "Conteudo educativo. Nao substitui avaliacao medica.",
+                "photoId": fields.get("photoId") or "seated-front",
+            }
+        )
+    elif layout_id == "doctor_quote":
+        scalar_fallbacks.update(
+            {
+                "quote": fields.get("quote") or fields.get("headline") or "Acompanhamento individual muda a seguranca do cuidado.",
+                "caption": fields.get("caption") or "Dr. Guilherme Martins",
+            }
+        )
+    elif layout_id in PHOTO_LAYOUTS:
+        scalar_fallbacks["photoId"] = fields.get("photoId") or "seated-front"
+
+    for name in spec.get("required", ()):
+        if name.startswith("item"):
+            continue
+        if _text(fields.get(name)):
+            continue
+        maximum = int(spec.get("max", {}).get(name, 90))
+        fields[name] = _fit_copy(scalar_fallbacks.get(name, ""), maximum)
+
     if layout_id == "myth_fact":
         fallback_items = {
             "item1": {"title": "Mito", "text": fields.get("headline") or "Nem toda afirmação vale para todos."},
