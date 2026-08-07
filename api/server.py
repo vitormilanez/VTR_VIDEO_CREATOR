@@ -73,6 +73,7 @@ from api.services.video_generation import (
     direct_video_payload,
     normalize_caption_srt,
 )
+from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
 from integrations.instagram_client import InstagramClient
@@ -90,6 +91,7 @@ CUT_UPLOADS = ROOT / "data" / "cut_uploads"
 CUT_OUTPUTS = ROOT / "data" / "cuts"
 PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
 PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
+VIDEO_SLIDE_OUTPUTS = ROOT / "data" / "video_slides"
 MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
@@ -190,6 +192,11 @@ def _ai_db() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS visual_plans (
             script_id TEXT PRIMARY KEY,
             plan_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS video_slide_renders (
+            script_id TEXT PRIMARY KEY,
+            render_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS visual_packs (
@@ -535,6 +542,63 @@ def _save_visual_plan(script_id: str, plan: dict[str, Any]) -> dict[str, Any]:
     finally:
         conn.close()
     return plan
+
+
+def _video_slide_output_dir(script_id: str) -> Path:
+    """Mantem os arquivos de preview fora do caminho controlado pelo usuario."""
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", script_id).strip("-") or "script"
+    digest = hashlib.sha256(script_id.encode("utf-8")).hexdigest()[:12]
+    return VIDEO_SLIDE_OUTPUTS / f"{safe_id}-{digest}"
+
+
+def _get_video_slide_render(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT render_json FROM video_slide_renders WHERE script_id = ?",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return json.loads(str(row["render_json"]))
+
+
+def _save_video_slide_render(script_id: str, render: dict[str, Any]) -> dict[str, Any]:
+    saved = {**render, "scriptId": script_id, "updatedAt": _now()}
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO video_slide_renders(script_id, render_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                render_json = excluded.render_json,
+                updated_at = excluded.updated_at
+            """,
+            (script_id, json.dumps(saved, ensure_ascii=False), saved["updatedAt"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return saved
+
+
+def _video_slide_public_render(script_id: str, render: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not render:
+        return None
+    public = {**render, "assets": []}
+    for asset in render.get("assets") or []:
+        item = dict(asset)
+        filename = str(item.get("assetPath") or "")
+        if filename:
+            item["url"] = (
+                f"/api/scripts/{quote(script_id, safe='')}/video-slides/"
+                f"{quote(filename, safe='')}"
+            )
+        public["assets"].append(item)
+    return public
 
 
 def _get_visual_pack(script_id: str) -> dict[str, Any] | None:
@@ -2457,6 +2521,39 @@ def save_script_visual_plan(script_id: str, payload: VisualPlanIn) -> dict:
         "scenes": visual_scenes,
     }
     return {"ok": True, "visualPlan": _save_visual_plan(script_id, plan)}
+
+
+@app.get("/api/scripts/{script_id}/video-slides")
+def get_video_slide_render(script_id: str) -> dict:
+    _find_script(script_id)
+    return {"ok": True, "render": _video_slide_public_render(script_id, _get_video_slide_render(script_id))}
+
+
+@app.post("/api/scripts/{script_id}/video-slides/render")
+def render_script_video_slides(script_id: str) -> dict:
+    """Renderiza previews locais; nao chama Claude, HeyGen ou outro provedor."""
+    _find_script(script_id)
+    visual_plan = _get_visual_plan(script_id)
+    if not visual_plan or not visual_plan.get("scenes"):
+        raise HTTPException(status_code=409, detail="Salve a direção visual antes de renderizar os previews.")
+    try:
+        rendered = render_video_slides(_video_slide_output_dir(script_id), visual_plan)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Não foi possível renderizar os previews locais: {exc}") from exc
+    saved = _save_video_slide_render(script_id, rendered)
+    return {"ok": True, "render": _video_slide_public_render(script_id, saved)}
+
+
+@app.get("/api/scripts/{script_id}/video-slides/{filename}")
+def get_video_slide_file(script_id: str, filename: str) -> FileResponse:
+    _find_script(script_id)
+    if Path(filename).name != filename or not filename.endswith(".png"):
+        raise HTTPException(status_code=404, detail="Preview não encontrado.")
+    path = (_video_slide_output_dir(script_id) / filename).resolve()
+    root = _video_slide_output_dir(script_id).resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="Preview não encontrado.")
+    return FileResponse(path, media_type="image/png")
 
 
 @app.post("/api/scripts/{script_id}/visual-plan/direct")

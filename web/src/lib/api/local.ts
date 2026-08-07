@@ -502,6 +502,28 @@ export interface VisualPlan {
   updatedAt: string;
 }
 
+export interface VideoSlideAsset {
+  sceneId: string;
+  index: number;
+  type: VideoVisualType;
+  layout: VideoVisualLayout | "";
+  headline: string;
+  body: string;
+  assetPath: string | null;
+  url?: string;
+}
+
+export interface VideoSlideRender {
+  scriptId: string;
+  width: number;
+  height: number;
+  scale: number;
+  sceneCount: number;
+  renderedCount: number;
+  assets: VideoSlideAsset[];
+  updatedAt: string;
+}
+
 export interface PackCompliance {
   ok: boolean;
   blocked: boolean;
@@ -771,6 +793,22 @@ export async function saveVisualPlan(scriptId: string, plan: VisualPlan): Promis
     },
   );
   return response.visualPlan;
+}
+
+export async function fetchVideoSlideRender(scriptId: string): Promise<VideoSlideRender | null> {
+  const response = await requestJson<{ ok: boolean; render: VideoSlideRender | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/video-slides`,
+    { method: "GET" },
+  );
+  return response.render;
+}
+
+export async function renderVideoSlides(scriptId: string): Promise<VideoSlideRender> {
+  const response = await requestJson<{ ok: boolean; render: VideoSlideRender }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/video-slides/render`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+  return response.render;
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {

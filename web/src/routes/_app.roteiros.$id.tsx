@@ -25,6 +25,7 @@ import {
   fetchHeyGenStyles,
   fetchProductionProfile,
   fetchScenePlan,
+  fetchVideoSlideRender,
   fetchVisualPlan,
   generateSceneDirection,
   generateVisualDirection,
@@ -33,6 +34,7 @@ import {
   saveProductionProfile,
   saveScript,
   saveScenePlan,
+  renderVideoSlides,
   saveVisualPlan,
   type AvatarSet,
   type AvatarSetLook,
@@ -42,6 +44,7 @@ import {
   type ScenePlan,
   type VideoVisualLayout,
   type VideoVisualType,
+  type VideoSlideRender,
   type VisualPlan,
 } from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
@@ -148,6 +151,8 @@ function RoteiroDetalhe() {
   const [scenePlanLoading, setScenePlanLoading] = useState(true);
   const [visualPlan, setVisualPlan] = useState<VisualPlan | null>(null);
   const [visualPlanLoading, setVisualPlanLoading] = useState(true);
+  const [videoSlideRender, setVideoSlideRender] = useState<VideoSlideRender | null>(null);
+  const [videoSlideRenderLoading, setVideoSlideRenderLoading] = useState(true);
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(
     initialCaptureDuration ?? 45,
@@ -313,6 +318,11 @@ function RoteiroDetalhe() {
       .then((plan) => setVisualPlan(plan))
       .catch(() => toast.error("Nao consegui carregar a direção visual deste roteiro."))
       .finally(() => setVisualPlanLoading(false));
+    setVideoSlideRenderLoading(true);
+    fetchVideoSlideRender(id)
+      .then((render) => setVideoSlideRender(render))
+      .catch(() => toast.error("Nao consegui carregar os previews visuais deste roteiro."))
+      .finally(() => setVideoSlideRenderLoading(false));
     fetchHeyGenStyles("cinematic")
       .then((data) => setStyles(data.styles))
       .catch(() => setStyles([]));
@@ -1145,6 +1155,9 @@ function RoteiroDetalhe() {
                   durationSeconds={durationSeconds}
                   performancePlan={performancePlan}
                   onSaved={setVisualPlan}
+                  videoSlideRender={videoSlideRender}
+                  videoSlideRenderLoading={videoSlideRenderLoading}
+                  onRendered={setVideoSlideRender}
                 />
               </div>
               <Field label="Formato do vídeo">
@@ -2170,6 +2183,9 @@ function VisualPlanDirector({
   durationSeconds,
   performancePlan,
   onSaved,
+  videoSlideRender,
+  videoSlideRenderLoading,
+  onRendered,
 }: {
   scriptId: string;
   scenePlan: ScenePlan | null;
@@ -2180,9 +2196,13 @@ function VisualPlanDirector({
   durationSeconds: 10 | 15 | 30 | 45 | 60;
   performancePlan: { tone: string; pace: string; emotion: string; recommendedVoiceSpeed: number } | null;
   onSaved: (plan: VisualPlan) => void;
+  videoSlideRender: VideoSlideRender | null;
+  videoSlideRenderLoading: boolean;
+  onRendered: (render: VideoSlideRender) => void;
 }) {
   const [directing, setDirecting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [rendering, setRendering] = useState(false);
   const [draftPlan, setDraftPlan] = useState<VisualPlan | null>(visualPlan);
   const [error, setError] = useState<string | null>(null);
 
@@ -2242,6 +2262,27 @@ function VisualPlanDirector({
       setError(saveError instanceof Error ? saveError.message : "Nao foi possivel salvar a direção visual.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function renderPreviews() {
+    if (!draftPlan) {
+      setError("Salve ou gere a direção visual antes de renderizar os previews.");
+      return;
+    }
+    setRendering(true);
+    setError(null);
+    try {
+      const savedPlan = await saveVisualPlan(scriptId, draftPlan);
+      setDraftPlan(savedPlan);
+      onSaved(savedPlan);
+      const rendered = await renderVideoSlides(scriptId);
+      onRendered(rendered);
+      toast.success(`${rendered.renderedCount} preview(s) 1080×1920 renderizado(s).`);
+    } catch (renderError) {
+      setError(renderError instanceof Error ? renderError.message : "Nao foi possivel renderizar os previews.");
+    } finally {
+      setRendering(false);
     }
   }
 
@@ -2319,6 +2360,26 @@ function VisualPlanDirector({
         </div>
       ) : null}
       {draftPlan ? <div className="flex justify-end"><Button type="button" size="sm" onClick={() => void save()} disabled={saving || loading}>{saving ? "Salvando..." : "Salvar direção visual"}</Button></div> : null}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+        <div>
+          <p className="text-xs font-semibold">Preview dos apoios</p>
+          <p className="text-[11px] text-muted-foreground">Renderer local determinístico, sem Claude, HeyGen ou MP4.</p>
+        </div>
+        <Button type="button" size="sm" variant="outline" onClick={() => void renderPreviews()} disabled={rendering || loading || !draftPlan}>
+          <Film className="h-3.5 w-3.5" /> {rendering ? "Renderizando..." : "Renderizar previews 1080×1920"}
+        </Button>
+      </div>
+      {videoSlideRenderLoading ? <p className="text-xs text-muted-foreground">Carregando previews...</p> : null}
+      {videoSlideRender && videoSlideRender.assets.some((asset) => asset.url) ? (
+        <div className="grid gap-2 sm:grid-cols-3">
+          {videoSlideRender.assets.filter((asset) => asset.url).map((asset) => (
+            <a key={asset.sceneId} href={asset.url} target="_blank" rel="noreferrer" className="group overflow-hidden rounded-md border bg-background">
+              <img src={asset.url} alt={`Preview da cena ${asset.index}`} className="aspect-[9/16] w-full object-cover transition group-hover:opacity-80" />
+              <div className="p-2 text-[10px] text-muted-foreground">Cena {asset.index} · {asset.layout || asset.type}</div>
+            </a>
+          ))}
+        </div>
+      ) : null}
       {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
     </div>
   );
