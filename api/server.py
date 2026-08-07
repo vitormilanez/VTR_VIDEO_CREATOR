@@ -4440,6 +4440,9 @@ class PostProductionEventUpdateIn(BaseModel):
     id: str = Field(min_length=1, max_length=160)
     enabled: bool | None = None
     visualText: str | None = Field(default=None, max_length=100)
+    interactionType: Literal[
+        "none", "caption_emphasis", "kinetic_text", "progressive_list", "supporting_visual", "cta_card"
+    ] | None = None
     reviewStatus: Literal["pending", "approved", "rejected"] | None = None
 
 

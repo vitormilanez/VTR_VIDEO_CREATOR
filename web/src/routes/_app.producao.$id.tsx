@@ -23,6 +23,7 @@ import {
   type PostProductionArtifacts,
   type PostProductionJob,
   type PreflightReport,
+  type VisualTimelineEvent,
 } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -630,10 +631,11 @@ function PostProductionPanel({
     try {
       const result = await updatePostProductionEvents(
         job.id,
-        artifacts.timeline.events.map(({ id, enabled, visualText, reviewStatus }) => ({
+        artifacts.timeline.events.map(({ id, enabled, visualText, interactionType, reviewStatus }) => ({
           id,
           enabled,
           visualText,
+          interactionType,
           reviewStatus,
         })),
       );
@@ -690,7 +692,14 @@ function PostProductionPanel({
     }
   }
 
-  function patchEvent(eventId: string, patch: { enabled?: boolean; visualText?: string }) {
+  function patchEvent(
+    eventId: string,
+    patch: {
+      enabled?: boolean;
+      visualText?: string;
+      interactionType?: VisualTimelineEvent["interactionType"];
+    },
+  ) {
     if (!artifacts) return;
     onArtifactsChange({
       ...artifacts,
@@ -730,7 +739,7 @@ function PostProductionPanel({
               <div key={event.id} className="rounded-lg border p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-xs font-semibold">
-                    {event.interactionType.replaceAll("_", " ")} · {(event.startMs / 1000).toFixed(1)}s
+                    {(event.startMs / 1000).toFixed(1)}s–{(event.endMs / 1000).toFixed(1)}s
                   </div>
                   <Switch
                     checked={event.enabled}
@@ -739,6 +748,27 @@ function PostProductionPanel({
                   />
                 </div>
                 <p className="mt-2 text-[11px] text-muted-foreground">{event.spokenText}</p>
+                <Select
+                  value={event.interactionType}
+                  disabled={!event.enabled}
+                  onValueChange={(interactionType) =>
+                    patchEvent(event.id, {
+                      interactionType: interactionType as VisualTimelineEvent["interactionType"],
+                    })
+                  }
+                >
+                  <SelectTrigger className="mt-2" aria-label={`Tipo visual do evento ${event.id}`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="caption_emphasis">Destaque de legenda</SelectItem>
+                    <SelectItem value="kinetic_text">Texto cinético</SelectItem>
+                    <SelectItem value="progressive_list">Lista progressiva</SelectItem>
+                    <SelectItem value="supporting_visual">Imagem de apoio</SelectItem>
+                    <SelectItem value="cta_card">CTA</SelectItem>
+                    <SelectItem value="none">Sem intervenção</SelectItem>
+                  </SelectContent>
+                </Select>
                 <Input
                   className="mt-2"
                   maxLength={100}

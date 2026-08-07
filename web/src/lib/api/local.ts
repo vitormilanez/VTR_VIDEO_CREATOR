@@ -1319,7 +1319,10 @@ export async function fetchPostProductionArtifacts(
 
 export async function updatePostProductionEvents(
   jobId: string,
-  events: Array<Pick<VisualTimelineEvent, "id"> & Partial<Pick<VisualTimelineEvent, "enabled" | "visualText" | "reviewStatus">>>,
+  events: Array<
+    Pick<VisualTimelineEvent, "id"> &
+      Partial<Pick<VisualTimelineEvent, "enabled" | "visualText" | "reviewStatus" | "interactionType">>
+  >,
 ): Promise<{ job: PostProductionJob; timeline: PostProductionArtifacts["timeline"] }> {
   return requestJson(
     `/api/post-production/${encodeURIComponent(jobId)}/events`,

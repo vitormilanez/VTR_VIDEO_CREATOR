@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -23,9 +24,13 @@ from api.services.transcript_service import video_fingerprint
 
 TIMELINE_SCHEMA_VERSION = "visual-timeline-v1"
 MAX_VISUAL_TEXT = 80
-MIN_EVENT_MS = 350
+MIN_EVENT_MS = 1500
 MAX_EVENT_MS = 5500
 MAX_OVERLAP_MS = 250
+_DANGLING_ENDINGS = {
+    "a", "ao", "as", "com", "da", "de", "do", "e", "em", "na", "no",
+    "o", "os", "para", "pela", "pelo", "por", "que", "um", "uma",
+}
 
 
 def _dump(value: Any) -> dict[str, Any]:
@@ -185,6 +190,17 @@ def preflight_timeline(
                 add("event.out_of_bounds", "BLOCKER", "Evento ultrapassa a duração da transcrição.", event_id)
             if len(event.visualText) > MAX_VISUAL_TEXT:
                 add("event.text_length", "WARNING", f"Texto visual excede {MAX_VISUAL_TEXT} caracteres.", event_id)
+            visual_words = re.findall(r"[\wÀ-ÿ]+", event.visualText.casefold())
+            if visual_words and visual_words[-1] in _DANGLING_ENDINGS:
+                add("event.incomplete_text", "WARNING", "Texto visual termina com ideia incompleta.", event_id)
+            if (
+                event.interactionType == InteractionType.progressive_list
+                and "•" not in event.visualText
+                and event.spokenText.count(",") < 2
+                and ";" not in event.spokenText
+                and ":" not in event.spokenText
+            ):
+                add("event.list_structure", "WARNING", "Lista progressiva sem enumeração verificável.", event_id)
             if event.interactionType == InteractionType.supporting_visual and not event.assetRef:
                 add("event.asset", "WARNING", "Apoio visual sem asset usará o fallback.", event_id)
             if event.interactionType == InteractionType.cta_card and not event.visualText.strip():

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from api.job_store import JobStore
 from api.services.transcript_service import normalize_transcript
-from api.services.post_production import render_preview
+from api.services.post_production import caption_cues, render_preview, save_event_updates
 from api.services.visual_planner import deterministic_visual_plan, normalize_visual_plan
 from api.services.visual_timeline import materialize_timeline, preflight_timeline, timeline_is_stale
 
@@ -92,7 +92,7 @@ class PostProductionContractTests(unittest.TestCase):
         self.assertIn("sintomas incomuns", transcript["text"])
         self.assertEqual([word["text"] for word in transcript["words"]][-2:], ["sintomas", "incomuns"])
 
-    def test_plan_range_is_tightened_to_the_visual_words(self) -> None:
+    def test_plan_keeps_context_and_expands_short_event_to_readable_duration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             transcript = self._transcript(Path(temporary))
             plan = {
@@ -116,8 +116,45 @@ class PostProductionContractTests(unittest.TestCase):
             }
             normalized = normalize_visual_plan(transcript, plan)
         event = normalized["events"][0]
-        self.assertEqual((event["startWordIndex"], event["endWordIndex"]), (2, 3))
+        self.assertEqual((event["startWordIndex"], event["endWordIndex"]), (0, 4))
+        self.assertEqual(event["visualText"], "cuidado importante")
         self.assertNotEqual(event["id"], "old-id")
+
+    def test_supporting_visual_gets_generated_asset_and_incomplete_text_is_repaired(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = self._transcript(Path(temporary))
+            plan = {
+                "schemaVersion": "visual-plan-v1",
+                "modelVersion": "fixture",
+                "transcriptVersion": transcript["version"],
+                "videoFingerprint": transcript["videoFingerprint"],
+                "events": [
+                    {
+                        "id": "support",
+                        "startWordIndex": 0,
+                        "endWordIndex": 3,
+                        "interactionType": "supporting_visual",
+                        "visualText": "consulte seu médico e o",
+                        "intensity": "medium",
+                        "reason": "fixture",
+                        "confidence": 1,
+                        "fallback": "caption_emphasis",
+                    }
+                ],
+            }
+            normalized = normalize_visual_plan(transcript, plan)
+        event = normalized["events"][0]
+        self.assertFalse(event["visualText"].endswith(" o"))
+        self.assertTrue(event["assetRef"].startswith("generated:"))
+
+    def test_caption_cues_are_short_word_timed_and_at_most_two_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = self._transcript(Path(temporary))
+        cues = caption_cues(transcript)
+        self.assertGreaterEqual(len(cues), 2)
+        self.assertTrue(all(end - start <= 2800 for start, end, _text in cues))
+        self.assertTrue(all(len(text.split()) <= 7 for _start, _end, text in cues))
+        self.assertTrue(all(len(text.splitlines()) <= 2 for _start, _end, text in cues))
 
     def test_planner_uses_indices_and_backend_derives_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -133,7 +170,8 @@ class PostProductionContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             transcript = self._transcript(root)
-            timeline = materialize_timeline(transcript, deterministic_visual_plan(transcript))
+            plan = normalize_visual_plan(transcript, deterministic_visual_plan(transcript))
+            timeline = materialize_timeline(transcript, plan)
             timeline["events"][0]["startMs"] = 999
             timeline["videoFingerprint"] = "sha256:old"
             report = preflight_timeline(
@@ -152,7 +190,8 @@ class PostProductionContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             transcript = self._transcript(root)
-            timeline = materialize_timeline(transcript, deterministic_visual_plan(transcript))
+            plan = normalize_visual_plan(transcript, deterministic_visual_plan(transcript))
+            timeline = materialize_timeline(transcript, plan)
             timeline["events"][0]["visualText"] = "x" * 81
             report = preflight_timeline(
                 source_path=root / "source.mp4",
@@ -163,6 +202,42 @@ class PostProductionContractTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         warning = next(item for item in report["findings"] if item["code"] == "event.text_length")
         self.assertEqual(warning["classification"], "WARNING")
+
+    def test_preflight_blocks_visual_shorter_than_one_point_five_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = self._transcript(root)
+            timeline = materialize_timeline(transcript, deterministic_visual_plan(transcript))
+            timeline["events"][-1]["enabled"] = False
+            report = preflight_timeline(
+                source_path=root / "source.mp4",
+                transcript_payload=transcript,
+                timeline_payload=timeline,
+                require_render_tools=False,
+            )
+        self.assertFalse(report["ok"])
+        finding = next(item for item in report["findings"] if item["code"] == "event.duration")
+        self.assertEqual(finding["classification"], "BLOCKER")
+
+    def test_individual_event_type_can_be_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "post-production"
+            directory = output_root / "post-1"
+            directory.mkdir(parents=True)
+            transcript = self._transcript(root)
+            timeline = materialize_timeline(transcript, normalize_visual_plan(transcript, deterministic_visual_plan(transcript)))
+            (directory / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+            (directory / "timeline.json").write_text(json.dumps(timeline), encoding="utf-8")
+
+            updated = save_event_updates(
+                output_root=output_root,
+                job_id="post-1",
+                updates=[{"id": timeline["events"][0]["id"], "interactionType": "supporting_visual"}],
+            )
+
+        self.assertEqual(updated["events"][0]["interactionType"], "supporting_visual")
+        self.assertTrue(updated["events"][0]["assetRef"].startswith("generated:"))
 
 
 class JobStorePostProductionMigrationTests(unittest.TestCase):

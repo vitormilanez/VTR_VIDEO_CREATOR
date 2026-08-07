@@ -16,12 +16,15 @@ from api.services.transcript_service import (
     video_fingerprint,
 )
 from api.services.video_composer import CompositionScene, TimedOverlay, compose_video
-from api.services.visual_planner import plan_visuals
+from api.services.visual_planner import generated_asset_ref, plan_visuals
 from api.services.visual_timeline import materialize_timeline, preflight_timeline, timeline_is_stale
 
 
-DESIGN_VERSION = "post-production-design-v1"
-RENDER_CONFIG_VERSION = "vertical-1080x1920-v1"
+DESIGN_VERSION = "post-production-design-v2"
+RENDER_CONFIG_VERSION = "vertical-1080x1920-v2"
+MAX_CAPTION_WORDS = 7
+MAX_CAPTION_CHARS = 44
+MAX_CAPTION_MS = 2800
 
 
 class PostProductionCancelled(RuntimeError):
@@ -169,6 +172,9 @@ def save_event_updates(
 ) -> dict[str, Any]:
     transcript, timeline = load_artifacts(output_root, job_id)
     by_id = {str(update.get("id")): update for update in updates}
+    allowed_interactions = {
+        "none", "caption_emphasis", "kinetic_text", "progressive_list", "supporting_visual", "cta_card",
+    }
     for event in timeline.get("events", []):
         update = by_id.get(str(event.get("id")))
         if not update:
@@ -177,6 +183,13 @@ def save_event_updates(
             event["enabled"] = bool(update["enabled"])
         if "visualText" in update:
             event["visualText"] = str(update["visualText"]).strip()[:100]
+        if update.get("interactionType") in allowed_interactions:
+            event["interactionType"] = update["interactionType"]
+            if update["interactionType"] == "supporting_visual":
+                event["assetRef"] = generated_asset_ref(
+                    str(event.get("spokenText") or ""),
+                    str(event.get("visualText") or ""),
+                )
         if update.get("reviewStatus") in {"pending", "approved", "rejected"}:
             event["reviewStatus"] = update["reviewStatus"]
     # Material source cannot be edited here; stale is recalculated on every save.
@@ -205,12 +218,63 @@ def _srt_timestamp(milliseconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
 
+def _balanced_caption_lines(text: str) -> str:
+    words = text.split()
+    if len(text) <= 28 or len(words) < 3:
+        return text
+    candidates = []
+    for split in range(1, len(words)):
+        left = " ".join(words[:split])
+        right = " ".join(words[split:])
+        candidates.append((max(len(left), len(right)), abs(len(left) - len(right)), left, right))
+    _, _, left, right = min(candidates)
+    return f"{left}\n{right}"
+
+
+def caption_cues(transcript: dict[str, Any]) -> list[tuple[int, int, str]]:
+    """Build short, word-timed cues suitable for a vertical two-line caption."""
+    cues: list[tuple[int, int, str]] = []
+    current: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        text = " ".join(str(word.get("text") or "").strip() for word in current).strip()
+        if text:
+            cues.append(
+                (
+                    int(current[0].get("startMs") or 0),
+                    int(current[-1].get("endMs") or current[0].get("startMs") or 0),
+                    _balanced_caption_lines(text),
+                )
+            )
+        current.clear()
+
+    for raw_word in transcript.get("words", []):
+        word = dict(raw_word)
+        word_text = str(word.get("text") or "").strip()
+        if not word_text:
+            continue
+        if current:
+            candidate = " ".join([*(str(item.get("text") or "") for item in current), word_text])
+            duration = int(word.get("endMs") or 0) - int(current[0].get("startMs") or 0)
+            if (
+                len(current) >= MAX_CAPTION_WORDS
+                or len(candidate) > MAX_CAPTION_CHARS
+                or duration > MAX_CAPTION_MS
+            ):
+                flush()
+        current.append(word)
+        if len(current) >= 3 and word_text.endswith((".", "?", "!")):
+            flush()
+    flush()
+    return cues
+
+
 def _write_captions(transcript: dict[str, Any], destination: Path) -> None:
     blocks = []
-    for index, segment in enumerate(transcript.get("segments", []), start=1):
-        start = int(segment.get("startMs") or 0)
-        end = int(segment.get("endMs") or start + 500)
-        blocks.append(f"{index}\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n{segment.get('text', '')}")
+    for index, (start, end, text) in enumerate(caption_cues(transcript), start=1):
+        blocks.append(f"{index}\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n{text}")
     destination.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
 
 
