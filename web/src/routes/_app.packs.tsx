@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { EmptyState } from "@/components/empty-state";
@@ -15,23 +15,32 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { familiaLabel, prioridadeLabel, riskLabel } from "@/lib/status";
+import { prioridadeLabel, riskLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { exportPack } from "@/lib/api/local";
-import type { Script } from "@/lib/mock-data";
+import {
+  exportPack,
+  fetchPack,
+  fetchPackPhotoAssets,
+  generatePack,
+  updatePackCarouselPhoto,
+  type GeneratedPack,
+  type PackLayout,
+  type PackPhotoAsset,
+  type PackSlide,
+} from "@/lib/api/local";
 import {
   CalendarPlus,
   CheckCircle2,
   Copy,
   FileText,
   FolderDown,
-  Loader2,
-  Image,
-  Instagram,
+  Image as ImageIcon,
   Layers3,
+  Loader2,
   MessageSquareText,
   PanelsTopLeft,
   Video,
+  Wand2,
 } from "lucide-react";
 
 export const Route = createFileRoute("/_app/packs")({
@@ -41,160 +50,94 @@ export const Route = createFileRoute("/_app/packs")({
   head: () => ({
     meta: [
       { title: "Pack de conteudo | AI Video Creator" },
-      { name: "description", content: "Pacote multiformato gerado a partir de um roteiro." },
+      {
+        name: "description",
+        content: "Carrossel editorial de 6 slides criado a partir de um roteiro.",
+      },
       { property: "og:title", content: "Pack de conteudo | AI Video Creator" },
-      { property: "og:description", content: "Video, carrossel, post fixo, legenda e stories." },
+      {
+        property: "og:description",
+        content: "Seis slides, legenda pronta e identidade visual consistente.",
+      },
     ],
   }),
   component: PacksPage,
 });
 
-type Pack = {
-  carousel: Array<{ title: string; body: string }>;
-  staticPost: { headline: string; subline: string };
-  caption: string;
-  stories: Array<{ title: string; body: string }>;
-  checklist: string[];
+type Pack = GeneratedPack;
+
+const layoutLabels: Record<PackLayout, string> = {
+  hero_photo: "Capa com foto",
+  photo_split: "Foto dividida",
+  big_statement: "Frase de impacto",
+  question: "Pergunta",
+  myth_fact: "Mito e fato",
+  number_stat: "Numero ou dado",
+  three_points: "Tres pontos",
+  explainer: "Explicacao em etapas",
+  doctor_quote: "Citacao medica",
+  photo_overlay: "Foto com texto",
+  do_dont: "Evite e prefira",
+  cta_photo: "CTA com foto",
 };
 
-function clean(value?: string) {
-  return value?.trim() || "";
+const photoLayouts = new Set<PackLayout>([
+  "hero_photo",
+  "photo_split",
+  "doctor_quote",
+  "photo_overlay",
+  "cta_photo",
+]);
+
+function layoutOf(slide: PackSlide): PackLayout {
+  return slide.layoutId ?? slide.layout ?? "explainer";
 }
 
-function sentence(value: string, fallback: string) {
-  const text = clean(value);
-  return text.endsWith(".") || text.endsWith("?") || text.endsWith("!")
-    ? text
-    : `${text || fallback}.`;
-}
-
-/** Remove pontuacao final para usar como titulo/headline. */
-function stripEnd(value: string) {
-  return clean(value).replace(/[\s.?!:;,]+$/, "");
-}
-
-/** Titulo contextual do slide de reforco, conforme a familia do roteiro. */
-function reinforcementSlide(script: Script): { title: string; body: string } {
-  const map: Record<string, { title: string; body: string }> = {
-    medicamento: {
-      title: "Não existe atalho mágico",
-      body: "Medicamento pode ajudar, mas indicação, acompanhamento e mudança de hábito andam juntos. Cada caso é um caso.",
-    },
-    comportamento: {
-      title: "Não é falta de força de vontade",
-      body: "Comportamento alimentar envolve sono, rotina, emoções e contexto. Julgar só atrapalha o cuidado.",
-    },
-    metabolismo: {
-      title: "Seu corpo dá sinais",
-      body: "O metabolismo responde a vários fatores. Entender os sinais ajuda a buscar avaliação no momento certo.",
-    },
-    obesidade: {
-      title: "Obesidade é multifatorial",
-      body: "Genética, ambiente, hormônios e rotina influenciam o peso. Cuidado de verdade começa sem culpa.",
-    },
-    educativo: {
-      title: "Cada pessoa é única",
-      body: "O que funciona para um pode não servir para outro. Por isso a avaliação individual importa tanto.",
-    },
-  };
-  return map[script.categoria] ?? map.educativo;
-}
-
-/** Hashtags derivadas da familia e do tema do roteiro. */
-function hashtags(script: Script): string {
-  const base = ["saudemetabolica", "educacaoemsaude", "drguilherme"];
-  const porFamilia: Record<string, string[]> = {
-    medicamento: ["glp1", "emagrecimentocomsaude", "obesidade"],
-    comportamento: ["comportamentoalimentar", "habitossaudaveis"],
-    metabolismo: ["metabolismo", "resistenciainsulinica"],
-    obesidade: ["obesidade", "saudesemjulgamento"],
-    educativo: ["saude", "bemestar"],
-  };
-  const blob = `${script.tema} ${script.titulo}`.toLowerCase();
-  const porTema = [
-    ["mounjaro", "mounjaro"],
-    ["ozempic", "ozempic"],
-    ["wegovy", "wegovy"],
-    ["glp", "glp1"],
-    ["jejum", "jejumintermitente"],
-    ["compuls", "compulsaoalimentar"],
-    ["insulin", "resistenciainsulinica"],
-  ]
-    .filter(([k]) => blob.includes(k))
-    .map(([, tag]) => tag);
-
-  const tags = [...new Set([...base, ...(porFamilia[script.categoria] ?? []), ...porTema])];
-  return tags.map((t) => `#${t}`).join(" ");
-}
-
-function buildPack(script: Script): Pack {
-  const tema = clean(script.tema) || clean(script.titulo) || "tema principal";
-  const hook = sentence(script.hook, `Entenda um ponto importante sobre ${tema}`);
-  const dor = sentence(
-    script.dorConflito,
-    "Muita gente sente isso e acha que o problema é só com ela",
+function headlineOf(slide: PackSlide): string {
+  const fields = slide.fields;
+  return (
+    fields?.headline || fields?.quote || fields?.item1?.text || slide.title || "Texto do slide"
   );
-  const explicacao = sentence(
-    script.explicacaoSimples,
-    "A explicação precisa ser educativa, simples e individualizada",
-  );
-  const virada = sentence(script.virada, "A virada é trocar promessa por clareza e cuidado real");
-  const cta = sentence(script.cta, "Procure avaliação individual com um profissional de saúde");
-  const cuidados = sentence(
-    script.cuidadosMedicos,
-    "Conteúdo educativo: sem dose, sem prescrição e sem promessa de resultado",
-  );
-  const reforco = reinforcementSlide(script);
+}
 
-  const carousel: Pack["carousel"] = [
-    { title: stripEnd(hook), body: "Arraste para entender por que isso importa. 👉" },
-    { title: "A real situação", body: dor },
-    { title: "O que quase ninguém explica", body: explicacao },
-    { title: "A virada de chave", body: virada },
-    { title: "Importante saber", body: cuidados },
-    reforco,
-    { title: "Seu próximo passo", body: `${cta} Salve este post e envie para quem precisa. 💙` },
-  ];
+function bodyOf(slide: PackSlide): string {
+  const fields = slide.fields;
+  return fields?.body || fields?.subheadline || slide.body || "";
+}
 
-  const caption = [
-    hook,
-    "",
-    dor,
-    explicacao,
-    "",
-    `👉 ${virada}`,
-    "",
-    `⚠️ ${cuidados}`,
-    "",
-    cta,
-    "",
-    "Conteúdo educativo. Não substitui avaliação médica individual.",
-    "",
-    hashtags(script),
-  ].join("\n");
+function photoIdOf(slide: PackSlide): string {
+  return slide.fields?.photoId || slide.photoAsset?.id || "";
+}
 
-  return {
-    carousel,
-    staticPost: {
-      headline: stripEnd(script.titulo || hook),
-      subline: stripEnd(virada),
-    },
-    caption,
-    stories: [
-      { title: "Capa", body: hook },
-      { title: "A dor real", body: dor },
-      { title: "Enquete", body: "Você já passou por isso? Responda: 👉 Sim / Ainda não" },
-      { title: "Em 1 frase", body: explicacao },
-      { title: "Próximo passo", body: `${cta} Toque no link da bio.` },
-    ],
-    checklist: [
-      `Carrossel com ${carousel.length} slides educativos`,
-      "Post fixo com frase central de impacto",
-      "Legenda pronta com hashtags e aviso de compliance",
-      "5 stories com enquete e CTA",
-      "Tudo alinhado ao roteiro e às regras de compliance médico",
-    ],
-  };
+function detailLines(slide: PackSlide): string[] {
+  const fields = slide.fields;
+  if (!fields) return slide.highlight ? [slide.highlight] : [];
+  const lines: string[] = [];
+  if (fields.statistic) lines.push(fields.statistic);
+  for (const item of [fields.item1, fields.item2, fields.item3]) {
+    const line = [item?.title, item?.text].filter(Boolean).join(": ");
+    if (line) lines.push(line);
+  }
+  if (fields.caption && fields.caption !== bodyOf(slide)) lines.push(fields.caption);
+  if (fields.cta) lines.push(fields.cta);
+  if (fields.disclaimer) lines.push(fields.disclaimer);
+  return lines;
+}
+
+function captionOf(pack: Pack): string {
+  const tags = (pack.hashtags ?? []).map((tag) => (tag.startsWith("#") ? tag : `#${tag}`));
+  const suffix = tags.join(" ");
+  if (!suffix || pack.caption.includes(tags[0] ?? "\u0000")) return pack.caption;
+  return `${pack.caption.trim()}\n\n${suffix}`;
+}
+
+function formatCarousel(slides: Pack["carousel"]): string {
+  return slides
+    .map((slide, index) => {
+      const content = [headlineOf(slide), bodyOf(slide), ...detailLines(slide)].filter(Boolean);
+      return `Slide ${index + 1} — ${layoutLabels[layoutOf(slide)]}\n${content.join("\n")}`;
+    })
+    .join("\n\n");
 }
 
 function copyText(label: string, text: string) {
@@ -204,46 +147,139 @@ function copyText(label: string, text: string) {
     .catch(() => toast.error("Nao consegui copiar automaticamente."));
 }
 
-function formatCarousel(slides: Pack["carousel"]) {
-  return slides
-    .map((slide, index) => `Slide ${index + 1}: ${slide.title}\n${slide.body}`)
-    .join("\n\n");
-}
-
 function PacksPage() {
-  const scripts = useStore((s) => s.scripts);
-  const jobs = useStore((s) => s.videoJobs);
-  const posts = useStore((s) => s.calendarPosts);
+  const scripts = useStore((state) => state.scripts);
+  const jobs = useStore((state) => state.videoJobs);
+  const posts = useStore((state) => state.calendarPosts);
   const search = Route.useSearch();
   const navigate = useNavigate();
   const [selectedId, setSelectedId] = useState(search.scriptId ?? scripts[0]?.id ?? "");
-  const [salvando, setSalvando] = useState(false);
+  const [pack, setPack] = useState<Pack | null>(null);
+  const [photoAssets, setPhotoAssets] = useState<PackPhotoAsset[]>([]);
+  const [loadingPack, setLoadingPack] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savingPhotoIndex, setSavingPhotoIndex] = useState<number | null>(null);
 
   const script = scripts.find((item) => item.id === selectedId);
-  const mockPack = useMemo(() => (script ? buildPack(script) : null), [script]);
-  const pack: Pack | null = mockPack;
   const videoJob = script ? jobs.find((job) => job.scriptId === script.id) : undefined;
   const scheduledPost = script ? posts.find((post) => post.scriptId === script.id) : undefined;
 
-  function selectScript(id: string) {
-    setSelectedId(id);
-    navigate({ to: "/packs", search: { scriptId: id }, replace: true });
+  useEffect(() => {
+    if (!script) {
+      setPack(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadingPack(true);
+    fetchPack(script.id)
+      .then((data) => {
+        if (!cancelled) setPack(data.pack);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setPack(null);
+          toast.error(error instanceof Error ? error.message : "Nao foi possivel carregar o Pack.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingPack(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [script]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPackPhotoAssets()
+      .then((assets) => {
+        if (!cancelled) setPhotoAssets(assets);
+      })
+      .catch(() => {
+        if (!cancelled) setPhotoAssets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function selectScript(scriptId: string) {
+    setSelectedId(scriptId);
+    navigate({ to: "/packs", search: { scriptId }, replace: true });
   }
 
-  async function salvarLocal() {
-    if (!script || !pack) return;
-    setSalvando(true);
-    const aviso = toast.loading("Salvando pack na pasta local...");
+  async function generateVisualPack() {
+    if (!script) return;
+    setGenerating(true);
+    const notice = toast.loading("Criando carrossel com texto direto e design editorial...");
     try {
-      const res = await exportPack(script, pack);
-      toast.success(`Pack salvo em ${res.relative} (${res.files} arquivos).`, {
-        id: aviso,
+      const response = await generatePack(script);
+      setPack(response.pack);
+      toast.success("Carrossel de 6 slides criado.", { id: notice });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar o Pack.", {
+        id: notice,
+      });
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function saveLocal() {
+    if (!script || !pack) return;
+    setSaving(true);
+    const notice = toast.loading("Renderizando os slides em alta resolucao...");
+    try {
+      const response = await exportPack(script, pack);
+      toast.success(`Pack salvo em ${response.relative} (${response.files} arquivos).`, {
+        id: notice,
         duration: 8000,
       });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Falha ao salvar o pack.", { id: aviso });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Falha ao salvar o Pack.", {
+        id: notice,
+      });
     } finally {
-      setSalvando(false);
+      setSaving(false);
+    }
+  }
+
+  async function choosePhoto(slideIndex: number, photoAssetId: string) {
+    if (!script || !pack || photoIdOf(pack.carousel[slideIndex]) === photoAssetId) return;
+    const previousPack = pack;
+    const selectedAsset = photoAssets.find((asset) => asset.id === photoAssetId);
+    if (!selectedAsset) return;
+    setSavingPhotoIndex(slideIndex);
+    setPack({
+      ...pack,
+      carousel: pack.carousel.map((slide, index) =>
+        index === slideIndex
+          ? {
+              ...slide,
+              fields: slide.fields ? { ...slide.fields, photoId: photoAssetId } : slide.fields,
+              photoAsset: {
+                id: selectedAsset.id,
+                name: selectedAsset.name,
+                description: selectedAsset.description,
+                cachedAssetPath: selectedAsset.cachedAssetPath,
+                facePointX: selectedAsset.facePointX,
+                facePointY: selectedAsset.facePointY,
+                brightness: selectedAsset.brightness,
+              },
+            }
+          : slide,
+      ),
+    });
+    try {
+      const response = await updatePackCarouselPhoto(script.id, slideIndex, photoAssetId);
+      setPack(response.pack);
+      toast.success(`Foto do slide ${slideIndex + 1} atualizada.`);
+    } catch (error) {
+      setPack(previousPack);
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a foto.");
+    } finally {
+      setSavingPhotoIndex(null);
     }
   }
 
@@ -252,15 +288,28 @@ function PacksPage() {
       title="Pack de conteudo"
       actions={
         <>
-          <Button size="sm" onClick={salvarLocal} disabled={!script || salvando}>
-            {salvando ? (
+          <Button size="sm" onClick={generateVisualPack} disabled={!script || generating}>
+            {generating ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Wand2 className="mr-1 h-3.5 w-3.5" />
+            )}
+            {pack ? "Gerar nova versao" : "Gerar Pack"}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={saveLocal}
+            disabled={!script || !pack || saving}
+          >
+            {saving ? (
               <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
             ) : (
               <FolderDown className="mr-1 h-3.5 w-3.5" />
             )}
-            Salvar local
+            Salvar PNGs
           </Button>
-          <Button asChild size="sm" variant="secondary">
+          <Button asChild size="sm" variant="ghost">
             <Link to="/roteiros">
               <FileText className="mr-1 h-3.5 w-3.5" /> Roteiros
             </Link>
@@ -271,8 +320,8 @@ function PacksPage() {
       {scripts.length === 0 ? (
         <EmptyState
           icon={<PanelsTopLeft className="h-4 w-4" />}
-          title="Nenhum roteiro para empacotar"
-          description="Gere um roteiro primeiro para montar video, carrossel, post e stories."
+          title="Nenhum roteiro para transformar"
+          description="Crie um roteiro para gerar o carrossel editorial de 6 slides."
           action={
             <Button asChild size="sm" variant="secondary">
               <Link to="/ideias">Ir para Ideias</Link>
@@ -285,37 +334,70 @@ function PacksPage() {
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
               <div className="min-w-0">
                 <div className="mb-3 flex flex-wrap items-center gap-2">
-                  <StatusBadge label="Pack offline" tone="info" />
+                  <StatusBadge
+                    label={pack ? "Carrossel pronto" : "Aguardando geracao"}
+                    tone="info"
+                  />
                   {script ? <StatusBadge {...riskLabel[script.risco]} /> : null}
                   {script ? <StatusBadge {...prioridadeLabel[script.prioridade]} /> : null}
+                  {pack?.schemaVersion ? (
+                    <StatusBadge label="Sistema Instituto" tone="success" />
+                  ) : null}
                 </div>
                 <h2 className="font-display text-xl font-semibold tracking-tight">
                   {script?.titulo ?? "Selecione um roteiro"}
                 </h2>
                 <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-                  Uma ideia vira um conjunto de pecas para revisar, produzir e agendar.
+                  Seis slides com uma ideia por tela, leitura em poucos segundos e composicao visual
+                  fixa.
                 </p>
               </div>
-              <div>
-                <Select value={selectedId} onValueChange={selectScript}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Escolher roteiro" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {scripts.map((item) => (
-                      <SelectItem key={item.id} value={item.id}>
-                        {item.titulo}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              <Select value={selectedId} onValueChange={selectScript}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Escolher roteiro" />
+                </SelectTrigger>
+                <SelectContent>
+                  {scripts.map((item) => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {item.titulo}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </section>
 
+          {script && !pack ? (
+            <EmptyState
+              icon={
+                loadingPack ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <PanelsTopLeft className="h-4 w-4" />
+                )
+              }
+              title={loadingPack ? "Carregando Pack" : "Nenhum carrossel gerado"}
+              description={
+                loadingPack
+                  ? "Buscando a versao salva deste roteiro."
+                  : "Gere seis slides com copy curta, fotos aprovadas e identidade visual consistente."
+              }
+              action={
+                <Button size="sm" onClick={generateVisualPack} disabled={generating || loadingPack}>
+                  {generating ? (
+                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Wand2 className="mr-1 h-3.5 w-3.5" />
+                  )}
+                  Gerar Pack
+                </Button>
+              }
+            />
+          ) : null}
+
           {script && pack ? (
             <>
-              <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="flex items-center gap-2 text-sm">
@@ -333,27 +415,17 @@ function PacksPage() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="text-sm text-muted-foreground">
-                    {pack.carousel.length} slides
+                    {pack.carousel.length} slides editoriais
                   </CardContent>
                 </Card>
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="flex items-center gap-2 text-sm">
-                      <Image className="h-4 w-4 text-status-info" /> Post fixo
+                      <ImageIcon className="h-4 w-4 text-status-info" /> Qualidade
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="text-sm text-muted-foreground">
-                    1 peca estatica
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center gap-2 text-sm">
-                      <Instagram className="h-4 w-4 text-status-info" /> Stories
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="text-sm text-muted-foreground">
-                    {pack.stories.length} telas
+                    PNG 1080 × 1350
                   </CardContent>
                 </Card>
                 <Card>
@@ -369,34 +441,97 @@ function PacksPage() {
               </section>
 
               <Tabs defaultValue="carousel" className="space-y-3">
-                <TabsList className="grid w-full grid-cols-2 md:w-auto md:grid-cols-5">
+                <TabsList className="grid w-full grid-cols-3 md:w-auto">
                   <TabsTrigger value="carousel">Carrossel</TabsTrigger>
-                  <TabsTrigger value="static">Post fixo</TabsTrigger>
                   <TabsTrigger value="caption">Legenda</TabsTrigger>
-                  <TabsTrigger value="stories">Stories</TabsTrigger>
                   <TabsTrigger value="briefing">Briefing</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="carousel">
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {pack.carousel.map((slide, index) => (
-                      <div
-                        key={`${slide.title}-${index}`}
-                        className="flex min-h-[190px] flex-col justify-between rounded-lg border bg-card p-4 shadow-sm"
-                      >
-                        <div>
-                          <div className="mb-3 text-xs font-semibold uppercase text-muted-foreground">
-                            Slide {index + 1}
+                    {pack.carousel.map((slide, index) => {
+                      const layout = layoutOf(slide);
+                      const hasPhoto = photoLayouts.has(layout);
+                      const details = detailLines(slide);
+                      const selectedPhoto = photoAssets.find(
+                        (asset) => asset.id === photoIdOf(slide),
+                      );
+                      return (
+                        <div
+                          key={`${layout}-${headlineOf(slide)}-${index}`}
+                          className="flex min-h-[260px] flex-col rounded-lg border bg-card p-4 shadow-sm"
+                        >
+                          <div className="mb-3 flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold uppercase text-muted-foreground">
+                              Slide {index + 1}
+                            </span>
+                            <span className="rounded-md bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                              {layoutLabels[layout]}
+                            </span>
                           </div>
+
+                          {hasPhoto ? (
+                            <div className="mb-4 flex items-center gap-2">
+                              <Select
+                                value={photoIdOf(slide)}
+                                onValueChange={(value) => choosePhoto(index, value)}
+                                disabled={savingPhotoIndex === index || photoAssets.length === 0}
+                              >
+                                <SelectTrigger
+                                  className="h-9 min-w-0 flex-1 text-xs"
+                                  aria-label={`Foto do slide ${index + 1}`}
+                                >
+                                  <SelectValue placeholder="Foto do acervo" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {photoAssets.map((asset) => (
+                                    <SelectItem key={asset.id} value={asset.id}>
+                                      {asset.name}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              {selectedPhoto?.url ? (
+                                <img
+                                  src={selectedPhoto.url}
+                                  alt={selectedPhoto.name}
+                                  className="h-9 w-9 rounded object-cover"
+                                />
+                              ) : null}
+                              {savingPhotoIndex === index ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                              ) : null}
+                            </div>
+                          ) : null}
+
+                          {slide.fields?.eyebrow ? (
+                            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-status-info">
+                              {slide.fields.eyebrow}
+                            </p>
+                          ) : null}
                           <h3 className="font-display text-lg font-semibold leading-tight">
-                            {slide.title}
+                            {headlineOf(slide)}
                           </h3>
-                          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                            {slide.body}
-                          </p>
+                          {bodyOf(slide) ? (
+                            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                              {bodyOf(slide)}
+                            </p>
+                          ) : null}
+                          {details.length ? (
+                            <div className="mt-4 space-y-2 border-t pt-3">
+                              {details.map((detail, detailIndex) => (
+                                <p
+                                  key={`${detail}-${detailIndex}`}
+                                  className="text-xs leading-relaxed"
+                                >
+                                  {detail}
+                                </p>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                   <div className="mt-3">
                     <Button
@@ -409,59 +544,19 @@ function PacksPage() {
                   </div>
                 </TabsContent>
 
-                <TabsContent value="static">
-                  <div className="grid gap-4 lg:grid-cols-[420px_minmax(0,1fr)]">
-                    <div className="flex aspect-square flex-col justify-between rounded-lg border bg-card p-6 shadow-sm">
-                      <div className="text-xs font-semibold uppercase text-muted-foreground">
-                        {familiaLabel[script.categoria]}
-                      </div>
-                      <h3 className="font-display text-3xl font-semibold leading-tight">
-                        {pack.staticPost.headline}
-                      </h3>
-                      <p className="text-sm leading-relaxed text-muted-foreground">
-                        {pack.staticPost.subline}
-                      </p>
-                    </div>
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-sm">Texto da peca estatica</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-3">
-                        <Textarea
-                          readOnly
-                          className="min-h-[190px]"
-                          value={`${pack.staticPost.headline}\n\n${pack.staticPost.subline}`}
-                        />
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() =>
-                            copyText(
-                              "Post fixo",
-                              `${pack.staticPost.headline}\n\n${pack.staticPost.subline}`,
-                            )
-                          }
-                        >
-                          <Copy className="mr-1 h-3.5 w-3.5" /> Copiar post
-                        </Button>
-                      </CardContent>
-                    </Card>
-                  </div>
-                </TabsContent>
-
                 <TabsContent value="caption">
                   <Card>
                     <CardHeader>
                       <CardTitle className="flex items-center gap-2 text-sm">
-                        <MessageSquareText className="h-4 w-4" /> Legenda
+                        <MessageSquareText className="h-4 w-4" /> Legenda pronta
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-3">
-                      <Textarea readOnly className="min-h-[280px]" value={pack.caption} />
+                      <Textarea readOnly className="min-h-[280px]" value={captionOf(pack)} />
                       <Button
                         size="sm"
                         variant="secondary"
-                        onClick={() => copyText("Legenda", pack.caption)}
+                        onClick={() => copyText("Legenda", captionOf(pack))}
                       >
                         <Copy className="mr-1 h-3.5 w-3.5" /> Copiar legenda
                       </Button>
@@ -469,32 +564,40 @@ function PacksPage() {
                   </Card>
                 </TabsContent>
 
-                <TabsContent value="stories">
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                    {pack.stories.map((story) => (
-                      <div
-                        key={story.title}
-                        className="aspect-[9/16] rounded-lg border bg-card p-4 shadow-sm"
-                      >
-                        <div className="text-xs font-semibold uppercase text-muted-foreground">
-                          {story.title}
-                        </div>
-                        <p className="mt-8 font-display text-xl font-semibold leading-tight">
-                          {story.body}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </TabsContent>
-
                 <TabsContent value="briefing">
                   <Card>
                     <CardHeader>
-                      <CardTitle className="text-sm">Checklist do pacote</CardTitle>
+                      <CardTitle className="text-sm">Controle de qualidade do pacote</CardTitle>
                     </CardHeader>
                     <CardContent>
+                      <div className="mb-4 grid gap-2 text-sm md:grid-cols-3">
+                        <div className="rounded-lg border bg-background p-3">
+                          <div className="text-xs text-muted-foreground">Sistema visual</div>
+                          <div className="mt-1 font-medium">Instituto Guilherme Martins</div>
+                        </div>
+                        <div className="rounded-lg border bg-background p-3">
+                          <div className="text-xs text-muted-foreground">Resolucao de saida</div>
+                          <div className="mt-1 font-medium">1080 × 1350 px</div>
+                        </div>
+                        <div className="rounded-lg border bg-background p-3">
+                          <div className="text-xs text-muted-foreground">Layouts usados</div>
+                          <div className="mt-1 font-medium">
+                            {new Set(pack.carousel.map(layoutOf)).size} de {pack.carousel.length}
+                          </div>
+                        </div>
+                      </div>
                       <div className="grid gap-2 md:grid-cols-2">
-                        {pack.checklist.map((item) => (
+                        {(pack.checklist.length
+                          ? pack.checklist
+                          : [
+                              "6 slides com layouts diferentes",
+                              "Uma ideia principal por tela",
+                              "No maximo 3 slides com foto",
+                              "Texto curto e sem jargao",
+                              "Capa forte e CTA no slide final",
+                              "Legenda pronta para publicar",
+                            ]
+                        ).map((item) => (
                           <div key={item} className="flex items-start gap-2 text-sm">
                             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-status-success" />
                             <span>{item}</span>

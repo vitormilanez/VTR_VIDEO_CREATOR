@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from api.services.script_performance import speech_preset, spoken_text
+from api.services.script_performance import display_text, speech_preset, spoken_text
 from api.services.voice_providers import get_voice_provider
 
 
@@ -21,6 +21,7 @@ def direct_video_payload(
     speech_mode: str,
     captions: bool,
     optimize_pronunciation: bool,
+    caption_source_matches_spoken: bool = True,
 ) -> dict[str, Any]:
     voice_provider = get_voice_provider("heygen_text")
     voice_payload = voice_provider.build_voice_payload(
@@ -39,5 +40,14 @@ def direct_video_payload(
         **voice_payload,
     }
     if captions:
-        payload["caption"] = {"file_format": "srt", "style": "default"}
+        # HeyGen emits an SRT sidecar. When editorial and phonetic scripts differ,
+        # callers keep it out of the rendered image and normalize it before use.
+        payload["caption"] = {"file_format": "srt"}
+        if not caption_source_matches_spoken:
+            payload["caption"]["burned_in"] = False
     return payload
+
+
+def normalize_caption_srt(srt: str) -> str:
+    """Restores editorial spellings in an SRT generated from phonetic TTS text."""
+    return display_text(srt)

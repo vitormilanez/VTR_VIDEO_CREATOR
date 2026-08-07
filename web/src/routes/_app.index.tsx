@@ -330,7 +330,9 @@ function VideoCostPanel({
           <div>
             <p className="text-xs font-medium">Claude</p>
             <p className="text-[11px] text-muted-foreground">
-              {claudeProvider?.status === "conectado" ? "Uso registrado pela API" : "API não conectada"}
+              {claudeProvider?.status === "conectado"
+                ? "Uso registrado pela API"
+                : "API não conectada"}
             </p>
           </div>
           <span className="font-display text-lg font-semibold tabular-nums">
@@ -340,11 +342,15 @@ function VideoCostPanel({
         <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
           <span>Chamadas: {claudeProvider?.calls ?? 0}</span>
           <span className="text-right">
-            Tokens: {((claudeProvider?.inputTokens ?? 0) + (claudeProvider?.outputTokens ?? 0)).toLocaleString("pt-BR")}
+            Tokens:{" "}
+            {(
+              (claudeProvider?.inputTokens ?? 0) + (claudeProvider?.outputTokens ?? 0)
+            ).toLocaleString("pt-BR")}
           </span>
         </div>
         <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
-          Estimativa por tokens retornados. Respostas repetidas são reaproveitadas pelo cache e não geram nova chamada.
+          Estimativa por tokens retornados. Respostas repetidas são reaproveitadas pelo cache e não
+          geram nova chamada.
         </p>
       </div>
 

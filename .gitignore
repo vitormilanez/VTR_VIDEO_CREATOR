@@ -38,3 +38,6 @@ tmp/
 
 # Exports gerados pelo botao "Salvar local" (regeneraveis)
 content/packs/
+
+# Previews de avatar baixados automaticamente pelo catalogo HeyGen (cache local)
+data/pack_assets/avatars/

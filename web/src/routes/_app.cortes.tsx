@@ -369,9 +369,7 @@ function CortesPage() {
                 <Label className="text-xs">Quantidade</Label>
                 <Select
                   value={String(clipCount)}
-                  onValueChange={(value) =>
-                    setClipCount(value === "auto" ? "auto" : Number(value))
-                  }
+                  onValueChange={(value) => setClipCount(value === "auto" ? "auto" : Number(value))}
                 >
                   <SelectTrigger className="mt-1.5">
                     <SelectValue />

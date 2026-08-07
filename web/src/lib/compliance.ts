@@ -88,7 +88,10 @@ export function scanCompliance(
   const hitMap = new Map<string, ComplianceHit>();
   const alertMap = new Map<string, ComplianceAlert>();
   const activeRules = rules.length ? rules : defaultRules;
-  const compiledRules = activeRules.map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, "i") }));
+  const compiledRules = activeRules.map((rule) => ({
+    ...rule,
+    regex: new RegExp(rule.pattern, "i"),
+  }));
 
   const forbidden = palavrasProibidas
     .map((p) => p.trim())

@@ -54,9 +54,18 @@ def build_catalog(
         for look in looks
         if (avatar := normalize_avatar_look(look)) and avatar["status"] == "completed"
     ]
+    normalized_voices = [dict(voice) for voice in voices]
+    known_voice_ids = {str(voice.get("id") or "") for voice in normalized_voices}
+    for avatar in avatars:
+        voice_id = str(avatar.get("defaultVoiceId") or "")
+        if voice_id and voice_id not in known_voice_ids:
+            normalized_voices.append(
+                {"id": voice_id, "name": f"Voz de {avatar['name']}", "gender": ""}
+            )
+            known_voice_ids.add(voice_id)
     return {
         "avatars": avatars,
-        "voices": voices,
+        "voices": normalized_voices,
         "defaultAvatarId": None,
-        "defaultVoiceId": voices[0]["id"] if voices else None,
+        "defaultVoiceId": normalized_voices[0]["id"] if normalized_voices else None,
     }

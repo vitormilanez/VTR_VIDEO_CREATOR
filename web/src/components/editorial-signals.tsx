@@ -1,12 +1,7 @@
 import { CircleAlert } from "lucide-react";
 import type { Prioridade } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 const priorityDotClass: Record<Prioridade, string> = {
   alta: "bg-status-danger ring-status-danger/25",

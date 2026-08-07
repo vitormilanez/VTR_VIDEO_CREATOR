@@ -5,12 +5,7 @@ import { genId, useStore } from "@/lib/store";
 import { familiaLabel, prioridadeLabel, trendStatusLabel } from "@/lib/status";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  appendIdea,
-  expandIdeas,
-  setSheetStatus,
-  type CaptureHooksResult,
-} from "@/lib/api/local";
+import { appendIdea, expandIdeas, setSheetStatus, type CaptureHooksResult } from "@/lib/api/local";
 import { generateAndPersistCaptureScripts } from "@/lib/script-generation";
 import { ArrowLeft, ExternalLink, Loader2, Sparkles, Target, Zap } from "lucide-react";
 import { toast } from "sonner";

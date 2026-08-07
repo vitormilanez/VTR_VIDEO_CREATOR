@@ -57,13 +57,9 @@ export function NextStepBanner({
             {eyebrow}
           </div>
           <h2 className="mt-1 font-display text-sm font-semibold">{title}</h2>
-          <p className="mt-0.5 max-w-3xl text-xs leading-5 text-muted-foreground">
-            {description}
-          </p>
+          <p className="mt-0.5 max-w-3xl text-xs leading-5 text-muted-foreground">{description}</p>
           {disabled && disabledReason ? (
-            <p className="mt-1 text-xs font-medium text-status-warn-foreground">
-              {disabledReason}
-            </p>
+            <p className="mt-1 text-xs font-medium text-status-warn-foreground">{disabledReason}</p>
           ) : null}
         </div>
         {action ? <div className="shrink-0">{action}</div> : null}
