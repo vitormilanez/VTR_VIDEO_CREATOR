@@ -246,6 +246,15 @@ class JobStore:
             ).fetchall()
             for row in rows:
                 existing = self._record(row)
+                if existing and existing.get("isPreview"):
+                    continue
+                if (
+                    existing
+                    and job.get("isScene")
+                    and existing.get("isScene")
+                    and existing.get("sceneId") != job.get("sceneId")
+                ):
+                    continue
                 if existing and existing.get("submissionState") in {
                     "reserved",
                     "submitting",
@@ -256,7 +265,13 @@ class JobStore:
             if not force_new_version:
                 for row in rows:
                     existing = self._record(row)
-                    if not existing:
+                    if not existing or existing.get("isPreview"):
+                        continue
+                    if (
+                        job.get("isScene")
+                        and existing.get("isScene")
+                        and existing.get("sceneId") != job.get("sceneId")
+                    ):
                         continue
                     retry_safe = bool(existing.get("retrySafe", existing.get("status") == "erro"))
                     if existing.get("status") != "erro" or not retry_safe:

@@ -60,6 +60,7 @@ function VideoDetalhe() {
   const { id } = Route.useParams();
   const job = useStore((s) => s.videoJobs.find((v) => v.id === id));
   const script = useStore((s) => (job ? s.scripts.find((x) => x.id === job.scriptId) : undefined));
+  const addVideoJob = useStore((s) => s.addVideoJob);
   const updateVideoJob = useStore((s) => s.updateVideoJob);
   const addCalendarPost = useStore((s) => s.addCalendarPost);
   const navigate = useNavigate();
@@ -134,11 +135,17 @@ function VideoDetalhe() {
             <Button
               size="sm"
               variant="secondary"
+              disabled={job.provider === "local"}
               onClick={async () => {
                 try {
-                  const updated = await refreshHeyGenVideo(job.id);
-                  updateVideoJob(job.id, updated);
-                  toast.success(`Status: ${videoJobStatusLabel[updated.status].label}`);
+                  const result = await refreshHeyGenVideo(job.id);
+                  updateVideoJob(job.id, result.job);
+                  if (result.composedJob) addVideoJob(result.composedJob);
+                  toast.success(
+                    result.composedJob
+                      ? "Vídeo final composto pronto."
+                      : `Status: ${videoJobStatusLabel[result.job.status].label}`,
+                  );
                 } catch (err) {
                   toast.error(err instanceof Error ? err.message : "Falha ao consultar o HeyGen.");
                 }
@@ -158,7 +165,7 @@ function VideoDetalhe() {
             <Button size="sm" variant="secondary" asChild>
               <a href={videoDownloadUrl(job.id)}>
                 <Download className="mr-1 h-4 w-4" />
-                Baixar vídeo
+                {job.isComposed ? "Baixar vídeo final" : "Baixar vídeo"}
               </a>
             </Button>
           ) : null}
@@ -367,21 +374,21 @@ function VideoDetalhe() {
               {job.duracaoSegundos ? (
                 <Info label="Duracao" value={`${job.duracaoSegundos}s`} />
               ) : null}
-              {job.videoUrl ? <Info label="Arquivo" value="Video disponivel" /> : null}
+              {job.videoUrl ? <Info label="Arquivo" value={job.isComposed ? "Vídeo final composto" : "Video disponivel"} /> : null}
             </div>
             {job.videoUrl ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button size="sm" variant="secondary" asChild>
                   <a href={videoDownloadUrl(job.id)}>
                     <Download className="mr-1 h-4 w-4" />
-                    Baixar MP4
+                    {job.isComposed ? "Baixar MP4 final" : "Baixar MP4"}
                   </a>
                 </Button>
-                <Button size="sm" variant="ghost" asChild>
+                {!job.isComposed ? <Button size="sm" variant="ghost" asChild>
                   <a href={job.videoUrl} target="_blank" rel="noreferrer">
                     Abrir no HeyGen <ExternalLink className="ml-1 h-3.5 w-3.5" />
                   </a>
-                </Button>
+                </Button> : null}
               </div>
             ) : null}
           </div>

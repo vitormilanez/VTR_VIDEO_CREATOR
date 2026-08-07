@@ -516,6 +516,9 @@ export interface VisualPlanScene {
     headline: string;
     body: string;
     purpose: string;
+    startRatio: number;
+    durationSeconds: number;
+    motionPreset: "none" | "fade" | "soft_zoom" | "fade_zoom";
   };
 }
 
@@ -534,6 +537,9 @@ export interface VideoSlideAsset {
   layout: VideoVisualLayout | "";
   headline: string;
   body: string;
+  startRatio: number;
+  durationSeconds: number;
+  motionPreset: "none" | "fade" | "soft_zoom" | "fade_zoom";
   assetPath: string | null;
   url?: string;
 }
@@ -883,6 +889,14 @@ export async function renderVideoSlides(scriptId: string): Promise<VideoSlideRen
     { method: "POST", body: JSON.stringify({}) },
   );
   return response.render;
+}
+
+export async function composeFinalVideo(scriptId: string): Promise<VideoJob> {
+  const response = await requestJson<{ ok: boolean; job: VideoJob }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/compose-final-video`,
+    { method: "POST" },
+  );
+  return response.job;
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
@@ -1296,10 +1310,10 @@ export function cutFileUrl(projectId: string, filename: string, download = false
   }`;
 }
 
-export async function refreshHeyGenVideo(jobId: string): Promise<VideoJob> {
+export async function refreshHeyGenVideo(jobId: string): Promise<{ job: VideoJob; composedJob?: VideoJob | null }> {
   const res = await fetch(`${BASE}/api/videos/${jobId}/refresh`, { method: "POST" });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel consultar o HeyGen."));
-  return ((await res.json()) as { job: VideoJob }).job;
+  return (await res.json()) as { job: VideoJob; composedJob?: VideoJob | null };
 }
 
 export interface AiCostProvider {

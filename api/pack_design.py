@@ -226,6 +226,94 @@ def normalize_slide(slide: dict[str, Any], index: int = 0) -> dict[str, Any]:
     }
 
 
+def _fit_copy(value: Any, maximum: int) -> str:
+    """Encurta copy de forma deterministica sem deixar pontuacao solta."""
+    text = _text(value)
+    if len(text) <= maximum:
+        return text
+    clipped = text[:maximum].rstrip()
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0].rstrip()
+    return clipped.rstrip(" ,;:-–—") or text[:maximum].rstrip()
+
+
+def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[str, Any]) -> None:
+    """Preenche blocos obrigatorios ausentes sem inventar dados especificos."""
+    item_limits = spec.get("item_max", {})
+    if layout_id == "myth_fact":
+        fallback_items = {
+            "item1": {"title": "Mito", "text": "Uma indicação não serve para todos."},
+            "item2": {
+                "title": "Fato",
+                "text": fields.get("body") or "Cada indicação precisa de avaliação individual.",
+            },
+        }
+    elif layout_id == "do_dont":
+        fallback_items = {
+            "item1": {"title": "Evite", "text": fields.get("body") or "Não tome decisões sem orientação."},
+            "item2": {"title": "Prefira", "text": fields.get("disclaimer") or "Converse com um profissional."},
+        }
+    elif layout_id == "three_points":
+        fallback_items = {
+            "item1": {"title": "Ponto 1", "text": fields.get("body") or fields.get("headline")},
+            "item2": {"title": "Ponto 2", "text": fields.get("subheadline") or fields.get("headline")},
+            "item3": {"title": "Ponto 3", "text": fields.get("caption") or fields.get("headline")},
+        }
+    else:
+        fallback_items = {}
+
+    for item_name in spec.get("required", ()):
+        if not item_name.startswith("item") or item_name not in fallback_items:
+            continue
+        item = fields.get(item_name)
+        if isinstance(item, dict) and (_text(item.get("title")) or _text(item.get("text"))):
+            continue
+        fallback = fallback_items[item_name]
+        fields[item_name] = {
+            "title": _fit_copy(fallback["title"], item_limits.get("title", 34)),
+            "text": _fit_copy(fallback["text"], item_limits.get("text", 90)),
+        }
+
+
+def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
+    """Ajusta excesso de caracteres antes da validacao final do contrato.
+
+    O modelo continua recebendo os limites no prompt e uma segunda chance de
+    correcao. Este ultimo passo evita que uma resposta com poucos caracteres a
+    mais invalide o Pack inteiro por uma diferenca editorial trivial.
+    """
+    repaired = deepcopy(pack)
+    raw_slides = repaired.get("slides") if isinstance(repaired.get("slides"), list) else repaired.get("carousel")
+    if not isinstance(raw_slides, list):
+        return repaired
+
+    slides: list[Any] = []
+    for index, raw_slide in enumerate(raw_slides):
+        if not isinstance(raw_slide, dict):
+            slides.append(raw_slide)
+            continue
+        slide = normalize_slide(raw_slide, index)
+        spec = LAYOUT_SPECS[slide["layoutId"]]
+        fields = slide["fields"]
+        _repair_required_items(fields, slide["layoutId"], spec)
+        for name, maximum in spec.get("max", {}).items():
+            fields[name] = _fit_copy(fields.get(name), maximum)
+        for item_name in ("item1", "item2", "item3"):
+            item = fields.get(item_name)
+            if not isinstance(item, dict):
+                continue
+            for part, maximum in spec.get("item_max", {}).items():
+                item[part] = _fit_copy(item.get(part), maximum)
+        headline = _text(fields.get("headline"))
+        if len(headline.split()) > 11:
+            fields["headline"] = " ".join(headline.split()[:11])
+        slides.append(slide)
+
+    repaired["slides"] = slides
+    repaired["carousel"] = slides
+    return repaired
+
+
 def slide_headline(slide: dict[str, Any]) -> str:
     normalized = normalize_slide(slide)
     fields = normalized["fields"]

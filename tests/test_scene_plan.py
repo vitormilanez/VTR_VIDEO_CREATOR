@@ -177,6 +177,112 @@ class ScenePlanTests(unittest.TestCase):
         self.assertEqual(result["visualPlan"]["scenes"][0]["visual"]["layout"], "big_statement")
         self.assertEqual(server._get_visual_plan("script-edit-visual"), result["visualPlan"])
 
+    def test_visual_plan_requires_one_support_before_each_next_scene(self) -> None:
+        server._save_production_profile(
+            {
+                "scriptId": "script-visual-count",
+                "avatarId": "look-only",
+                "voiceId": "voice-1",
+                "speechMode": "natural",
+                "generationMode": "direct",
+            }
+        )
+        server._save_scene_plan(
+            "script-visual-count",
+            [
+                {"id": "scene-1", "text": "Primeira explicação.", "lookRole": "primary"},
+                {"id": "scene-2", "text": "Segunda explicação.", "lookRole": "secondary"},
+                {"id": "scene-3", "text": "Fechamento médico.", "lookRole": "primary"},
+            ],
+        )
+        with patch.object(server, "_find_script", return_value={"id": "script-visual-count"}):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.save_script_visual_plan(
+                    "script-visual-count",
+                    server.VisualPlanIn(
+                        scenes=[
+                            server.VisualPlanSceneIn(
+                                sceneId="scene-1",
+                                visual=server.VisualPlanVisualIn(type="none"),
+                            ),
+                            server.VisualPlanSceneIn(
+                                sceneId="scene-2",
+                                visual=server.VisualPlanVisualIn(
+                                    type="comparison",
+                                    layout="myth_fact",
+                                    headline="Pesquisa não é aprovação",
+                                    body="Cada indicação precisa de evidência própria.",
+                                    purpose="Preparar o próximo corte",
+                                ),
+                            ),
+                            server.VisualPlanSceneIn(
+                                sceneId="scene-3",
+                                visual=server.VisualPlanVisualIn(type="none"),
+                            ),
+                        ]
+                    ),
+                )
+        self.assertEqual(raised.exception.status_code, 422)
+
+    def test_visual_plan_for_three_scenes_keeps_two_supports_and_avatar_close(self) -> None:
+        server._save_production_profile(
+            {
+                "scriptId": "script-visual-close",
+                "avatarId": "look-only",
+                "voiceId": "voice-1",
+                "speechMode": "natural",
+                "generationMode": "direct",
+            }
+        )
+        server._save_scene_plan(
+            "script-visual-close",
+            [
+                {"id": "scene-1", "text": "Primeira explicação.", "lookRole": "primary"},
+                {"id": "scene-2", "text": "Segunda explicação.", "lookRole": "secondary"},
+                {"id": "scene-3", "text": "Fechamento médico.", "lookRole": "primary"},
+            ],
+        )
+        with patch.object(server, "_find_script", return_value={"id": "script-visual-close"}):
+            result = server.save_script_visual_plan(
+                "script-visual-close",
+                server.VisualPlanIn(
+                    scenes=[
+                        server.VisualPlanSceneIn(
+                            sceneId="scene-1",
+                            visual=server.VisualPlanVisualIn(
+                                type="statistic",
+                                layout="number_stat",
+                                headline="Mercado em expansão",
+                                body="Apoia a primeira fala.",
+                                purpose="Contextualizar",
+                            ),
+                        ),
+                        server.VisualPlanSceneIn(
+                            sceneId="scene-2",
+                            visual=server.VisualPlanVisualIn(
+                                type="comparison",
+                                layout="myth_fact",
+                                headline="Pesquisa não é aprovação",
+                                body="Apoia a segunda fala.",
+                                purpose="Contrastar",
+                            ),
+                        ),
+                        server.VisualPlanSceneIn(
+                            sceneId="scene-3",
+                            visual=server.VisualPlanVisualIn(
+                                type="quote",
+                                layout="doctor_quote",
+                                headline="Converse com seu médico",
+                                body="Este visual seria descartado.",
+                                purpose="Fechar",
+                            ),
+                        ),
+                    ]
+                ),
+            )
+        visuals = [scene["visual"]["type"] for scene in result["visualPlan"]["scenes"]]
+        self.assertEqual(visuals, ["statistic", "comparison", "none"])
+
 
 if __name__ == "__main__":
     unittest.main()

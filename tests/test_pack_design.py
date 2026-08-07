@@ -5,6 +5,7 @@ from api.pack_design import (
     PACK_SCHEMA_VERSION,
     empty_fields,
     normalize_slide,
+    repair_pack_copy,
     validate_pack_contract,
 )
 from api.slides import slide_html
@@ -115,6 +116,36 @@ def test_legacy_slide_keeps_saved_copy() -> None:
     assert normalized["layoutId"] == "explainer"
     assert normalized["fields"]["headline"] == "Titulo antigo"
     assert normalized["fields"]["body"] == "Texto antigo preservado."
+
+
+def test_repair_pack_copy_fits_layout_limits_before_validation() -> None:
+    pack = sample_pack()
+    pack["slides"][0]["fields"]["eyebrow"] = "Um eyebrow editorial acima do limite"
+    pack["slides"][2]["fields"]["item1"]["text"] = "Este texto do fato passou do limite editorial permitido"
+    pack["slides"][5]["fields"]["body"] = "Um texto de apoio muito maior do que o espaco reservado para leitura confortavel"
+
+    repaired = repair_pack_copy(pack)
+
+    assert validate_pack_contract(repaired) == []
+    assert len(repaired["slides"][0]["fields"]["eyebrow"]) <= 22
+    assert len(repaired["slides"][2]["fields"]["item1"]["text"]) <= 42
+    assert len(repaired["slides"][5]["fields"]["body"]) <= 70
+
+
+def test_repair_pack_copy_fills_missing_myth_fact_items() -> None:
+    pack = sample_pack()
+    pack["slides"][2]["layoutId"] = "do_dont"
+    pack["slides"][3]["layoutId"] = "myth_fact"
+    pack["slides"][3]["fields"]["item1"] = {"title": "", "text": ""}
+    pack["slides"][3]["fields"]["item2"] = {"title": "", "text": ""}
+    pack["slides"][3]["fields"]["body"] = "Cada indicação precisa de estudo e avaliação individual."
+
+    repaired = repair_pack_copy(pack)
+
+    assert validate_pack_contract(repaired) == []
+    assert repaired["slides"][3]["fields"]["item1"]["title"] == "Mito"
+    assert repaired["slides"][3]["fields"]["item2"]["title"] == "Fato"
+    assert len(repaired["slides"][3]["fields"]["item2"]["text"]) <= 42
 
 
 def test_slide_html_embeds_brand_fonts_and_copy() -> None:

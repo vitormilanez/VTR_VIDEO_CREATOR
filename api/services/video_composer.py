@@ -27,7 +27,10 @@ class CompositionScene:
     scene_id: str
     video_path: Path
     slide_path: Path | None = None
+    slide_mode: str = "between"
+    visual_start_seconds: float = 0.45
     slide_duration_seconds: float = 1.5
+    visual_animation: str = "fade"
     overlay_paths: tuple[Path, ...] = ()
     captions_path: Path | None = None
 
@@ -90,6 +93,12 @@ def _require_file(path: Path, label: str) -> None:
 
 def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) -> None:
     _require_file(scene.video_path, f"Vídeo da {scene.scene_id}")
+    if scene.slide_path and scene.slide_mode == "during":
+        _require_file(scene.slide_path, f"Apoio visual da {scene.scene_id}")
+        if scene.visual_start_seconds < 0:
+            raise ValueError("O início do apoio visual não pode ser negativo.")
+        if scene.slide_duration_seconds <= 0 or scene.slide_duration_seconds > 60:
+            raise ValueError("A duração do apoio visual deve estar entre 0 e 60 segundos.")
     for overlay in scene.overlay_paths:
         _require_file(overlay, f"Overlay da {scene.scene_id}")
     if scene.captions_path:
@@ -103,6 +112,11 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
             caption_assets.append((caption_text, start, end))
 
     input_args: list[str] = [ffmpeg, "-y", "-i", str(scene.video_path)]
+    slide_input_index: int | None = None
+    if scene.slide_path and scene.slide_mode == "during":
+        slide_input_index = 1
+        input_args.extend(["-loop", "1", "-i", str(scene.slide_path)])
+    overlay_start_index = 1 + (1 if slide_input_index is not None else 0)
     for overlay in scene.overlay_paths:
         input_args.extend(["-loop", "1", "-i", str(overlay)])
     for caption_asset, _start, _end in caption_assets:
@@ -112,14 +126,43 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,fps=30[base]"
     ]
     previous = "base"
-    for index, _overlay in enumerate(scene.overlay_paths, start=1):
+    if slide_input_index is not None:
+        start = scene.visual_start_seconds
+        end = start + scene.slide_duration_seconds
+        fade = min(0.18, scene.slide_duration_seconds / 4)
+        visual_filters = [
+            f"[{slide_input_index}:v]scale=1080:1920:force_original_aspect_ratio=increase",
+            "crop=1080:1920",
+        ]
+        if scene.visual_animation in {"soft_zoom", "fade_zoom"}:
+            visual_filters.extend(
+                [
+                    "scale=1128:2005:force_original_aspect_ratio=increase",
+                    "crop=1080:1920",
+                ]
+            )
+        visual_filters.extend(["format=rgba", "colorchannelmixer=aa=0.96"])
+        if scene.visual_animation in {"fade", "fade_zoom"}:
+            visual_filters.extend(
+                [
+                    f"fade=t=in:st={start:.3f}:d={fade:.3f}:alpha=1",
+                    f"fade=t=out:st={max(start, end - fade):.3f}:d={fade:.3f}:alpha=1",
+                ]
+            )
+        filters.append(",".join(visual_filters) + "[visualslide]")
+        filters.append(
+            f"[{previous}][visualslide]overlay=0:0:shortest=1:"
+            f"enable='between(t,{start:.3f},{end:.3f})'[withvisual]"
+        )
+        previous = "withvisual"
+    for index, _overlay in enumerate(scene.overlay_paths, start=overlay_start_index):
         overlay_label = f"overlay{index}"
         output_label = f"composed{index}"
         filters.append(f"[{index}:v]format=rgba[{overlay_label}]")
         filters.append(f"[{previous}][{overlay_label}]overlay=0:0:shortest=1[{output_label}]")
         previous = output_label
     for cue_index, (_caption_asset, start, end) in enumerate(caption_assets):
-        input_index = 1 + len(scene.overlay_paths) + cue_index
+        input_index = overlay_start_index + len(scene.overlay_paths) + cue_index
         output_label = f"captioned{cue_index}"
         filters.append(f"[{input_index}:v]format=rgba[caption{cue_index}]")
         filters.append(
@@ -237,8 +280,17 @@ def compose_video(
             normalized = workdir / f"scene-{index:02d}.mp4"
             _normalize_scene(scene, normalized, ffmpeg)
             segments.append(normalized)
-            manifest.append({"sceneId": scene.scene_id, "kind": "avatar", "cut": "hard"})
-            if scene.slide_path:
+            avatar_segment: dict[str, Any] = {"sceneId": scene.scene_id, "kind": "avatar", "cut": "hard"}
+            if scene.slide_path and scene.slide_mode == "during":
+                avatar_segment["visualOverlay"] = {
+                    "kind": "video_slide",
+                    "startSeconds": scene.visual_start_seconds,
+                    "durationSeconds": scene.slide_duration_seconds,
+                    "animation": scene.visual_animation,
+                    "audioSource": "avatar",
+                }
+            manifest.append(avatar_segment)
+            if scene.slide_path and scene.slide_mode != "during":
                 slide = workdir / f"scene-{index:02d}-slide.mp4"
                 _render_slide(scene.slide_path, slide, scene.slide_duration_seconds, ffmpeg)
                 segments.append(slide)

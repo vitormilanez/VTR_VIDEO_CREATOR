@@ -213,6 +213,10 @@ function RoteiroDetalhe() {
       narrationQualityIssues(displayText, durationSeconds, ctaMode === "manual" ? outroText : ""),
     [ctaMode, displayText, durationSeconds, outroText],
   );
+  const blockingQualityIssues = useMemo(
+    () => qualityIssues.filter((issue) => !issue.startsWith("Texto muito curto")),
+    [qualityIssues],
+  );
   const hasHighCreditConsumption = durationSeconds >= 45;
   const approvalReady = draft?.status === "aprovado_clinicamente";
   const narrationWords = displayText.trim().split(/\s+/).filter(Boolean).length;
@@ -400,6 +404,11 @@ function RoteiroDetalhe() {
   );
   const avatarSetReady = Boolean(selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId);
   const productionModeReady = avatarMode === "single" || Boolean(avatarMode === "set" && sceneGenerationPlan);
+  const requiredVisualCount = scenePlan ? Math.max(0, scenePlan.scenes.length - 1) : 0;
+  const visualProductionReady =
+    avatarMode === "single" ||
+    requiredVisualCount === 0 ||
+    Boolean(visualPlan && (videoSlideRender?.renderedCount ?? 0) >= requiredVisualCount);
   const selectedAvatarReady = avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
   const sceneRoles = useMemo<AvatarSetRole[]>(
     () =>
@@ -407,7 +416,7 @@ function RoteiroDetalhe() {
     [selectedAvatarSet],
   );
   const canSendToProduction =
-    qualityIssues.length === 0 && approvalReady && selectedAvatarReady && productionModeReady;
+    blockingQualityIssues.length === 0 && approvalReady && selectedAvatarReady && productionModeReady && visualProductionReady;
 
   function chooseAvatar(nextAvatarId: string) {
     setAvatarMode("single");
@@ -532,8 +541,8 @@ function RoteiroDetalhe() {
     criadoEm: draft.criadoEm,
     validadoEm: draft.validadoEm,
   });
-  const productionBlockedReason = qualityIssues[0]
-    ? `Revise a fala final: ${qualityIssues[0]}`
+  const productionBlockedReason = blockingQualityIssues[0]
+    ? `Revise a fala final: ${blockingQualityIssues[0]}`
     : !approvalReady
       ? 'Conclua a revisão e altere o status do roteiro para "Pronto".'
       : catalogLoading
@@ -544,8 +553,10 @@ function RoteiroDetalhe() {
             ? "Selecione um Avatar Set."
             : avatarMode === "set" && !avatarSetReady
               ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
-              : avatarMode === "set"
-                ? "Scene Plan ainda não está implementado para gerar vídeos com duas posições."
+              : avatarMode === "set" && !productionModeReady
+                ? "Salve o Scene Plan antes de gerar o vídeo com duas posições."
+                : avatarMode === "set" && !visualProductionReady
+                  ? `Gere e renderize ${requiredVisualCount} apoio(s) visual(is) antes de enviar.`
                 : !avatarId
                   ? "Selecione um avatar pronto."
             : !voiceId
@@ -562,9 +573,9 @@ function RoteiroDetalhe() {
     }
     if (!canSendToProduction) {
       toast.error(
-        qualityIssues[0]
-          ? `Revise o texto falado antes de enviar: ${qualityIssues[0]}`
-          : 'Conclua a revisão e altere o status do roteiro para "Pronto".',
+        blockingQualityIssues[0]
+          ? `Revise o texto falado antes de enviar: ${blockingQualityIssues[0]}`
+          : productionBlockedReason || 'Conclua a revisão e altere o status do roteiro para "Pronto".',
       );
       return;
     }
@@ -675,10 +686,6 @@ function RoteiroDetalhe() {
 
   async function gerarPrevia() {
     if (!draft || !script) return;
-    if (avatarMode === "set") {
-      toast.error("A prévia de Avatar Set será habilitada após o Scene Plan.");
-      return;
-    }
     if (!approvalReady) {
       toast.error('Conclua a revisão e altere o status do roteiro para "Pronto".');
       return;
@@ -775,7 +782,11 @@ function RoteiroDetalhe() {
             <>
               <ConfirmAction
                 title="Gerar prévia técnica de 10 segundos?"
-                description="Este clique envia somente o começo naturalizado ao HeyGen e pode consumir créditos da conta."
+                description={
+                  avatarMode === "set"
+                    ? "A prévia usa o look principal do Avatar Set para validar voz e enquadramento. O vídeo final usará as cenas e posições salvas. Este clique pode consumir créditos da conta."
+                    : "Este clique envia somente o começo naturalizado ao HeyGen e pode consumir créditos da conta."
+                }
                 confirmLabel="Gerar prévia"
                 onConfirm={() => void gerarPrevia()}
                 trigger={
@@ -787,8 +798,7 @@ function RoteiroDetalhe() {
                       previewing ||
                       !selectedAvatarReady ||
                       !voiceId ||
-                      !approvalReady ||
-                      !productionModeReady
+                      !approvalReady
                     }
                   >
                     <Film className="mr-1 h-4 w-4" /> Gerar prévia
@@ -1055,13 +1065,19 @@ function RoteiroDetalhe() {
               </div>
               <div
                 className={`rounded-md border px-2.5 py-1.5 text-right text-[11px] ${
-                  qualityIssues.length
+                  blockingQualityIssues.length
                     ? "border-status-warn/40 bg-status-warn/10 text-status-warn-foreground"
-                    : "border-status-success/30 bg-status-success/10 text-status-success-foreground"
+                    : qualityIssues.length
+                      ? "border-status-info/30 bg-status-info/10 text-status-info-foreground"
+                      : "border-status-success/30 bg-status-success/10 text-status-success-foreground"
                 }`}
               >
                 <div className="font-semibold">
-                  {qualityIssues.length ? "Revisão necessária" : "Fala pronta"}
+                  {blockingQualityIssues.length
+                    ? "Revisão necessária"
+                    : qualityIssues.length
+                      ? "Aviso de duração"
+                      : "Fala pronta"}
                 </div>
                 <div className="mt-0.5 opacity-80">
                   {narrationWords} palavras · ~{estimatedSpeechSeconds}s
@@ -1502,11 +1518,19 @@ function RoteiroDetalhe() {
                 </div>
               ) : null}
               {qualityIssues.length > 0 ? (
-                <div className="mt-2 rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-[11px] leading-4 text-status-danger">
+                <div
+                  className={`mt-2 rounded-md border px-3 py-2 text-[11px] leading-4 ${
+                    blockingQualityIssues.length
+                      ? "border-status-danger/30 bg-status-danger/10 text-status-danger"
+                      : "border-status-info/30 bg-status-info/10 text-status-info"
+                  }`}
+                >
                   <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 font-semibold">
                       <TriangleAlert className="h-3.5 w-3.5" />
-                      Revise antes de enviar ao HeyGen
+                      {blockingQualityIssues.length
+                        ? "Revise antes de enviar ao HeyGen"
+                        : "Aviso antes do envio"}
                     </div>
                     {qualityIssues.some((issue) => issue.includes("frase final")) ? (
                       <Button
@@ -1568,7 +1592,7 @@ function RoteiroDetalhe() {
             catalogError={catalogError}
             avatarReady={selectedAvatarReady}
             voiceReady={Boolean(voiceId)}
-            speechReady={qualityIssues.length === 0}
+            speechReady={blockingQualityIssues.length === 0}
             speechIssue={qualityIssues[0]}
             approvalReady={approvalReady}
             saved={!dirty}
@@ -1972,6 +1996,18 @@ type EditableScene = {
   estimatedEnd: number;
 };
 
+function resolveSceneRole(
+  requestedRole: AvatarSetRole,
+  index: number,
+  availableRoles: AvatarSetRole[],
+): AvatarSetRole {
+  return (
+    (availableRoles.includes(requestedRole)
+      ? requestedRole
+      : availableRoles[index % Math.max(availableRoles.length, 1)]) || "primary"
+  );
+}
+
 function defaultSceneDraft(text: string, roles: AvatarSetRole[]): EditableScene[] {
   const clean = text.replace(/\s+/g, " ").trim();
   const sentences = clean.match(/[^.!?…]+[.!?…]*/g)?.map((sentence) => sentence.trim()).filter(Boolean) || [];
@@ -2019,10 +2055,10 @@ function ScenePlanEditor({
   useEffect(() => {
     if (loading) return;
     setScenes(
-      plan?.scenes.map((scene) => ({
+      plan?.scenes.map((scene, index) => ({
         id: scene.id,
         text: scene.text,
-        lookRole: availableRoles.includes(scene.lookRole) ? scene.lookRole : availableRoles[0] || "primary",
+        lookRole: resolveSceneRole(scene.lookRole, index, availableRoles),
         estimatedStart: scene.estimatedStart,
         estimatedEnd: scene.estimatedEnd,
       })) || defaultSceneDraft(fallbackText, availableRoles),
@@ -2065,7 +2101,7 @@ function ScenePlanEditor({
         result.scenes.map((scene, index) => ({
           id: `scene-${index + 1}`,
           text: scene.text,
-          lookRole: availableRoles.includes(scene.lookRole) ? scene.lookRole : availableRoles[0] || "primary",
+          lookRole: resolveSceneRole(scene.lookRole, index, availableRoles),
           estimatedStart: 0,
           estimatedEnd: 0,
         })),
@@ -2253,6 +2289,7 @@ function VisualPlanDirector({
   const [rendering, setRendering] = useState(false);
   const [draftPlan, setDraftPlan] = useState<VisualPlan | null>(visualPlan);
   const [error, setError] = useState<string | null>(null);
+  const requiredVisualCount = scenePlan ? Math.max(0, scenePlan.scenes.length - 1) : 0;
 
   useEffect(() => {
     setDraftPlan(visualPlan);
@@ -2340,7 +2377,7 @@ function VisualPlanDirector({
         <div>
           <h4 className="text-xs font-semibold">Direção visual dos apoios</h4>
           <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-            Claude analisa a narrativa completa e decide quando o visual ajuda ou apenas repete a fala.
+            Claude cria {requiredVisualCount} apoio(s) para entrar durante a fala antes dos cortes de look.
           </p>
         </div>
         <Button type="button" size="sm" variant="secondary" onClick={() => void requestVisualDirection()} disabled={loading || directing || !scenePlan}>
@@ -2351,12 +2388,15 @@ function VisualPlanDirector({
       {loading ? <p className="text-xs text-muted-foreground">Carregando direção visual...</p> : null}
       {draftPlan ? (
         <div className="space-y-2">
-          {draftPlan.scenes.map((scene, index) => (
+          {draftPlan.scenes.map((scene, index) => {
+            const requiresVisual = index < requiredVisualCount;
+            const closesOnAvatar = requiredVisualCount > 0 && index >= requiredVisualCount;
+            return (
             <div key={scene.sceneId} className="rounded-md border bg-background p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold">Cena {index + 1}</span>
                 <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium uppercase">
-                  {scene.visual.type === "none" ? "Somente avatar" : scene.visual.layout || scene.visual.type}
+                  {closesOnAvatar ? "Fechamento no avatar" : scene.visual.type === "none" ? "Apoio obrigatório" : scene.visual.layout || scene.visual.type}
                 </span>
               </div>
               <div className="grid gap-2 md:grid-cols-[180px_1fr]">
@@ -2364,6 +2404,7 @@ function VisualPlanDirector({
                   <Field label="Tipo">
                     <Select
                       value={scene.visual.type}
+                      disabled={closesOnAvatar}
                       onValueChange={(value) =>
                         updateVisual(scene.sceneId, {
                           type: value as VideoVisualType,
@@ -2375,11 +2416,11 @@ function VisualPlanDirector({
                     >
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        {VIDEO_VISUAL_TYPE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                        {VIDEO_VISUAL_TYPE_OPTIONS.filter((option) => !requiresVisual || option.value !== "none").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </Field>
-                  {scene.visual.type !== "none" ? (
+                  {scene.visual.type !== "none" && !closesOnAvatar ? (
                     <Field label="Layout">
                       <Select
                         value={scene.visual.layout || "big_statement"}
@@ -2393,8 +2434,10 @@ function VisualPlanDirector({
                     </Field>
                   ) : null}
                 </div>
-                {scene.visual.type === "none" ? (
-                  <p className="flex items-center text-xs text-muted-foreground">Nenhum apoio visual recomendado nesta cena.</p>
+                {closesOnAvatar ? (
+                  <p className="flex items-center text-xs text-muted-foreground">A última cena fica limpa para o próximo look fechar a fala.</p>
+                ) : scene.visual.type === "none" ? (
+                  <p className="flex items-center text-xs text-muted-foreground">Esta cena precisa de um apoio visual antes do próximo corte de look.</p>
                 ) : (
                   <div className="space-y-2">
                     <Input value={scene.visual.headline} onChange={(event) => updateVisual(scene.sceneId, { headline: event.target.value })} placeholder="Headline curta" />
@@ -2404,7 +2447,8 @@ function VisualPlanDirector({
                 )}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : null}
       {draftPlan ? <div className="flex justify-end"><Button type="button" size="sm" onClick={() => void save()} disabled={saving || loading}>{saving ? "Salvando..." : "Salvar direção visual"}</Button></div> : null}

@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote, quote_plus, urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -50,6 +50,7 @@ from api.pack_design import (
     empty_fields,
     normalize_slide,
     photo_asset,
+    repair_pack_copy,
     slide_headline,
     validate_pack_contract,
 )
@@ -74,6 +75,7 @@ from api.services.video_generation import (
     normalize_caption_srt,
 )
 from api.services.scene_generation import build_scene_generation_result
+from api.services.video_composer import CompositionScene, compose_video
 from api.services.pack_context import PACK_CONTEXT_VERSION, build_pack_context
 from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
@@ -94,6 +96,7 @@ CUT_OUTPUTS = ROOT / "data" / "cuts"
 PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
 PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
 VIDEO_SLIDE_OUTPUTS = ROOT / "data" / "video_slides"
+COMPOSED_VIDEO_OUTPUTS = ROOT / "data" / "composed_videos"
 MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
@@ -494,6 +497,7 @@ def _save_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, 
 
 VIDEO_VISUAL_DESIGN_SYSTEM_VERSION = "video-vertical-v1"
 VIDEO_VISUAL_TYPES = frozenset({"none", "full_slide", "overlay", "statistic", "comparison", "quote"})
+VIDEO_VISUAL_MOTION_PRESETS = frozenset({"none", "fade", "soft_zoom", "fade_zoom"})
 VIDEO_VISUAL_LAYOUTS = frozenset(
     {
         "hero_photo",
@@ -510,6 +514,98 @@ VIDEO_VISUAL_LAYOUTS = frozenset(
         "cta_photo",
     }
 )
+
+
+def _required_visual_support_count(scene_count: int) -> int:
+    """Apoios visuais entram durante a fala antes do próximo look/cena."""
+    return max(0, scene_count - 1)
+
+
+def _visual_support_required(scene_index: int, scene_count: int) -> bool:
+    return scene_index < _required_visual_support_count(scene_count)
+
+
+def _fallback_visual_from_scene(scene: dict[str, Any], index: int) -> dict[str, str]:
+    text = re.sub(r"\s+", " ", str(scene.get("text") or "")).strip()
+    first_sentence = re.split(r"(?<=[.!?])\s+", text)[0] if text else ""
+    headline = first_sentence[:72].strip(" .,:;") or f"Apoio visual {index + 1}"
+    body = text[len(first_sentence):].strip()[:180] if first_sentence and len(text) > len(first_sentence) else ""
+    return {
+        "type": "full_slide",
+        "layout": "big_statement",
+        "headline": headline,
+        "body": body,
+        "purpose": "Apoiar visualmente a fala enquanto o áudio do avatar continua.",
+    }
+
+
+def _normalize_video_visual(
+    visual: dict[str, Any],
+    *,
+    scene: dict[str, Any],
+    index: int,
+    scene_count: int,
+    strict_required: bool = False,
+) -> dict[str, str]:
+    visual_type = str(visual.get("type") or "none")
+    if visual_type not in VIDEO_VISUAL_TYPES:
+        visual_type = "none"
+    layout = str(visual.get("layout") or "")
+    if layout not in VIDEO_VISUAL_LAYOUTS:
+        layout = ""
+    headline = re.sub(r"\s+", " ", str(visual.get("headline") or "")).strip()[:180]
+    body = re.sub(r"\s+", " ", str(visual.get("body") or "")).strip()[:500]
+    purpose = re.sub(r"\s+", " ", str(visual.get("purpose") or "")).strip()[:300]
+    try:
+        start_ratio = float(visual.get("startRatio", 0.35))
+    except (TypeError, ValueError):
+        start_ratio = 0.35
+    start_ratio = max(0.15, min(0.70, start_ratio))
+    try:
+        duration_seconds = float(visual.get("durationSeconds", 2.5))
+    except (TypeError, ValueError):
+        duration_seconds = 2.5
+    duration_seconds = max(1.0, min(5.0, duration_seconds))
+    motion_preset = str(visual.get("motionPreset") or "fade")
+    if motion_preset not in VIDEO_VISUAL_MOTION_PRESETS:
+        motion_preset = "fade"
+    support_required = _visual_support_required(index, scene_count)
+    if support_required and (visual_type == "none" or not headline):
+        if strict_required:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A cena {index + 1} precisa de um apoio visual porque há uma próxima cena/look.",
+            )
+        fallback = _fallback_visual_from_scene(scene, index)
+        visual_type = str(fallback["type"])
+        layout = str(fallback["layout"])
+        headline = headline or str(fallback["headline"])
+        body = body or str(fallback["body"])
+        purpose = purpose or str(fallback["purpose"])
+    if scene_count > 1 and not support_required and index >= _required_visual_support_count(scene_count):
+        visual_type = "none"
+    if visual_type == "none":
+        layout = ""
+        headline = ""
+        body = ""
+        start_ratio = 0.0
+        duration_seconds = 0.0
+        motion_preset = "none"
+    elif not layout:
+        layout = "big_statement"
+    if visual_type != "none":
+        _validate_production_compliance(headline, field=f"Headline visual da cena {index + 1}")
+        _validate_production_compliance(body, field=f"Body visual da cena {index + 1}")
+    return {
+        "type": visual_type,
+        "layout": layout,
+        "headline": headline,
+        "body": body,
+        "purpose": purpose,
+        "startRatio": round(start_ratio, 3),
+        "durationSeconds": round(duration_seconds, 2),
+        "motionPreset": motion_preset,
+    }
 
 
 def _get_visual_plan(script_id: str) -> dict[str, Any] | None:
@@ -601,6 +697,263 @@ def _video_slide_public_render(script_id: str, render: dict[str, Any] | None) ->
             )
         public["assets"].append(item)
     return public
+
+
+def _composed_video_output_dir(script_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", script_id).strip("-") or "script"
+    digest = hashlib.sha256(script_id.encode("utf-8")).hexdigest()[:12]
+    return COMPOSED_VIDEO_OUTPUTS / f"{safe_id}-{digest}"
+
+
+def _local_output_path(raw_path: Any) -> Path | None:
+    if not raw_path:
+        return None
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = ROOT / path
+    try:
+        resolved = path.resolve()
+        root = ROOT.resolve()
+    except OSError:
+        return None
+    if resolved == root or root not in resolved.parents:
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _probe_video_duration(path: Path) -> float:
+    process = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(process.stderr or "Não foi possível medir a duração do vídeo.")
+    try:
+        return float(json.loads(process.stdout)["format"]["duration"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("FFprobe não retornou uma duração válida.") from exc
+
+
+def _copy_or_download_video(job: dict[str, Any], destination: Path) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    local_path = _local_output_path(job.get("outputPath"))
+    if local_path:
+        shutil.copyfile(local_path, destination)
+        return destination
+    video_url = str(job.get("videoUrl") or "")
+    parsed = urlparse(video_url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (hostname == "heygen.ai" or hostname.endswith(".heygen.ai")):
+        raise HTTPException(status_code=409, detail=f"Cena {job.get('sceneId') or job.get('id')} sem MP4 disponível.")
+    try:
+        with requests.get(video_url, stream=True, timeout=(15, 300)) as response:
+            response.raise_for_status()
+            with destination.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Não foi possível baixar uma cena pronta.") from exc
+    return destination
+
+
+def _scene_jobs_ready(script_id: str, scene_plan: dict[str, Any]) -> list[dict[str, Any]] | None:
+    jobs = [job for job in _load_video_jobs() if job.get("scriptId") == script_id and job.get("isScene")]
+    ready_by_scene: dict[str, list[dict[str, Any]]] = {}
+    for job in jobs:
+        if job.get("status") == "pronto":
+            ready_by_scene.setdefault(str(job.get("sceneId") or ""), []).append(job)
+    ordered: list[dict[str, Any]] = []
+    for scene in scene_plan.get("scenes") or []:
+        scene_id = str(scene.get("id") or "")
+        candidates = sorted(
+            ready_by_scene.get(scene_id, []),
+            key=lambda item: str(item.get("atualizadoEm") or item.get("criadoEm") or ""),
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        ordered.append(candidates[0])
+    return ordered
+
+
+def _visual_asset_by_scene(script_id: str, visual_plan: dict[str, Any]) -> dict[str, Path]:
+    render = _get_video_slide_render(script_id)
+    if not render or not render.get("assets"):
+        render = _save_video_slide_render(script_id, render_video_slides(_video_slide_output_dir(script_id), visual_plan))
+    assets: dict[str, Path] = {}
+    root = _video_slide_output_dir(script_id).resolve()
+    for asset in render.get("assets") or []:
+        filename = str(asset.get("assetPath") or "")
+        if not filename:
+            continue
+        path = (root / filename).resolve()
+        if root in path.parents and path.is_file():
+            assets[str(asset.get("sceneId") or "")] = path
+    return assets
+
+
+def _composed_video_file_response(job: dict[str, Any], *, download: bool) -> FileResponse:
+    path = _local_output_path(job.get("outputPath"))
+    if not path:
+        raise HTTPException(status_code=404, detail="Arquivo composto não encontrado.")
+    try:
+        script = _find_script(str(job.get("scriptId") or ""))
+        base_name = str(script.get("titulo") or "video-final")
+    except HTTPException:
+        base_name = "video-final"
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", _norm(base_name)).strip("-") or "video-final"
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"{safe_name}.mp4" if download else None,
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
+def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool = False) -> dict[str, Any] | None:
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        if raise_when_not_ready:
+            raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de compor o vídeo final.")
+        return None
+    scene_jobs = _scene_jobs_ready(script_id, scene_plan)
+    if scene_jobs is None:
+        if raise_when_not_ready:
+            raise HTTPException(status_code=409, detail="Todas as cenas precisam estar prontas antes da composição final.")
+        return None
+    visual_plan = _get_visual_plan(script_id)
+    scene_count = len(scene_plan["scenes"])
+    if scene_count > 1 and (not visual_plan or not visual_plan.get("scenes")):
+        if raise_when_not_ready:
+            raise HTTPException(status_code=409, detail="Salve o Visual Plan antes de compor o vídeo final.")
+        return None
+    visual_plan = visual_plan or {"scenes": []}
+    required_supports = _required_visual_support_count(scene_count)
+    visual_by_scene = {
+        str(item.get("sceneId")): item.get("visual")
+        for item in visual_plan.get("scenes") or []
+        if isinstance(item, dict) and isinstance(item.get("visual"), dict)
+    }
+    asset_by_scene = _visual_asset_by_scene(script_id, visual_plan) if required_supports else {}
+    output_root = _composed_video_output_dir(script_id)
+    source_ids = [str(job["id"]) for job in scene_jobs]
+    composition_key = hashlib.sha256(
+        json.dumps(
+            {
+                "scriptId": script_id,
+                "sources": source_ids,
+                "visualPlanUpdatedAt": visual_plan.get("updatedAt"),
+                "requiredSupportSlides": required_supports,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    job_id = f"vc-{composition_key}"
+    existing = _job_store().get("video", job_id)
+    if existing and existing.get("status") == "pronto" and _local_output_path(existing.get("outputPath")):
+        return existing
+
+    now = _now()
+    output_path = output_root / f"{job_id}.mp4"
+    relative_output = str(output_path.relative_to(ROOT))
+    job = existing or {
+        "id": job_id,
+        "scriptId": script_id,
+        "provider": "local",
+        "progresso": 0,
+        "criadoEm": now,
+        "sourceSceneJobs": source_ids,
+        "sceneCount": scene_count,
+        "visualCount": required_supports,
+        "isComposed": True,
+    }
+    job.update(
+        {
+            "status": "processando",
+            "progresso": 40,
+            "atualizadoEm": now,
+            "outputPath": relative_output,
+            "videoUrl": f"/api/videos/{quote(job_id, safe='')}/file",
+            "sourceSceneJobs": source_ids,
+            "sceneCount": scene_count,
+            "visualCount": required_supports,
+            "isComposed": True,
+            "submissionState": "local_composing",
+        }
+    )
+    _job_store().upsert("video", job, idempotency_key=f"compose-final:{composition_key}")
+    try:
+        source_root = output_root / "sources" / job_id
+        composition_scenes: list[CompositionScene] = []
+        total_duration = 0.0
+        for index, (scene, scene_job) in enumerate(zip(scene_plan["scenes"], scene_jobs, strict=True), start=1):
+            scene_id = str(scene["id"])
+            scene_path = _copy_or_download_video(scene_job, source_root / f"{index:02d}-{scene_id}.mp4")
+            duration = _probe_video_duration(scene_path)
+            total_duration += duration
+            visual = visual_by_scene.get(scene_id) or {}
+            slide_path = asset_by_scene.get(scene_id)
+            slide_duration = float(visual.get("durationSeconds") or 0) if isinstance(visual, dict) else 0.0
+            start_ratio = float(visual.get("startRatio") or 0.35) if isinstance(visual, dict) else 0.35
+            start_ratio = max(0.15, min(0.70, start_ratio))
+            start_seconds = max(0.0, min(duration * start_ratio, max(0.0, duration - 0.5)))
+            usable_duration = max(0.3, duration - start_seconds - 0.1)
+            slide_duration = min(max(1.0, slide_duration or 2.5), 5.0, usable_duration)
+            if index <= required_supports and not slide_path:
+                raise HTTPException(status_code=409, detail=f"Apoio visual da cena {index} não foi renderizado.")
+            composition_scenes.append(
+                CompositionScene(
+                    scene_id=scene_id,
+                    video_path=scene_path,
+                    slide_path=slide_path if index <= required_supports else None,
+                    slide_mode="during",
+                    visual_start_seconds=start_seconds,
+                    slide_duration_seconds=slide_duration,
+                    visual_animation=str(visual.get("motionPreset") or "fade") if isinstance(visual, dict) else "fade",
+                )
+            )
+        manifest = compose_video(composition_scenes, output_path)
+        final_duration = _probe_video_duration(output_path)
+        job.update(
+            {
+                "status": "pronto",
+                "progresso": 100,
+                "submissionState": "completed",
+                "atualizadoEm": _now(),
+                "duracaoSegundos": round(final_duration or total_duration, 2),
+                "composition": manifest,
+            }
+        )
+    except Exception as exc:
+        job.update(
+            {
+                "status": "erro",
+                "progresso": 0,
+                "erro": str(exc.detail) if isinstance(exc, HTTPException) else str(exc),
+                "submissionState": "local_failed",
+                "atualizadoEm": _now(),
+            }
+        )
+        _job_store().upsert("video", job, idempotency_key=f"compose-final:{composition_key}")
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=503, detail=f"Não foi possível compor o vídeo final: {exc}") from exc
+    _job_store().upsert("video", job, idempotency_key=f"compose-final:{composition_key}")
+    return job
 
 
 def _get_visual_pack(script_id: str) -> dict[str, Any] | None:
@@ -2199,6 +2552,9 @@ class VisualPlanVisualIn(BaseModel):
     headline: str = Field(default="", max_length=180)
     body: str = Field(default="", max_length=500)
     purpose: str = Field(default="", max_length=300)
+    startRatio: float = Field(default=0.35, ge=0, le=1)
+    durationSeconds: float = Field(default=2.5, ge=0, le=60)
+    motionPreset: str = Field(default="fade", max_length=40)
 
 
 class VisualPlanSceneIn(BaseModel):
@@ -2211,7 +2567,7 @@ class VisualPlanIn(BaseModel):
 
 
 SCENE_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-scene-director"
-VISUAL_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-visual-director"
+VISUAL_DIRECTOR_PROMPT_VERSION = "2026-08-07-v2-visual-director"
 _SCENE_DIRECTOR_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -2252,8 +2608,20 @@ _VISUAL_DIRECTOR_SCHEMA = {
                             "headline": {"type": "string"},
                             "body": {"type": "string"},
                             "purpose": {"type": "string"},
+                            "startRatio": {"type": "number"},
+                            "durationSeconds": {"type": "number"},
+                            "motionPreset": {"type": "string"},
                         },
-                        "required": ["type", "layout", "headline", "body", "purpose"],
+                        "required": [
+                            "type",
+                            "layout",
+                            "headline",
+                            "body",
+                            "purpose",
+                            "startRatio",
+                            "durationSeconds",
+                            "motionPreset",
+                        ],
                     },
                 },
                 "required": ["sceneId", "visual"],
@@ -2468,7 +2836,11 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 "cutPolicy": "hard_cut",
             },
         }
-        job, reservation = _job_store().reserve_video(reserved_job, idempotency_key=scene_key)
+        job, reservation = _job_store().reserve_video(
+            reserved_job,
+            idempotency_key=scene_key,
+            force_new_version=False,
+        )
         if reservation == "duplicate":
             jobs.append(job)
             continue
@@ -2633,34 +3005,19 @@ def save_script_visual_plan(script_id: str, payload: VisualPlanIn) -> dict:
         raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de editar a direção visual.")
     submitted = {scene.sceneId: scene.visual.model_dump() for scene in payload.scenes}
     visual_scenes: list[dict[str, Any]] = []
+    scene_count = len(scene_plan["scenes"])
     for index, scene in enumerate(scene_plan["scenes"]):
         visual = submitted.get(str(scene["id"]), {})
-        visual_type = str(visual.get("type") or "none")
-        if visual_type not in VIDEO_VISUAL_TYPES:
-            raise HTTPException(status_code=422, detail=f"Tipo visual inválido na cena {index + 1}.")
-        layout = str(visual.get("layout") or "")
-        if visual_type != "none" and layout not in VIDEO_VISUAL_LAYOUTS:
-            raise HTTPException(status_code=422, detail=f"Layout visual inválido na cena {index + 1}.")
-        headline = re.sub(r"\s+", " ", str(visual.get("headline") or "")).strip()[:180]
-        body = re.sub(r"\s+", " ", str(visual.get("body") or "")).strip()[:500]
-        purpose = re.sub(r"\s+", " ", str(visual.get("purpose") or "")).strip()[:300]
-        if visual_type == "none":
-            layout = ""
-            headline = ""
-            body = ""
-        else:
-            _validate_production_compliance(headline, field=f"Headline visual da cena {index + 1}")
-            _validate_production_compliance(body, field=f"Body visual da cena {index + 1}")
         visual_scenes.append(
             {
                 "sceneId": scene["id"],
-                "visual": {
-                    "type": visual_type,
-                    "layout": layout,
-                    "headline": headline,
-                    "body": body,
-                    "purpose": purpose,
-                },
+                "visual": _normalize_video_visual(
+                    visual,
+                    scene=scene,
+                    index=index,
+                    scene_count=scene_count,
+                    strict_required=True,
+                ),
             }
         )
     plan = {
@@ -2705,6 +3062,13 @@ def get_video_slide_file(script_id: str, filename: str) -> FileResponse:
     return FileResponse(path, media_type="image/png")
 
 
+@app.post("/api/scripts/{script_id}/compose-final-video")
+def compose_script_final_video(script_id: str) -> dict:
+    _find_script(script_id)
+    job = _compose_final_video_if_ready(script_id, raise_when_not_ready=True)
+    return {"ok": True, "job": job}
+
+
 @app.post("/api/scripts/{script_id}/visual-plan/direct")
 def direct_visual_plan(script_id: str, payload: VisualDirectorIn) -> dict:
     """Analisa o vídeo inteiro e sugere apoios visuais somente após clique explícito."""
@@ -2719,16 +3083,27 @@ def direct_visual_plan(script_id: str, payload: VisualDirectorIn) -> dict:
         raise HTTPException(status_code=503, detail="Defina ANTHROPIC_API_KEY para gerar direção visual com Claude.")
 
     avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    scene_count = len(scene_plan["scenes"])
+    required_supports = _required_visual_support_count(scene_count)
     design_system = {
         "version": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
         "canvas": "1080x1920",
         "allowedTypes": sorted(VIDEO_VISUAL_TYPES),
         "allowedLayouts": sorted(VIDEO_VISUAL_LAYOUTS),
+        "allowedMotionPresets": sorted(VIDEO_VISUAL_MOTION_PRESETS),
+        "requiredSupportSlides": required_supports,
+        "supportPolicy": (
+            "Se houver N cenas, crie exatamente N-1 apoios visuais: um para cada cena antes da última. "
+            "O apoio aparece durante o áudio do avatar; a troca de avatar/look acontece somente no corte para a próxima cena."
+        ),
         "rules": [
             "headline de 3 a 8 palavras quando houver headline",
             "linguagem simples e complementar à fala",
             "não transcrever o roteiro",
             "não gerar HTML, CSS ou JavaScript",
+            "startRatio sempre entre 0.15 e 0.70 para apoios obrigatórios",
+            "durationSeconds entre 1.0 e 5.0",
+            "motionPreset somente none, fade, soft_zoom ou fade_zoom",
         ],
     }
     cache_payload = {
@@ -2771,7 +3146,14 @@ o que está sendo dito agora e o que será explicado depois.
 
 Regras obrigatórias:
 - Retorne exatamente uma entrada para cada cena do PLANO_DE_CENAS.
-- Use visual.type none quando o médico sozinho for mais forte.
+- Se o vídeo tiver N cenas, crie exatamente N-1 apoios visuais.
+- Para as primeiras N-1 cenas, visual.type não pode ser none.
+- Para a última cena, use visual.type none para fechar no avatar.
+- O apoio visual aparece durante a fala do avatar; ele não é um intervalo mudo.
+- startRatio é posição relativa dentro da própria cena, nunca timestamp absoluto.
+- Para apoios obrigatórios, startRatio deve ficar entre 0.15 e 0.70.
+- durationSeconds deve ficar entre 1.0 e 5.0.
+- motionPreset deve ser um dos presets permitidos.
 - Quando usar visual, escolha somente tipos e layouts permitidos no DESIGN_SYSTEM.
 - O visual deve complementar, não repetir ou transcrever, a fala.
 - Headline ideal: 3–8 palavras. Evite parágrafos.
@@ -2815,32 +3197,15 @@ VERSÃO DO PROMPT: {VISUAL_DIRECTOR_PROMPT_VERSION}"""
             raw_item = raw_items[index] if index < len(raw_items) and isinstance(raw_items[index], dict) else {}
         raw_visual = raw_item.get("visual") if isinstance(raw_item, dict) else {}
         raw_visual = raw_visual if isinstance(raw_visual, dict) else {}
-        visual_type = str(raw_visual.get("type") or "none")
-        if visual_type not in VIDEO_VISUAL_TYPES:
-            visual_type = "none"
-        layout = str(raw_visual.get("layout") or "")
-        if layout not in VIDEO_VISUAL_LAYOUTS:
-            layout = ""
-        headline = re.sub(r"\s+", " ", str(raw_visual.get("headline") or "")).strip()[:180]
-        body = re.sub(r"\s+", " ", str(raw_visual.get("body") or "")).strip()[:500]
-        purpose = re.sub(r"\s+", " ", str(raw_visual.get("purpose") or "")).strip()[:300]
-        if visual_type == "none":
-            layout = ""
-            headline = ""
-            body = ""
-        else:
-            _validate_production_compliance(headline, field=f"Headline visual da cena {index + 1}")
-            _validate_production_compliance(body, field=f"Body visual da cena {index + 1}")
         visual_scenes.append(
             {
                 "sceneId": scene["id"],
-                "visual": {
-                    "type": visual_type,
-                    "layout": layout,
-                    "headline": headline,
-                    "body": body,
-                    "purpose": purpose,
-                },
+                "visual": _normalize_video_visual(
+                    raw_visual,
+                    scene=scene,
+                    index=index,
+                    scene_count=scene_count,
+                ),
             }
         )
     plan = {
@@ -3669,6 +4034,7 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
         allowed_avatar_ids = {look.get("id") for look in ready_looks}
         if payload.avatarId not in allowed_avatar_ids:
             raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
+        existing_profile = _production_profile(payload.scriptId) or {}
         _save_production_profile(
             {
                 "scriptId": payload.scriptId,
@@ -3676,6 +4042,9 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
                 "voiceId": payload.voiceId,
                 "speechMode": payload.speechMode,
                 "generationMode": "direct",
+                "avatarMode": existing_profile.get("avatarMode", "single"),
+                "avatarSetId": existing_profile.get("avatarSetId"),
+                "primaryAvatarId": existing_profile.get("primaryAvatarId") or payload.avatarId,
             }
         )
         job["submissionState"] = "submitting"
@@ -3791,15 +4160,23 @@ def refresh_video(job_id: str) -> dict:
         )
     job["submissionState"] = "completed" if status == "pronto" else "processing"
     _job_store().upsert("video", job)
-    return {"ok": True, "job": job}
+    composed_job = None
+    if job.get("isScene") and job.get("status") == "pronto":
+        try:
+            composed_job = _compose_final_video_if_ready(str(job.get("scriptId") or ""))
+        except HTTPException:
+            pass
+    return {"ok": True, "job": job, "composedJob": composed_job}
 
 
 @app.get("/api/videos/{job_id}/download")
-def download_video(job_id: str) -> StreamingResponse:
+def download_video(job_id: str):
     """Transmite o MP4 pronto do HeyGen como download com nome amigavel."""
     job = _job_store().get("video", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Video nao encontrado.")
+    if job.get("isComposed"):
+        return _composed_video_file_response(job, download=True)
     video_url = str(job.get("videoUrl") or "")
     parsed = urlparse(video_url)
     hostname = (parsed.hostname or "").lower()
@@ -3832,6 +4209,14 @@ def download_video(job_id: str) -> StreamingResponse:
         media_type=response.headers.get("content-type", "video/mp4"),
         headers={"Content-Disposition": f'attachment; filename="{safe_name}.mp4"'},
     )
+
+
+@app.get("/api/videos/{job_id}/file")
+def video_file(job_id: str) -> FileResponse:
+    job = _job_store().get("video", job_id)
+    if not job or not job.get("isComposed"):
+        raise HTTPException(status_code=404, detail="Vídeo local não encontrado.")
+    return _composed_video_file_response(job, download=False)
 
 
 class CutCreateIn(BaseModel):
@@ -6467,7 +6852,11 @@ def _validate_final_narration(
     final_text = _strip_video_outros(text, outro) if duration_seconds == 10 else text
     if selected_outro and selected_outro.lower() not in final_text.lower():
         final_text = f"{final_text.rstrip()} {selected_outro}"
-    quality_issues = _narration_quality_issues(final_text, duration_seconds, selected_outro)
+    quality_issues = [
+        issue
+        for issue in _narration_quality_issues(final_text, duration_seconds, selected_outro)
+        if not issue.startswith("Texto muito curto")
+    ]
     if quality_issues:
         reasons = "; ".join(quality_issues)
         raise HTTPException(
@@ -6739,7 +7128,7 @@ def _pack_design_plan(pack: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_pack_design(pack: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(pack)
+    normalized = repair_pack_copy(pack)
     raw_carousel = normalized.get("carousel")
     if not isinstance(raw_carousel, list):
         raw_carousel = normalized.get("slides") if isinstance(normalized.get("slides"), list) else []
@@ -6990,10 +7379,12 @@ def generate_pack(payload: PackIn) -> dict:
         model = os.getenv("ANTHROPIC_PACK_MODEL", "claude-haiku-4-5")
         message, pack = request_pack(client, model)
         _record_anthropic_usage("packs.generate", model, message)
+        pack = repair_pack_copy(pack)
         validation_errors = validate_pack_contract(pack)
         if validation_errors:
             message, pack = request_pack(client, model, validation_errors)
             _record_anthropic_usage("packs.generate.repair", model, message)
+            pack = repair_pack_copy(pack)
             validation_errors = validate_pack_contract(pack)
         if validation_errors:
             raise HTTPException(

@@ -41,6 +41,7 @@ function ProducaoLayout() {
 export function ProducaoPage() {
   const jobs = useStore((s) => s.videoJobs);
   const scripts = useStore((s) => s.scripts);
+  const addVideoJob = useStore((s) => s.addVideoJob);
   const updateVideoJob = useStore((s) => s.updateVideoJob);
   const [status, setStatus] = useState("todos");
 
@@ -107,15 +108,24 @@ export function ProducaoPage() {
             <TableBody>
               {filtered.map((j) => {
                 const s = scripts.find((x) => x.id === j.scriptId);
+                const jobLabel = j.isComposed
+                  ? "Vídeo final composto"
+                  : j.isScene
+                    ? `Cena ${j.sceneOrder ?? j.sceneId ?? ""}`.trim()
+                    : j.isPreview
+                      ? "Prévia"
+                      : (jobsByScript.get(j.scriptId)?.length || 0) > 1
+                        ? `Versão ${versions.get(j.id)}`
+                        : "";
                 return (
                   <TableRow key={j.id}>
                     <TableCell className="font-medium">
                       <Link to="/producao/$id" params={{ id: j.id }} className="hover:underline">
                         {s ? s.titulo : "—"}
                       </Link>
-                      {(jobsByScript.get(j.scriptId)?.length || 0) > 1 ? (
+                      {jobLabel ? (
                         <div className="mt-1 text-[11px] font-normal text-muted-foreground">
-                          Versão {versions.get(j.id)}
+                          {jobLabel}
                         </div>
                       ) : null}
                     </TableCell>
@@ -140,12 +150,16 @@ export function ProducaoPage() {
                           <Button
                             size="sm"
                             variant="secondary"
+                            disabled={j.provider === "local"}
                             onClick={async () => {
                               try {
-                                const updated = await refreshHeyGenVideo(j.id);
-                                updateVideoJob(j.id, updated);
+                                const result = await refreshHeyGenVideo(j.id);
+                                updateVideoJob(j.id, result.job);
+                                if (result.composedJob) addVideoJob(result.composedJob);
                                 toast.success(
-                                  `Status: ${videoJobStatusLabel[updated.status].label}`,
+                                  result.composedJob
+                                    ? "Vídeo final composto pronto."
+                                    : `Status: ${videoJobStatusLabel[result.job.status].label}`,
                                 );
                               } catch (err) {
                                 toast.error(

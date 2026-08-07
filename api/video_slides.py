@@ -150,6 +150,9 @@ def render_video_slides(output_dir: Path, visual_plan: dict[str, Any]) -> dict[s
                     "layout": str(visual.get("layout") or ""),
                     "headline": str(visual.get("headline") or ""),
                     "body": str(visual.get("body") or ""),
+                    "startRatio": visual.get("startRatio", 0),
+                    "durationSeconds": visual.get("durationSeconds", 0),
+                    "motionPreset": str(visual.get("motionPreset") or "none"),
                     "assetPath": None,
                 }
                 if record["type"] != "none":
@@ -170,4 +173,3 @@ def render_video_slides(output_dir: Path, visual_plan: dict[str, Any]) -> dict[s
         "renderedCount": len(renderable),
         "assets": assets,
     }
-
