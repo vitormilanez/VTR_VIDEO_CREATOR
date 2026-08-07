@@ -17,6 +17,7 @@ import {
 import { editorialToneLabel, prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import {
+  createHeyGenPreview,
   createHeyGenVideo,
   fetchHeyGenCatalog,
   fetchHeyGenStyles,
@@ -106,6 +107,7 @@ function RoteiroDetalhe() {
 
   const [draft, setDraft] = useState<Script | undefined>(script);
   const [sending, setSending] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<HeyGenCatalog | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(true);
@@ -117,7 +119,11 @@ function RoteiroDetalhe() {
   const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(
     initialCaptureDuration ?? 45,
   );
-  const [speechMode, setSpeechMode] = useState<"natural" | "fiel" | "direto">("natural");
+  const [speechMode, setSpeechMode] = useState<"natural" | "fiel" | "direto" | "enfatico">(
+    "natural",
+  );
+  const [generationMode, setGenerationMode] = useState<"direct" | "video_agent">("direct");
+  const [ctaMode, setCtaMode] = useState<"auto" | "manual" | "none" | "visual">("auto");
   const [captions, setCaptions] = useState(true);
   const [optimizePronunciation, setOptimizePronunciation] = useState(true);
   const [styleId, setStyleId] = useState("");
@@ -125,25 +131,48 @@ function RoteiroDetalhe() {
   const [narrationText, setNarrationText] = useState(() =>
     script ? buildNarrationText(script, initialOutro) : "",
   );
+  const [displayText, setDisplayText] = useState(() =>
+    script ? buildNarrationText(script, initialOutro) : "",
+  );
+  const [spokenText, setSpokenText] = useState(() =>
+    script ? buildNarrationText(script, initialOutro) : "",
+  );
+  const [performancePlan, setPerformancePlan] = useState<{
+    tone: string;
+    pace: string;
+    emotion: string;
+    recommendedVoiceSpeed: number;
+  } | null>(null);
   const [naturalizing, setNaturalizing] = useState(false);
   const existingJobs = useMemo(
     () =>
       videoJobs
-        .filter((job) => job.scriptId === id && job.status !== "erro")
+        .filter((job) => job.scriptId === id && job.status !== "erro" && !job.isPreview)
+        .sort(
+          (left, right) => new Date(right.criadoEm).getTime() - new Date(left.criadoEm).getTime(),
+        ),
+    [id, videoJobs],
+  );
+  const previewJobs = useMemo(
+    () =>
+      videoJobs
+        .filter((job) => job.scriptId === id && job.status !== "erro" && job.isPreview)
         .sort(
           (left, right) => new Date(right.criadoEm).getTime() - new Date(left.criadoEm).getTime(),
         ),
     [id, videoJobs],
   );
   const latestJob = existingJobs[0];
+  const latestPreview = previewJobs[0];
   const qualityIssues = useMemo(
-    () => narrationQualityIssues(narrationText, durationSeconds, outroText),
-    [durationSeconds, narrationText, outroText],
+    () =>
+      narrationQualityIssues(displayText, durationSeconds, ctaMode === "manual" ? outroText : ""),
+    [ctaMode, displayText, durationSeconds, outroText],
   );
   const hasHighCreditConsumption = durationSeconds >= 45;
   const approvalReady = draft?.status === "aprovado_clinicamente";
   const canSendToProduction = qualityIssues.length === 0 && approvalReady;
-  const narrationWords = narrationText.trim().split(/\s+/).filter(Boolean).length;
+  const narrationWords = displayText.trim().split(/\s+/).filter(Boolean).length;
   const estimatedSpeechSeconds = Math.max(1, Math.round(narrationWords / 2.4));
 
   useEffect(() => {
@@ -152,7 +181,10 @@ function RoteiroDetalhe() {
       const savedCaptureDuration = captureHookDuration(script);
       const savedOutro = savedCaptureDuration === 10 ? "" : script.outroText || DEFAULT_OUTRO;
       setOutroText(savedOutro);
-      setNarrationText(buildNarrationText(script, savedOutro));
+      const initialText = buildNarrationText(script, savedOutro);
+      setNarrationText(initialText);
+      setDisplayText(initialText);
+      setSpokenText(initialText);
       if (savedCaptureDuration !== null) {
         setDurationSeconds(savedCaptureDuration);
         setSpeechMode("direto");
@@ -166,8 +198,12 @@ function RoteiroDetalhe() {
     fetchHeyGenCatalog()
       .then((data) => {
         setCatalog(data);
-        setAvatarId(data.defaultAvatarId || data.avatars[0]?.id || "");
-        setVoiceId(data.defaultVoiceId || data.voices[0]?.id || "");
+        const firstAvatar = data.avatars[0];
+        setAvatarId((current) => current || firstAvatar?.id || "");
+        setVoiceId(
+          (current) =>
+            current || firstAvatar?.defaultVoiceId || data.defaultVoiceId || data.voices[0]?.id || "",
+        );
         if (showSuccess) {
           toast.success(
             data.avatars.length
@@ -208,6 +244,17 @@ function RoteiroDetalhe() {
     }
   }, []);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(script), [draft, script]);
+  const selectedAvatar = useMemo(
+    () => catalog?.avatars.find((avatar) => avatar.id === avatarId),
+    [avatarId, catalog?.avatars],
+  );
+
+  useEffect(() => {
+    if (selectedAvatar?.defaultVoiceId) setVoiceId(selectedAvatar.defaultVoiceId);
+    if (selectedAvatar && generationMode === "direct" && selectedAvatar.supportsDirectAvatar === false) {
+      setGenerationMode("video_agent");
+    }
+  }, [generationMode, selectedAvatar]);
 
   if (!script || !draft) {
     return (
@@ -279,12 +326,16 @@ function RoteiroDetalhe() {
         orientation,
         durationSeconds,
         speechMode,
+        generationMode,
+        ctaMode,
         captions,
         optimizePronunciation,
         styleId: styleId || undefined,
         forceNewVersion,
-        narrationText,
-        outroText: durationSeconds === 10 ? "" : outroText,
+        narrationText: displayText,
+        displayText,
+        spokenText,
+        outroText: ctaMode === "manual" ? outroText : "",
       });
       addVideoJob(job);
       toast.success(
@@ -320,21 +371,69 @@ function RoteiroDetalhe() {
     setNaturalizing(true);
     try {
       const naturalized = await naturalizeScript({
-        text: narrationText,
+        text: displayText || narrationText,
         medicalCautions: draft.cuidadosMedicos,
         durationSeconds,
-        outro: durationSeconds === 10 ? "" : outroText,
+        outro: ctaMode === "manual" ? outroText : "",
+        ctaMode,
+        manualCta: outroText,
+        recentCtas: videoJobs
+          .map((job) => String(job.productionSettings?.outroText || ""))
+          .filter(Boolean)
+          .slice(0, 5),
       });
-      setNarrationText(
-        durationSeconds === 10
-          ? removeNarrationOutro(naturalized, outroText)
-          : normalizeNarrationOutro(naturalized, outroText),
-      );
+      setDisplayText(naturalized.displayText);
+      setNarrationText(naturalized.displayText);
+      setSpokenText(naturalized.spokenText);
+      if (naturalized.cta && ctaMode === "auto") setOutroText(naturalized.cta);
+      if (naturalized.recommendedSpeechMode) setSpeechMode(naturalized.recommendedSpeechMode);
+      setPerformancePlan({
+        tone: naturalized.tone,
+        pace: naturalized.pace,
+        emotion: naturalized.emotion,
+        recommendedVoiceSpeed: naturalized.recommendedVoiceSpeed,
+      });
       toast.success("Texto naturalizado. Revise a fala antes de enviar.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Não foi possível naturalizar o texto.");
     } finally {
       setNaturalizing(false);
+    }
+  }
+
+  async function gerarPrevia() {
+    if (!draft || !script) return;
+    if (!approvalReady) {
+      toast.error('Conclua a revisão e altere o status do roteiro para "Pronto".');
+      return;
+    }
+    setPreviewing(true);
+    try {
+      let scriptToSend = script;
+      if (dirty) {
+        const saved = await saveScript(draft);
+        updateScript(saved.id, saved);
+        setDraft(saved);
+        scriptToSend = saved;
+      }
+      const job = await createHeyGenPreview(scriptToSend.id, {
+        avatarId,
+        voiceId,
+        orientation,
+        speechMode,
+        generationMode,
+        captions,
+        optimizePronunciation,
+        displayText,
+        spokenText,
+      });
+      addVideoJob(job);
+      toast.success("Prévia enviada ao HeyGen.");
+      navigate({ to: "/producao/$id", params: { id: job.id } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar a previa.");
+    } finally {
+      setPreviewing(false);
     }
   }
 
@@ -396,33 +495,50 @@ function RoteiroDetalhe() {
               />
             </>
           ) : (
-            <ConfirmAction
-              title="Enviar para producao?"
-              description={
-                <div className="space-y-3">
-                  <p>Este clique envia o roteiro ao HeyGen e pode consumir créditos da conta.</p>
-                  {hasHighCreditConsumption ? <HighCreditConsumptionNotice compact /> : null}
-                </div>
-              }
-              confirmLabel="Enviar"
-              onConfirm={() => void enviarProducao(false)}
-              trigger={
-                <Button
-                  size="sm"
-                  title={
-                    !canSendToProduction
-                      ? "Revise o texto falado antes de enviar"
-                      : dirty
-                        ? "Salvar alteracoes e enviar roteiro ao HeyGen"
-                        : "Enviar roteiro ao HeyGen"
-                  }
-                  disabled={saving || sending || !avatarId || !voiceId || !canSendToProduction}
-                >
-                  <Film className="mr-1 h-4 w-4" />{" "}
-                  {dirty ? "Salvar e enviar" : "Enviar para producao"}
-                </Button>
-              }
-            />
+            <>
+              <ConfirmAction
+                title="Gerar prévia de 10 segundos?"
+                description="Este clique envia somente o começo naturalizado ao HeyGen e pode consumir créditos da conta."
+                confirmLabel="Gerar prévia"
+                onConfirm={() => void gerarPrevia()}
+                trigger={
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={saving || previewing || !avatarId || !voiceId || !approvalReady}
+                  >
+                    <Film className="mr-1 h-4 w-4" /> Gerar prévia
+                  </Button>
+                }
+              />
+              <ConfirmAction
+                title="Gerar vídeo final?"
+                description={
+                  <div className="space-y-3">
+                    <p>Este clique envia o roteiro ao HeyGen e pode consumir créditos da conta.</p>
+                    {hasHighCreditConsumption ? <HighCreditConsumptionNotice compact /> : null}
+                  </div>
+                }
+                confirmLabel="Gerar vídeo final"
+                onConfirm={() => void enviarProducao(false)}
+                trigger={
+                  <Button
+                    size="sm"
+                    title={
+                      !canSendToProduction
+                        ? "Revise o texto falado antes de enviar"
+                        : dirty
+                          ? "Salvar alteracoes e enviar roteiro ao HeyGen"
+                          : "Enviar roteiro ao HeyGen"
+                    }
+                    disabled={saving || sending || !avatarId || !voiceId || !canSendToProduction}
+                  >
+                    <Film className="mr-1 h-4 w-4" />{" "}
+                    {dirty ? "Salvar e gerar" : "Gerar vídeo final"}
+                  </Button>
+                }
+              />
+            </>
           )}
         </>
       }
@@ -485,6 +601,24 @@ function RoteiroDetalhe() {
               </div>
             }
           />
+
+          {latestPreview ? (
+            <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-semibold">Prévia de 10 segundos disponível</div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Esta prévia não substitui o vídeo final.
+                  </p>
+                </div>
+                <Button size="sm" variant="secondary" asChild>
+                  <Link to="/producao/$id" params={{ id: latestPreview.id }}>
+                    Abrir prévia
+                  </Link>
+                </Button>
+              </div>
+            </div>
+          ) : null}
 
           {captureHook && siblingCaptureScripts.length > 1 ? (
             <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4">
@@ -690,6 +824,39 @@ function RoteiroDetalhe() {
                   </SelectContent>
                 </Select>
               </Field>
+              <Field label="Voz">
+                <Select value={voiceId} onValueChange={setVoiceId} disabled={catalogLoading}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Selecione a voz" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(catalog?.voices || HEYGEN_CATALOG_FALLBACK_VOICES).map((voice) => (
+                      <SelectItem key={voice.id} value={voice.id}>
+                        {voice.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Modo de geração">
+                <Select
+                  value={generationMode}
+                  onValueChange={(value) => setGenerationMode(value as "direct" | "video_agent")}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem
+                      value="direct"
+                      disabled={selectedAvatar?.supportsDirectAvatar === false}
+                    >
+                      Direct Avatar
+                    </SelectItem>
+                    <SelectItem value="video_agent">Video Agent</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
               <div className="space-y-2">
                 <Field label="Duração aproximada">
                   <Select
@@ -698,14 +865,16 @@ function RoteiroDetalhe() {
                       const nextDuration = Number(value) as 10 | 15 | 30 | 45 | 60;
                       setDurationSeconds(nextDuration);
                       if (nextDuration === 10) {
+                        setDisplayText((current) => removeNarrationOutro(current, outroText));
+                        setSpokenText((current) => removeNarrationOutro(current, outroText));
                         setNarrationText((current) => removeNarrationOutro(current, outroText));
                         setOutroText("");
                         setSpeechMode("direto");
                       } else if (!outroText.trim()) {
                         setOutroText(DEFAULT_OUTRO);
-                        setNarrationText((current) =>
-                          normalizeNarrationOutro(current, DEFAULT_OUTRO),
-                        );
+                        setDisplayText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
+                        setSpokenText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
+                        setNarrationText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
                       }
                     }}
                   >
@@ -731,7 +900,9 @@ function RoteiroDetalhe() {
               <Field label="Jeito de falar">
                 <Select
                   value={speechMode}
-                  onValueChange={(value) => setSpeechMode(value as "natural" | "fiel" | "direto")}
+                  onValueChange={(value) =>
+                    setSpeechMode(value as "natural" | "fiel" | "direto" | "enfatico")
+                  }
                 >
                   <SelectTrigger>
                     <SelectValue />
@@ -740,14 +911,33 @@ function RoteiroDetalhe() {
                     <SelectItem value="natural">Natural - conversa fluida</SelectItem>
                     <SelectItem value="fiel">Fiel - segue o roteiro</SelectItem>
                     <SelectItem value="direto">Direto - curto e dinâmico</SelectItem>
+                    <SelectItem value="enfatico">Enfático - mais presença</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
-              {durationSeconds <= 15 ? (
+              <Field label="CTA falado">
+                <Select
+                  value={ctaMode}
+                  onValueChange={(value) =>
+                    setCtaMode(value as "auto" | "manual" | "none" | "visual")
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Automático com Claude</SelectItem>
+                    <SelectItem value="manual">Manual</SelectItem>
+                    <SelectItem value="none">Sem CTA falado</SelectItem>
+                    <SelectItem value="visual">Apenas visual</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              {generationMode === "direct" ? (
                 <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2.5">
                   <div className="text-xs font-medium">Clipe contínuo</div>
                   <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-                    O avatar fala em uma tomada direta, com ritmo ajustado automaticamente.
+                    O avatar fala em uma tomada direta para 10, 15, 30, 45 ou 60 segundos.
                   </p>
                 </div>
               ) : (
@@ -793,7 +983,20 @@ function RoteiroDetalhe() {
                 onCheckedChange={setOptimizePronunciation}
               />
             </div>
-            {durationSeconds === 10 ? (
+            {ctaMode !== "manual" ? (
+              <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
+                <div className="text-xs font-medium">
+                  {ctaMode === "auto"
+                    ? "CTA definido na naturalização"
+                    : ctaMode === "visual"
+                      ? "CTA apenas visual"
+                      : "Sem CTA falado"}
+                </div>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  O texto falado não recebe a frase final fixa automaticamente.
+                </p>
+              </div>
+            ) : durationSeconds === 10 ? (
               <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
                 <div className="text-xs font-medium">Sem frase final nos vídeos de 10 segundos</div>
                 <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -814,7 +1017,7 @@ function RoteiroDetalhe() {
                     value={outroText}
                     onChange={(event) => setOutroText(event.target.value)}
                     onBlur={() =>
-                      setNarrationText((current) => normalizeNarrationOutro(current, outroText))
+                      setDisplayText((current) => normalizeNarrationOutro(current, outroText))
                     }
                     placeholder="Ex.: Me siga para mais dicas."
                     maxLength={180}
@@ -823,7 +1026,7 @@ function RoteiroDetalhe() {
                     type="button"
                     variant="secondary"
                     onClick={() =>
-                      setNarrationText((current) => normalizeNarrationOutro(current, outroText))
+                      setDisplayText((current) => normalizeNarrationOutro(current, outroText))
                     }
                   >
                     Aplicar
@@ -834,9 +1037,9 @@ function RoteiroDetalhe() {
             <div className="mt-4 border-t pt-4">
               <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                 <div>
-                  <Label htmlFor="narration-text">Fala final do avatar</Label>
+                  <Label htmlFor="display-text">Texto exibido</Label>
                   <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    Edite livremente. Isso muda apenas a fala do vídeo, não o roteiro no Sheets.
+                    Use a grafia correta aqui. Este texto alimenta interface, legenda e subtitles.
                   </p>
                 </div>
                 <div className="flex gap-2">
@@ -844,11 +1047,15 @@ function RoteiroDetalhe() {
                     type="button"
                     size="sm"
                     variant="ghost"
-                    onClick={() =>
-                      setNarrationText(
-                        buildNarrationText(draft, durationSeconds === 10 ? "" : outroText),
-                      )
-                    }
+                    onClick={() => {
+                      const restored = buildNarrationText(
+                        draft,
+                        durationSeconds === 10 ? "" : outroText,
+                      );
+                      setNarrationText(restored);
+                      setDisplayText(restored);
+                      setSpokenText(restored);
+                    }}
                   >
                     <RotateCcw className="mr-1 h-4 w-4" />
                     Restaurar
@@ -857,7 +1064,7 @@ function RoteiroDetalhe() {
                     type="button"
                     size="sm"
                     variant="secondary"
-                    disabled={naturalizing || narrationText.trim().length < 20}
+                    disabled={naturalizing || displayText.trim().length < 20}
                     onClick={() => void naturalizarFala()}
                   >
                     <Sparkles className="mr-1 h-4 w-4" />
@@ -870,12 +1077,35 @@ function RoteiroDetalhe() {
                 </div>
               </div>
               <Textarea
-                id="narration-text"
+                id="display-text"
                 rows={8}
-                value={narrationText}
-                onChange={(event) => setNarrationText(event.target.value)}
+                value={displayText}
+                onChange={(event) => {
+                  setDisplayText(event.target.value);
+                  setNarrationText(event.target.value);
+                }}
                 className="leading-6"
               />
+              <div className="mt-3">
+                <Label htmlFor="spoken-text">Texto enviado à voz</Label>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  Ajustes fonéticos ficam somente aqui, nunca na legenda.
+                </p>
+                <Textarea
+                  id="spoken-text"
+                  rows={5}
+                  value={spokenText}
+                  onChange={(event) => setSpokenText(event.target.value)}
+                  className="mt-2 leading-6"
+                />
+              </div>
+              {performancePlan ? (
+                <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                  <span className="font-medium text-foreground">Plano de performance:</span>{" "}
+                  {performancePlan.tone} · {performancePlan.pace} · {performancePlan.emotion} · speed{" "}
+                  {performancePlan.recommendedVoiceSpeed}
+                </div>
+              ) : null}
               {qualityIssues.length > 0 ? (
                 <div className="mt-2 rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-[11px] leading-4 text-status-danger">
                   <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
@@ -890,7 +1120,7 @@ function RoteiroDetalhe() {
                         variant="secondary"
                         className="h-7 px-2 text-[11px]"
                         onClick={() =>
-                          setNarrationText(normalizeNarrationOutro(narrationText, outroText))
+                          setDisplayText(normalizeNarrationOutro(displayText, outroText))
                         }
                       >
                         Corrigir encerramento
@@ -1001,6 +1231,7 @@ function AvatarPicker({
             <span className="block truncate text-sm font-semibold">{selected.name}</span>
             <span className="block truncate text-xs text-muted-foreground">
               {selected.groupName || "Identidade HeyGen"} · {orientationLabel(selected.orientation)}
+              {selected.defaultVoiceId ? " · voz padrão" : ""}
             </span>
           </span>
           <span className="shrink-0 px-1 text-xs font-medium text-primary">Trocar avatar</span>
@@ -1046,7 +1277,14 @@ function AvatarPicker({
                       {avatar.groupName || "Identidade HeyGen"}
                     </span>
                     <span className="mt-1 block text-[10px] uppercase text-muted-foreground">
-                      {orientationLabel(avatar.orientation)}
+                      {[
+                        avatar.type || "avatar",
+                        orientationLabel(avatar.orientation),
+                        avatar.status || "status indefinido",
+                        avatar.defaultVoiceId ? "voz padrão" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </span>
                   </span>
                 </button>

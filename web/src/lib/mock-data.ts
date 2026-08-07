@@ -100,6 +100,7 @@ export interface VideoJob {
   erro?: string;
   remoteSessionId?: string;
   remoteVideoId?: string;
+  isPreview?: boolean;
   productionSettings?: {
     generationMode?: "direct" | "video_agent";
     voiceSpeed?: number;

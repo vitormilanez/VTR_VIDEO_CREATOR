@@ -406,14 +406,23 @@ export interface HeyGenCatalog {
   avatars: Array<{
     id: string;
     name: string;
+    type?: string | null;
     orientation: "portrait" | "landscape";
+    status?: string | null;
     groupId?: string | null;
     groupName?: string | null;
     previewImageUrl?: string | null;
+    previewVideoUrl?: string | null;
+    defaultVoiceId?: string | null;
+    supportsDirectAvatar?: boolean;
+    supportsVideoAgent?: boolean;
   }>;
   voices: Array<{ id: string; name: string; gender: string }>;
   defaultAvatarId?: string | null;
   defaultVoiceId?: string | null;
+  speechPresets?: Record<string, { speed: number; pitch: number; volume: number; locale: string }>;
+  generationModes?: Array<"direct" | "video_agent">;
+  directDurations?: Array<10 | 15 | 30 | 45 | 60>;
 }
 
 export interface HeyGenAvatarGroup {
@@ -530,12 +539,16 @@ export async function createHeyGenVideo(
     voiceId?: string;
     orientation: "portrait" | "landscape";
     durationSeconds: 10 | 15 | 30 | 45 | 60;
-    speechMode: "natural" | "fiel" | "direto";
+    speechMode: "natural" | "fiel" | "direto" | "enfatico";
+    generationMode: "direct" | "video_agent";
+    ctaMode?: "auto" | "manual" | "none" | "visual";
     captions: boolean;
     optimizePronunciation: boolean;
     styleId?: string;
     forceNewVersion?: boolean;
     narrationText?: string;
+    displayText?: string;
+    spokenText?: string;
     outroText?: string;
     idempotencyKey?: string;
   },
@@ -558,9 +571,65 @@ export async function naturalizeScript(input: {
   medicalCautions: string;
   durationSeconds: 10 | 15 | 30 | 45 | 60;
   outro: string;
-}): Promise<string> {
-  const response = await postJson<{ ok: boolean; text: string }>("/api/scripts/naturalize", input);
-  return response.text;
+  ctaMode?: "auto" | "manual" | "none" | "visual";
+  manualCta?: string;
+  recentCtas?: string[];
+}): Promise<{
+  text: string;
+  displayText: string;
+  spokenText: string;
+  tone: string;
+  pace: string;
+  emotion: string;
+  emphasisWords: string[];
+  pauseAfterSentencesMs: number[];
+  recommendedVoiceSpeed: number;
+  recommendedSpeechMode: "natural" | "direto" | "enfatico" | "fiel";
+  cta: string;
+}> {
+  const response = await postJson<{
+    ok: boolean;
+    text: string;
+    displayText: string;
+    spokenText: string;
+    tone: string;
+    pace: string;
+    emotion: string;
+    emphasisWords: string[];
+    pauseAfterSentencesMs: number[];
+    recommendedVoiceSpeed: number;
+    recommendedSpeechMode: "natural" | "direto" | "enfatico" | "fiel";
+    cta: string;
+  }>("/api/scripts/naturalize", input);
+  return response;
+}
+
+export async function createHeyGenPreview(
+  scriptId: string,
+  selection: {
+    avatarId: string;
+    voiceId: string;
+    orientation: "portrait" | "landscape";
+    speechMode: "natural" | "fiel" | "direto" | "enfatico";
+    generationMode: "direct" | "video_agent";
+    captions: boolean;
+    optimizePronunciation: boolean;
+    displayText: string;
+    spokenText?: string;
+    idempotencyKey?: string;
+  },
+): Promise<VideoJob> {
+  const idempotencyKey =
+    selection.idempotencyKey ??
+    globalThis.crypto?.randomUUID?.() ??
+    `preview-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const res = await fetch(`${BASE}/api/videos/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scriptId, ...selection, idempotencyKey }),
+  });
+  if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel gerar a previa."));
+  return ((await res.json()) as { job: VideoJob }).job;
 }
 
 export function videoDownloadUrl(jobId: string): string {

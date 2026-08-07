@@ -35,9 +35,7 @@ export function narrationQualityIssues(
   }
 
   const selectedOutro = durationSeconds === 10 ? "" : outro.replace(/\s+/g, " ").trim();
-  if (durationSeconds !== 10 && !selectedOutro) {
-    issues.push("Escolha uma frase final para o vídeo.");
-  } else if (selectedOutro) {
+  if (selectedOutro) {
     const outroMatches = normalized.match(new RegExp(escapeRegExp(selectedOutro), "gi")) ?? [];
     if (outroMatches.length !== 1) {
       issues.push("A frase final deve aparecer exatamente uma vez.");

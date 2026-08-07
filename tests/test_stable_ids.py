@@ -185,11 +185,38 @@ class StableIdTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["aspect_ratio"], "9:16")
-        self.assertEqual(payload["voice_settings"]["speed"], 1.08)
+        self.assertEqual(payload["voice_settings"]["speed"], 1.0)
         self.assertEqual(payload["voice_settings"]["locale"], "pt-BR")
         self.assertNotIn("\n", payload["script"])
         self.assertNotIn("duration", payload)
         self.assertEqual(payload["caption"]["style"], "default")
+
+    def test_speech_presets_match_production_modes(self) -> None:
+        self.assertEqual(server.SPEECH_PRESETS["natural"]["speed"], 0.96)
+        self.assertEqual(server.SPEECH_PRESETS["direto"]["speed"], 1.0)
+        self.assertEqual(server.SPEECH_PRESETS["enfatico"]["speed"], 0.98)
+        self.assertEqual(server.SPEECH_PRESETS["natural"]["locale"], "pt-BR")
+
+    def test_direct_avatar_accepts_all_supported_durations(self) -> None:
+        for duration in (10, 15, 30, 45, 60):
+            payload = server.VideoCreateIn(
+                scriptId="s-1",
+                avatarId="avatar-1",
+                voiceId="voice-1",
+                durationSeconds=duration,
+                generationMode="direct",
+            )
+            self.assertEqual(payload.durationSeconds, duration)
+            self.assertEqual(payload.generationMode, "direct")
+
+    def test_display_text_never_keeps_phonetic_spelling(self) -> None:
+        display = server.performance_display_text("Maundjáro e Ozêmpic aparecem so na voz.")
+        spoken = server.prepare_script_for_heygen_voice("Mounjaro e Ozempic aparecem so na voz.")
+
+        self.assertIn("Mounjaro", display)
+        self.assertIn("Ozempic", display)
+        self.assertNotIn("Maundjáro", display)
+        self.assertIn("Maundjáro", spoken)
 
     def test_ten_second_video_uses_direct_generation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -250,7 +277,7 @@ class StableIdTests(unittest.TestCase):
                 submitted_payload = run.call_args.kwargs["payload"]
                 self.assertEqual(run.call_args.args[1], ["video", "create"])
                 self.assertNotIn("\n", submitted_payload["script"])
-                self.assertEqual(submitted_payload["voice_settings"]["speed"], 1.08)
+                self.assertEqual(submitted_payload["voice_settings"]["speed"], 1.0)
                 self.assertEqual(result["job"]["remoteVideoId"], "direct-video-1")
                 self.assertNotIn("remoteSessionId", result["job"])
                 self.assertEqual(

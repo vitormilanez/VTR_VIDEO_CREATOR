@@ -40,6 +40,22 @@ from pydantic import BaseModel, Field
 from api.cut_service import cancel_cut_job as cancel_cut_worker
 from api.cut_service import prepare_cut_job, process_cut_project
 from api.job_store import JobStore
+from api.services.heygen_catalog import build_catalog, default_voice_id
+from api.services.script_performance import (
+    LEGACY_OUTRO,
+    PERFORMANCE_SCHEMA,
+    SPEECH_PRESETS,
+    build_performance_prompt,
+    display_text as performance_display_text,
+    duration_word_limits,
+    fit_ten_second_text,
+    fit_text_to_duration,
+    normalize_performance_response,
+    preview_text,
+    speech_speed,
+    strip_known_outros,
+)
+from api.services.video_generation import DIRECT_VIDEO_DURATIONS, direct_video_payload
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
 from integrations.instagram_client import InstagramClient
@@ -55,7 +71,7 @@ HEYGEN_AVATAR_CACHE = ROOT / "data" / "heygen_avatar_cache.json"
 OPERATIONAL_DB = ROOT / "data" / "operations.db"
 CUT_UPLOADS = ROOT / "data" / "cut_uploads"
 CUT_OUTPUTS = ROOT / "data" / "cuts"
-MANDATORY_VIDEO_OUTRO = "Me siga para mais dicas, e obrigado."
+MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
 
@@ -380,15 +396,7 @@ def _script_text(script: dict[str, Any]) -> str:
 
 
 def _strip_video_outros(text: str, selected_outro: str = "") -> str:
-    body = text
-    for candidate in {
-        selected_outro.strip(),
-        MANDATORY_VIDEO_OUTRO,
-        "Veja o contexto no perfil.",
-    }:
-        if candidate:
-            body = re.sub(rf"\s*{re.escape(candidate)}\s*", " ", body, flags=re.I)
-    return re.sub(r"[ \t]+", " ", body).strip()
+    return strip_known_outros(text, selected_outro)
 
 
 def _video_prompt(
@@ -1170,26 +1178,13 @@ def instagram_publish(payload: InstagramPublishIn) -> dict:
 def heygen_catalog() -> dict:
     """Catalogo de avatares e vozes privados disponiveis para producao."""
     _, looks, _from_cache = _private_avatar_library()
-    avatars = [
-        {
-            "id": look.get("id"),
-            "name": look.get("name") or "Avatar sem nome",
-            "orientation": (
-                "landscape" if look.get("preferred_orientation") == "landscape" else "portrait"
-            ),
-            "groupId": look.get("group_id"),
-            "groupName": look.get("group_name"),
-            "previewImageUrl": look.get("preview_image_url"),
-        }
-        for look in looks
-        if look.get("id") and look.get("status") == "completed"
-    ]
-    return {
-        "avatars": avatars,
-        "voices": HEYGEN_CATALOG["voices"],
-        "defaultAvatarId": _heygen_default_avatar_id(avatars) if avatars else None,
-        "defaultVoiceId": _heygen_default_voice_id(),
-    }
+    catalog = build_catalog(looks, HEYGEN_CATALOG["voices"])
+    catalog["defaultAvatarId"] = None
+    catalog["defaultVoiceId"] = _heygen_default_voice_id()
+    catalog["speechPresets"] = SPEECH_PRESETS
+    catalog["generationModes"] = ["direct", "video_agent"]
+    catalog["directDurations"] = sorted(DIRECT_VIDEO_DURATIONS)
+    return catalog
 
 
 @app.get("/api/heygen/avatars")
@@ -1601,26 +1596,40 @@ def save_settings(payload: AppSettingsIn) -> dict:
 # --------------------------------------------------------------------------- #
 class VideoCreateIn(BaseModel):
     scriptId: str
-    avatarId: str | None = None
-    voiceId: str | None = None
+    avatarId: str | None = Field(default=None, max_length=160)
+    voiceId: str | None = Field(default=None, max_length=160)
     orientation: Literal["portrait", "landscape"] = "portrait"
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
-    speechMode: Literal["natural", "fiel", "direto"] = "natural"
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
+    generationMode: Literal["direct", "video_agent"] = "direct"
+    ctaMode: Literal["auto", "manual", "none", "visual"] = "manual"
     captions: bool = True
     optimizePronunciation: bool = True
     styleId: str | None = None
     forceNewVersion: bool = False
     narrationText: str | None = Field(default=None, max_length=6000)
+    displayText: str | None = Field(default=None, max_length=6000)
+    spokenText: str | None = Field(default=None, max_length=6000)
     outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
 
 
-SHORT_DIRECT_VIDEO_DURATIONS = frozenset({10, 15})
-SHORT_VIDEO_VOICE_SPEEDS = {
-    "fiel": 1.0,
-    "natural": 1.03,
-    "direto": 1.08,
-}
+class VideoPreviewCreateIn(BaseModel):
+    scriptId: str
+    avatarId: str = Field(min_length=1, max_length=160)
+    voiceId: str = Field(min_length=1, max_length=160)
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
+    generationMode: Literal["direct", "video_agent"] = "direct"
+    captions: bool = True
+    optimizePronunciation: bool = True
+    displayText: str = Field(min_length=10, max_length=6000)
+    spokenText: str | None = Field(default=None, max_length=6000)
+    idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+SHORT_DIRECT_VIDEO_DURATIONS = DIRECT_VIDEO_DURATIONS
+SHORT_VIDEO_VOICE_SPEEDS = {key: float(value["speed"]) for key, value in SPEECH_PRESETS.items()}
 
 
 def _direct_video_payload(
@@ -1635,32 +1644,16 @@ def _direct_video_payload(
     optimize_pronunciation: bool,
 ) -> dict[str, Any]:
     """Monta um video curto deterministico, sem impor duracao artificial."""
-    spoken_text = re.sub(r"\s+", " ", narration_text).strip()
-    if optimize_pronunciation:
-        spoken_text = prepare_script_for_heygen_voice(
-            spoken_text,
-            add_sentence_breaks=False,
-        )
-    speed = SHORT_VIDEO_VOICE_SPEEDS.get(speech_mode, SHORT_VIDEO_VOICE_SPEEDS["natural"])
-    payload: dict[str, Any] = {
-        "type": "avatar",
-        "avatar_id": avatar_id,
-        "title": str(script.get("titulo") or "AI Video Creator - video curto"),
-        "aspect_ratio": "9:16" if orientation == "portrait" else "16:9",
-        "resolution": "720p",
-        "output_format": "mp4",
-        "script": spoken_text,
-        "voice_id": voice_id,
-        "voice_settings": {
-            "speed": speed,
-            "pitch": 0,
-            "volume": 1,
-            "locale": "pt-BR",
-        },
-    }
-    if captions:
-        payload["caption"] = {"file_format": "srt", "style": "default"}
-    return payload
+    return direct_video_payload(
+        script=script,
+        narration_text=narration_text,
+        avatar_id=avatar_id,
+        voice_id=voice_id,
+        orientation=orientation,
+        speech_mode=speech_mode,
+        captions=captions,
+        optimize_pronunciation=optimize_pronunciation,
+    )
 
 
 class NaturalizeScriptIn(BaseModel):
@@ -1668,98 +1661,36 @@ class NaturalizeScriptIn(BaseModel):
     medicalCautions: str = Field(default="", max_length=2000)
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
     outro: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
+    ctaMode: Literal["auto", "manual", "none", "visual"] = "auto"
+    manualCta: str = Field(default="", max_length=240)
+    recentCtas: list[str] = Field(default_factory=list)
 
 
-_NATURAL_SCRIPT_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {"text": {"type": "string"}},
-    "required": ["text"],
-}
+_NATURAL_SCRIPT_SCHEMA = PERFORMANCE_SCHEMA
 
 def _natural_script_system(duration_seconds: int, outro: str = MANDATORY_VIDEO_OUTRO) -> str:
-    minimum_words, maximum_words = _duration_word_limits(duration_seconds)
-    selected_outro = re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
-    ending_rule = (
-        "- Para 10 segundos, entregue entre 18 e 24 palavras e termine no impacto, sem frase final ou CTA falado."
-        if duration_seconds == 10
-        else f'- Termine exatamente com: "{selected_outro}"'
+    prompt = build_performance_prompt(
+        text="",
+        medical_cautions="",
+        duration_seconds=duration_seconds,
+        cta_mode="manual",
+        manual_cta=outro,
+        recent_ctas=[],
     )
-    return f"""Voce e um diretor de fala para videos curtos do Dr. Guilherme.
-Transforme o texto em portugues brasileiro falado, espontaneo, humano e facil de entender.
-
-Regras obrigatorias:
-- Preserve exatamente o sentido, os fatos e os cuidados medicos do texto original.
-- Nao acrescente diagnosticos, tratamentos, exemplos clinicos, doses ou promessas.
-- Use frases curtas, contracoes naturais e transicoes discretas.
-- Evite linguagem de artigo, listas, titulos, jargao e repeticoes.
-- Nao use indicacoes de cena, parenteses, emojis ou marcacoes de pausa.
-- Mantenha um tom acolhedor, seguro e profissional.
-- O texto final completo deve ter entre {minimum_words} e {maximum_words} palavras. Conte todas as palavras, incluindo o encerramento.
-- Respeite rigorosamente a duracao solicitada; corte explicacoes secundarias antes de responder.
-{ending_rule}
-- Responda somente no JSON solicitado."""
+    return prompt.system
 
 
 def _fit_ten_second_text(text: str) -> str:
     """Reduz uma fala a um hook coerente de 18–24 palavras, sem encerramento."""
-    clean = _strip_video_outros(text)
-    sentences = re.findall(r"[^.!?…]+[.!?…]*", clean)
-    selected: list[str] = []
-    count = 0
-    for sentence in sentences:
-        words = sentence.strip().split()
-        if not words:
-            continue
-        remaining = 24 - count
-        if len(words) <= remaining:
-            selected.append(sentence.strip())
-            count += len(words)
-            if count >= 18:
-                break
-        elif remaining > 0:
-            selected.append(" ".join(words[:remaining]).rstrip(" ,:;") + "…")
-            break
-    result = " ".join(selected).strip()
-    return result or " ".join(clean.split()[:24]).strip()
+    return fit_ten_second_text(text)
 
 
 def _duration_word_limits(duration_seconds: int) -> tuple[int, int]:
-    return {
-        10: (18, 24),
-        15: (25, 36),
-        30: (55, 72),
-        45: (85, 108),
-        60: (115, 144),
-    }.get(duration_seconds, (85, 108))
+    return duration_word_limits(duration_seconds)
 
 
 def _fit_text_to_duration(text: str, duration_seconds: int, outro: str) -> str:
-    if duration_seconds == 10:
-        return _fit_ten_second_text(text)
-    selected_outro = re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
-    _minimum_words, maximum_words = _duration_word_limits(duration_seconds)
-    outro_words = len(selected_outro.split())
-    body_limit = max(1, maximum_words - outro_words)
-    clean = _strip_video_outros(text, selected_outro)
-    sentences = re.findall(r"[^.!?…]+[.!?…]*", clean)
-    selected: list[str] = []
-    count = 0
-    for sentence in sentences:
-        words = sentence.strip().split()
-        if not words:
-            continue
-        remaining = body_limit - count
-        if remaining <= 0:
-            break
-        if len(words) <= remaining:
-            selected.append(sentence.strip())
-            count += len(words)
-        else:
-            selected.append(" ".join(words[:remaining]).rstrip(" ,:;") + "…")
-            break
-    body = " ".join(selected).strip() or " ".join(clean.split()[:body_limit]).strip()
-    return f"{body.rstrip()} {selected_outro}".strip()
+    return fit_text_to_duration(text, duration_seconds, outro)
 
 
 _SCRIPT_GENERATION_SCHEMA = {
@@ -1845,16 +1776,19 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
             status_code=503,
             detail="Defina ANTHROPIC_API_KEY no arquivo .env para naturalizar com IA.",
         )
-    cache_payload = {"promptVersion": "2026-08-03-v2-duration", **payload.model_dump()}
+    cache_payload = {"promptVersion": "2026-08-07-v1-performance", **payload.model_dump()}
     cached = _ai_cache_get("scripts.naturalize", cache_payload)
     if cached:
         return cached
     import anthropic
 
-    source = (
-        f"DURACAO ALVO: {payload.durationSeconds} segundos\n"
-        f"CUIDADOS MEDICOS: {payload.medicalCautions or 'Manter conteudo educativo.'}\n"
-        f"TEXTO ORIGINAL:\n{payload.text}"
+    prompt = build_performance_prompt(
+        text=payload.text,
+        medical_cautions=payload.medicalCautions,
+        duration_seconds=payload.durationSeconds,
+        cta_mode=payload.ctaMode,
+        manual_cta=payload.manualCta or payload.outro,
+        recent_ctas=payload.recentCtas,
     )
     try:
         client = anthropic.Anthropic()
@@ -1862,9 +1796,9 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
         message = client.messages.create(
             model=model,
             max_tokens=1200,
-            system=_natural_script_system(payload.durationSeconds, payload.outro),
+            system=prompt.system,
             output_config={"format": {"type": "json_schema", "schema": _NATURAL_SCRIPT_SCHEMA}},
-            messages=[{"role": "user", "content": source}],
+            messages=[{"role": "user", "content": prompt.user}],
         )
     except anthropic.APIStatusError as exc:
         raise HTTPException(
@@ -1876,16 +1810,18 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
 
     raw_text = "".join(getattr(block, "text", "") for block in message.content)
     try:
-        natural_text = str(json.loads(raw_text)["text"]).strip()
-    except (json.JSONDecodeError, KeyError, TypeError):
-        raise HTTPException(status_code=502, detail="A IA nao retornou um texto valido.")
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="A IA nao retornou um JSON valido.")
 
-    natural_text = _fit_text_to_duration(
-        natural_text,
-        payload.durationSeconds,
-        payload.outro,
+    performance = normalize_performance_response(
+        parsed,
+        source_text=payload.text,
+        duration_seconds=payload.durationSeconds,
+        cta_mode=payload.ctaMode,
+        manual_cta=payload.manualCta or payload.outro,
     )
-    response = {"ok": True, "text": natural_text}
+    response = {"ok": True, "text": performance["displayText"], **performance}
     _record_anthropic_usage("scripts.naturalize", model, message)
     _ai_cache_put("scripts.naturalize", cache_payload, response)
     return response
@@ -2232,13 +2168,18 @@ def create_video(payload: VideoCreateIn) -> dict:
         "submissionState": "reserved",
         "productionSettings": {
             "avatarId": payload.avatarId,
+            "voiceId": payload.voiceId,
             "orientation": payload.orientation,
             "durationSeconds": payload.durationSeconds,
             "speechMode": payload.speechMode,
+            "generationMode": payload.generationMode,
+            "ctaMode": payload.ctaMode,
             "captions": payload.captions,
             "optimizePronunciation": payload.optimizePronunciation,
             "styleId": payload.styleId,
             "narrationText": payload.narrationText,
+            "displayText": payload.displayText,
+            "spokenText": payload.spokenText,
             "outroText": payload.outroText,
         },
     }
@@ -2309,30 +2250,35 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
     # um cache que pode estar desatualizado (avatar removido ou criado recentemente).
     _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
     ready_looks = [look for look in private_looks if look.get("status") == "completed"]
-    avatar_id = payload.avatarId or _heygen_default_avatar_id(ready_looks)
-    voice_id = payload.voiceId or _heygen_default_voice_id()
+    avatar_id = payload.avatarId
+    selected_look = next((look for look in ready_looks if look.get("id") == avatar_id), None)
+    voice_id = payload.voiceId or (default_voice_id(selected_look or {}) or _heygen_default_voice_id())
     allowed_avatar_ids = {look.get("id") for look in ready_looks}
     if avatar_id not in allowed_avatar_ids:
         raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
 
     job["productionSettings"]["avatarId"] = avatar_id
     job["productionSettings"]["voiceId"] = voice_id
+    job["productionSettings"]["displayText"] = performance_display_text(
+        payload.displayText or final_narration
+    )
+    job["productionSettings"]["spokenText"] = payload.spokenText or prepare_script_for_heygen_voice(
+        final_narration,
+        add_sentence_breaks=False,
+    )
     job["submissionState"] = "submitting"
     job["atualizadoEm"] = _now()
     _job_store().upsert("video", job)
 
-    if payload.durationSeconds in SHORT_DIRECT_VIDEO_DURATIONS:
+    if payload.generationMode == "direct":
         generation_mode = "direct"
-        voice_speed = SHORT_VIDEO_VOICE_SPEEDS.get(
-            payload.speechMode,
-            SHORT_VIDEO_VOICE_SPEEDS["natural"],
-        )
+        voice_speed = speech_speed(payload.speechMode)
         job["productionSettings"]["generationMode"] = generation_mode
         job["productionSettings"]["voiceSpeed"] = voice_speed
         _job_store().upsert("video", job)
         direct_payload = _direct_video_payload(
             script=script,
-            narration_text=final_narration,
+            narration_text=payload.spokenText or final_narration,
             avatar_id=avatar_id,
             voice_id=voice_id,
             orientation=payload.orientation,
@@ -2353,6 +2299,7 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
     else:
         generation_mode = "video_agent"
         job["productionSettings"]["generationMode"] = generation_mode
+        job["productionSettings"]["voiceSpeed"] = speech_speed(payload.speechMode)
         _job_store().upsert("video", job)
         args = [
             "video-agent",
@@ -2398,6 +2345,94 @@ def _create_video_job(payload: VideoCreateIn, job: dict[str, Any]) -> dict:
         job["currency"] = (currency_after or currency_before or "USD").upper()
     _job_store().upsert("video", job)
     return {"ok": True, "job": job}
+
+
+@app.post("/api/videos/preview")
+def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
+    """Gera uma previa paga de aproximadamente 10s, separada do video final."""
+    now = _now()
+    idempotency_key = payload.idempotencyKey or f"preview:{payload.scriptId}:{uuid.uuid4().hex}"
+    preview_display_text = preview_text(payload.displayText)
+    preview_spoken_text = payload.spokenText or prepare_script_for_heygen_voice(
+        preview_display_text,
+        add_sentence_breaks=False,
+    )
+    reserved_job = {
+        "id": f"vp-{uuid.uuid4().hex[:12]}",
+        "scriptId": payload.scriptId,
+        "status": "fila",
+        "provider": "heygen",
+        "progresso": 0,
+        "criadoEm": now,
+        "atualizadoEm": now,
+        "submissionState": "reserved",
+        "isPreview": True,
+        "productionSettings": {
+            "avatarId": payload.avatarId,
+            "voiceId": payload.voiceId,
+            "orientation": payload.orientation,
+            "durationSeconds": 10,
+            "speechMode": payload.speechMode,
+            "generationMode": payload.generationMode,
+            "captions": payload.captions,
+            "optimizePronunciation": payload.optimizePronunciation,
+            "displayText": preview_display_text,
+            "spokenText": preview_spoken_text,
+        },
+    }
+    job, reservation = _job_store().reserve(
+        "video",
+        reserved_job,
+        idempotency_key=idempotency_key,
+    )
+    if reservation == "duplicate":
+        return {"ok": True, "job": job, "deduplicated": True}
+
+    try:
+        command = _heygen_cli()
+        script = _find_script(payload.scriptId)
+        if script.get("status") != "aprovado_clinicamente":
+            raise HTTPException(
+                status_code=409,
+                detail="O roteiro precisa estar marcado como Pronto antes da prévia paga.",
+            )
+        _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
+        ready_looks = [look for look in private_looks if look.get("status") == "completed"]
+        allowed_avatar_ids = {look.get("id") for look in ready_looks}
+        if payload.avatarId not in allowed_avatar_ids:
+            raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
+        job["submissionState"] = "submitting"
+        job["productionSettings"]["voiceSpeed"] = speech_speed(payload.speechMode)
+        _job_store().upsert("video", job)
+        direct_payload = _direct_video_payload(
+            script=script,
+            narration_text=preview_spoken_text,
+            avatar_id=payload.avatarId,
+            voice_id=payload.voiceId,
+            orientation=payload.orientation,
+            speech_mode=payload.speechMode,
+            captions=payload.captions,
+            optimize_pronunciation=False,
+        )
+        response = _run_heygen_json(command, ["video", "create"], payload=direct_payload, timeout=60)
+        video_id = _find_value(response, "video_id", "videoId", "id")
+        if not video_id:
+            raise HTTPException(status_code=502, detail="HeyGen nao retornou o identificador da previa.")
+        job["status"] = "fila"
+        job["submissionState"] = "submitted"
+        job["remoteVideoId"] = video_id
+        job["atualizadoEm"] = _now()
+        _job_store().upsert("video", job)
+        return {"ok": True, "job": job}
+    except HTTPException as exc:
+        current = _job_store().get("video", reserved_job["id"]) or reserved_job
+        current["status"] = "erro"
+        current["erro"] = str(exc.detail)
+        current["retrySafe"] = current.get("submissionState") != "submitting"
+        current["submissionState"] = "failed_safe" if current["retrySafe"] else "submission_uncertain"
+        current["atualizadoEm"] = _now()
+        _job_store().upsert("video", current)
+        raise
 
 
 @app.post("/api/videos/{job_id}/refresh")
@@ -5095,7 +5130,7 @@ def _narration_quality_issues(
     outro: str = MANDATORY_VIDEO_OUTRO,
 ) -> list[str]:
     normalized = re.sub(r"\s+", " ", text).strip()
-    selected_outro = "" if duration_seconds == 10 else re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
+    selected_outro = "" if duration_seconds == 10 else re.sub(r"\s+", " ", outro).strip()
     issues: list[str] = []
     for pattern, issue in _NARRATION_PLACEHOLDERS:
         if pattern.search(normalized):
@@ -5128,7 +5163,7 @@ def _validate_final_narration(
     text = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
     if not text:
         raise HTTPException(status_code=422, detail="O texto falado esta vazio.")
-    selected_outro = "" if duration_seconds == 10 else re.sub(r"\s+", " ", outro).strip() or MANDATORY_VIDEO_OUTRO
+    selected_outro = "" if duration_seconds == 10 else re.sub(r"\s+", " ", outro).strip()
     final_text = _strip_video_outros(text, outro) if duration_seconds == 10 else text
     if selected_outro and selected_outro.lower() not in final_text.lower():
         final_text = f"{final_text.rstrip()} {selected_outro}"
