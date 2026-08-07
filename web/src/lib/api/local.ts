@@ -695,7 +695,14 @@ export interface PackForExport {
 export async function exportPack(
   script: Script,
   pack: PackForExport,
-): Promise<{ ok: boolean; relative: string; folder: string; files: number }> {
+): Promise<{
+  ok: boolean;
+  relative: string;
+  folder: string;
+  files: number;
+  images: number;
+  warning?: string;
+}> {
   const res = await fetch(`${BASE}/api/packs/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -715,6 +722,8 @@ export async function exportPack(
     relative: string;
     folder: string;
     files: number;
+    images: number;
+    warning?: string;
   };
 }
 

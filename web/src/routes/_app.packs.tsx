@@ -270,7 +270,7 @@ function PacksPage() {
     const notice = toast.loading("Renderizando os slides em alta resolucao...");
     try {
       const response = await exportPack(script, pack);
-      toast.success(`Pack salvo em ${response.relative} (${response.files} arquivos).`, {
+      toast.success(`Pack salvo em ${response.relative} (${response.images} PNGs).`, {
         id: notice,
         duration: 8000,
       });

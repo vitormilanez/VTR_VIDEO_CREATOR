@@ -51,6 +51,7 @@ from api.pack_design import (
     PHOTO_LIBRARY,
     empty_fields,
     normalize_slide,
+    pack_slides,
     photo_asset,
     repair_pack_copy,
     slide_headline,
@@ -7915,16 +7916,23 @@ def _pack_design_plan(pack: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_pack_design(pack: dict[str, Any]) -> dict[str, Any]:
     normalized = repair_pack_copy(pack)
-    raw_carousel = normalized.get("carousel")
-    if not isinstance(raw_carousel, list):
-        raw_carousel = normalized.get("slides") if isinstance(normalized.get("slides"), list) else []
+    raw_carousel = pack_slides(normalized)
     carousel = [normalize_slide(slide, index) for index, slide in enumerate(raw_carousel) if isinstance(slide, dict)]
     normalized["schemaVersion"] = normalized.get("schemaVersion") or PACK_SCHEMA_VERSION
     normalized["designDirection"] = "institute_carousel_v1"
     normalized["carousel"] = carousel
     normalized["slides"] = carousel
+    normalized["designPlan"] = _pack_design_plan(normalized)
     normalized.setdefault("hashtags", [])
     normalized.setdefault("stories", [])
+    checklist = normalized.get("checklist")
+    if isinstance(checklist, list):
+        normalized["checklist"] = [
+            re.sub(r"\b6\s+slides?\b", "7 slides", str(item), flags=re.IGNORECASE)
+            for item in checklist
+        ]
+        if not any("context" in str(item).casefold() or "explic" in str(item).casefold() for item in normalized["checklist"]):
+            normalized["checklist"].insert(1, "1 slide explicativo com contexto da IA")
     if carousel:
         first_fields = carousel[0]["fields"]
         normalized.setdefault(
@@ -7993,8 +8001,8 @@ def _recent_pack_context(limit: int = 5) -> list[dict[str, Any]]:
             pack = json.loads(str(row["pack_json"]))
         except json.JSONDecodeError:
             continue
-        carousel = pack.get("carousel") if isinstance(pack, dict) else None
-        if not isinstance(carousel, list):
+        carousel = pack_slides(pack) if isinstance(pack, dict) else []
+        if not carousel:
             continue
         context.append(
             {
@@ -8221,7 +8229,12 @@ def get_pack(script_id: str) -> dict:
     # Packs gerados antes das regras semânticas atuais continuam abrindo no
     # editor já corrigidos, sem uma nova chamada ao Claude.
     if pack:
+        stored_pack = pack
         pack = _normalize_pack_design(pack)
+        # Persiste migrações e reparos sem qualquer chamada ao Claude. O guard
+        # mantém compatibilidade com fixtures/DBs antigos sem avatar de origem.
+        if pack != stored_pack and pack.get("sourceAvatarId"):
+            pack = _save_visual_pack(script_id, pack)
     profile = _production_profile(script_id)
     current_identity_key = None
     if profile:
@@ -8232,8 +8245,8 @@ def get_pack(script_id: str) -> dict:
             current_identity_key = None
     pack_slide_count = 0
     if pack:
-        raw_slides = pack.get("carousel") if isinstance(pack.get("carousel"), list) else pack.get("slides")
-        pack_slide_count = len(raw_slides) if isinstance(raw_slides, list) else 0
+        raw_slides = pack_slides(pack)
+        pack_slide_count = len(raw_slides)
     outdated_pack_schema = bool(
         pack
         and (
@@ -8583,7 +8596,7 @@ def export_pack(payload: PackExportIn) -> dict:
         "ok": True,
         "folder": str(folder),
         "relative": str(folder.relative_to(ROOT)),
-        "files": textos + 1,
+        "files": textos + 1 + imagens,
         "images": imagens,
         "warning": aviso_imagens,
     }

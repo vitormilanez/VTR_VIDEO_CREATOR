@@ -5,6 +5,7 @@ from api.pack_design import (
     PACK_SCHEMA_VERSION,
     empty_fields,
     normalize_slide,
+    pack_slides,
     repair_pack_copy,
     validate_pack_contract,
 )
@@ -156,6 +157,43 @@ def test_repair_pack_copy_fills_missing_required_scalar_fields() -> None:
     assert len(repaired["slides"][0]["fields"]["eyebrow"]) <= 22
     assert len(repaired["slides"][2]["fields"]["item1"]["text"]) <= 42
     assert len(repaired["slides"][6]["fields"]["body"]) <= 70
+
+
+def test_repair_pack_copy_migrates_legacy_six_slide_pack_without_ai() -> None:
+    pack = sample_pack()
+    pack["slides"] = [
+        pack["slides"][0],
+        pack["slides"][1],
+        pack["slides"][4],
+        pack["slides"][3],
+        pack["slides"][5],
+        pack["slides"][6],
+    ]
+    pack["carousel"] = pack["slides"]
+    pack["schemaVersion"] = "institute-carousel-v1"
+
+    repaired = repair_pack_copy(pack)
+
+    assert len(repaired["slides"]) == 7
+    assert repaired["schemaVersion"] == PACK_SCHEMA_VERSION
+    assert repaired["slides"][3]["layoutId"] == "explainer"
+    assert repaired["slides"][4]["layoutId"] == "explainer"
+    assert repaired["slides"][6]["layoutId"] == "cta_photo"
+    assert validate_pack_contract(repaired) == []
+    assert pack_slides({"slides": [], "carousel": repaired["carousel"]}) == repaired["carousel"]
+
+
+def test_repair_pack_copy_recovers_already_migrated_pack_without_explainer() -> None:
+    pack = sample_pack()
+    pack["slides"][3]["layoutId"] = "big_statement"
+    pack["slides"][3]["layout"] = "big_statement"
+    pack["carousel"] = pack["slides"]
+
+    repaired = repair_pack_copy(pack)
+
+    assert repaired["slides"][3]["layoutId"] == "explainer"
+    assert repaired["slides"][3]["fields"]["body"]
+    assert validate_pack_contract(repaired) == []
 
 
 def test_repair_pack_copy_fills_missing_myth_fact_items() -> None:

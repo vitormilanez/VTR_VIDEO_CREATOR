@@ -100,7 +100,7 @@ class PackContextTests(unittest.TestCase):
         self.assertEqual(cache_payload["identityKey"], "identity-key")
         self.assertEqual(cache_payload["slideCount"], server.PACK_SLIDE_COUNT)
 
-    def test_pack_endpoint_marks_old_six_slide_pack_stale(self) -> None:
+    def test_pack_endpoint_returns_old_six_slide_pack_already_migrated(self) -> None:
         old_pack = sample_pack()
         old_pack["schemaVersion"] = "institute-carousel-v1"
         old_pack["carousel"] = old_pack["carousel"][:6]
@@ -113,9 +113,35 @@ class PackContextTests(unittest.TestCase):
             return_value=({"identityKey": old_pack.get("sourceIdentityKey")}, {}),
         ):
             response = server.get_pack("script-1")
-        self.assertTrue(response["outdatedPackSchema"])
-        self.assertTrue(response["outdatedAvatar"])
+        self.assertFalse(response["outdatedPackSchema"])
+        self.assertFalse(response["outdatedAvatar"])
+        self.assertEqual(len(response["pack"]["carousel"]), server.PACK_SLIDE_COUNT)
         self.assertEqual(response["requiredSlideCount"], server.PACK_SLIDE_COUNT)
+
+    def test_pack_endpoint_migrates_old_six_slide_pack_and_saves_without_ai(self) -> None:
+        old_pack = sample_pack()
+        old_pack["schemaVersion"] = "institute-carousel-v1"
+        old_pack["carousel"] = [
+            old_pack["carousel"][0],
+            old_pack["carousel"][1],
+            old_pack["carousel"][4],
+            old_pack["carousel"][3],
+            old_pack["carousel"][5],
+            old_pack["carousel"][6],
+        ]
+        old_pack["slides"] = old_pack["carousel"]
+        old_pack["sourceAvatarId"] = "avatar-1"
+        with patch.object(server, "_find_script", return_value={"id": "script-1"}), patch.object(
+            server, "_get_visual_pack", return_value=old_pack
+        ), patch.object(server, "_production_profile", return_value=None), patch.object(
+            server, "_save_visual_pack", side_effect=lambda script_id, pack: pack
+        ) as save_pack:
+            response = server.get_pack("script-1")
+
+        self.assertEqual(len(response["pack"]["carousel"]), server.PACK_SLIDE_COUNT)
+        self.assertFalse(response["outdatedPackSchema"])
+        self.assertEqual(response["pack"]["schemaVersion"], server.PACK_SCHEMA_VERSION)
+        save_pack.assert_called_once()
 
 
 if __name__ == "__main__":
