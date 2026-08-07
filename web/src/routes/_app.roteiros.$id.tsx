@@ -24,15 +24,18 @@ import {
   fetchHeyGenCatalog,
   fetchHeyGenStyles,
   fetchProductionProfile,
+  fetchScenePlan,
   naturalizeScript,
   saveAvatarSet,
   saveProductionProfile,
   saveScript,
+  saveScenePlan,
   type AvatarSet,
   type AvatarSetLook,
   type AvatarSetRole,
   type HeyGenCatalog,
   type HeyGenStyle,
+  type ScenePlan,
 } from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
@@ -134,6 +137,8 @@ function RoteiroDetalhe() {
   const [avatarSetsLoading, setAvatarSetsLoading] = useState(true);
   const [avatarSetDialogOpen, setAvatarSetDialogOpen] = useState(false);
   const [editingAvatarSet, setEditingAvatarSet] = useState<AvatarSet | null>(null);
+  const [scenePlan, setScenePlan] = useState<ScenePlan | null>(null);
+  const [scenePlanLoading, setScenePlanLoading] = useState(true);
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(
     initialCaptureDuration ?? 45,
@@ -289,6 +294,11 @@ function RoteiroDetalhe() {
       .then((sets) => setAvatarSets(sets))
       .catch(() => toast.error("Nao consegui carregar os Avatar Sets salvos."))
       .finally(() => setAvatarSetsLoading(false));
+    setScenePlanLoading(true);
+    fetchScenePlan(id)
+      .then((plan) => setScenePlan(plan))
+      .catch(() => toast.error("Nao consegui carregar o Scene Plan deste roteiro."))
+      .finally(() => setScenePlanLoading(false));
     fetchHeyGenStyles("cinematic")
       .then((data) => setStyles(data.styles))
       .catch(() => setStyles([]));
@@ -340,6 +350,11 @@ function RoteiroDetalhe() {
   const avatarSetReady = Boolean(selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId);
   const productionModeReady = avatarMode === "single";
   const selectedAvatarReady = avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
+  const sceneRoles = useMemo<AvatarSetRole[]>(
+    () =>
+      selectedAvatarSet?.looks.map((look) => look.role) || ["primary"],
+    [selectedAvatarSet],
+  );
   const canSendToProduction =
     qualityIssues.length === 0 && approvalReady && selectedAvatarReady && productionModeReady;
 
@@ -1092,6 +1107,16 @@ function RoteiroDetalhe() {
                     ultima lista salva.
                   </p>
                 ) : null}
+              </div>
+              <div className="md:col-span-2">
+                <ScenePlanEditor
+                  scriptId={id}
+                  loading={scenePlanLoading}
+                  plan={scenePlan}
+                  fallbackText={displayText || narrationText}
+                  availableRoles={sceneRoles}
+                  onSaved={setScenePlan}
+                />
               </div>
               <Field label="Formato do vídeo">
                 <Select
@@ -1846,6 +1871,192 @@ function AvatarSetEditorDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+type EditableScene = {
+  id: string;
+  text: string;
+  lookRole: AvatarSetRole;
+  estimatedStart: number;
+  estimatedEnd: number;
+};
+
+function defaultSceneDraft(text: string, roles: AvatarSetRole[]): EditableScene[] {
+  const clean = text.replace(/\s+/g, " ").trim();
+  const sentences = clean.match(/[^.!?…]+[.!?…]*/g)?.map((sentence) => sentence.trim()).filter(Boolean) || [];
+  if (roles.length < 2 || !clean) {
+    return [{ id: "scene-1", text: clean, lookRole: roles[0] || "primary", estimatedStart: 0, estimatedEnd: 0 }];
+  }
+  const splitAt = Math.max(1, Math.ceil(sentences.length / 2));
+  const first = sentences.slice(0, splitAt).join(" ").trim();
+  const second = sentences.slice(splitAt).join(" ").trim() || clean.slice(Math.ceil(clean.length / 2));
+  return [
+    { id: "scene-1", text: first, lookRole: roles[0], estimatedStart: 0, estimatedEnd: 0 },
+    { id: "scene-2", text: second, lookRole: roles[1], estimatedStart: 0, estimatedEnd: 0 },
+  ];
+}
+
+function ScenePlanEditor({
+  scriptId,
+  loading,
+  plan,
+  fallbackText,
+  availableRoles,
+  onSaved,
+}: {
+  scriptId: string;
+  loading: boolean;
+  plan: ScenePlan | null;
+  fallbackText: string;
+  availableRoles: AvatarSetRole[];
+  onSaved: (plan: ScenePlan) => void;
+}) {
+  const [scenes, setScenes] = useState<EditableScene[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (loading) return;
+    setScenes(
+      plan?.scenes.map((scene) => ({
+        id: scene.id,
+        text: scene.text,
+        lookRole: availableRoles.includes(scene.lookRole) ? scene.lookRole : availableRoles[0] || "primary",
+        estimatedStart: scene.estimatedStart,
+        estimatedEnd: scene.estimatedEnd,
+      })) || defaultSceneDraft(fallbackText, availableRoles),
+    );
+    setError(null);
+  }, [availableRoles, loading, plan?.updatedAt]);
+
+  function updateScene(index: number, patch: Partial<EditableScene>) {
+    setScenes((current) => current.map((scene, sceneIndex) => (sceneIndex === index ? { ...scene, ...patch } : scene)));
+  }
+
+  function addScene() {
+    const role = availableRoles[scenes.length % Math.max(availableRoles.length, 1)] || "primary";
+    setScenes((current) => [
+      ...current,
+      {
+        id: `scene-${current.length + 1}`,
+        text: "",
+        lookRole: role,
+        estimatedStart: 0,
+        estimatedEnd: 0,
+      },
+    ]);
+  }
+
+  async function save() {
+    if (scenes.some((scene) => !scene.text.trim())) {
+      setError("Cada cena precisa ter um texto falado.");
+      return;
+    }
+    if (availableRoles.length >= 2 && new Set(scenes.map((scene) => scene.lookRole)).size < 2) {
+      setError("Use pelo menos duas posições diferentes quando o Avatar Set estiver ativo.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await saveScenePlan(scriptId, scenes);
+      onSaved(saved);
+      toast.success("Scene Plan salvo.");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Nao foi possivel salvar o Scene Plan.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h4 className="text-xs font-semibold">Plano de cenas</h4>
+          <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+            Cada cena usa uma única posição. A troca acontece somente com corte entre cenas.
+          </p>
+        </div>
+        <Button type="button" size="sm" variant="outline" onClick={addScene}>
+          <Plus className="h-3.5 w-3.5" /> Adicionar cena
+        </Button>
+      </div>
+      {loading ? (
+        <p className="text-xs text-muted-foreground">Carregando Scene Plan...</p>
+      ) : (
+        <div className="space-y-2">
+          {scenes.map((scene, index) => (
+            <div key={scene.id} className="rounded-lg border bg-background p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold">Cena {index + 1}</span>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  onClick={() => setScenes((current) => current.filter((_, sceneIndex) => sceneIndex !== index))}
+                  disabled={scenes.length <= 1}
+                  aria-label={`Remover cena ${index + 1}`}
+                >
+                  <Trash2 className="h-4 w-4 text-status-danger" />
+                </Button>
+              </div>
+              <div className="grid gap-2 md:grid-cols-[1fr_180px]">
+                <Textarea
+                  value={scene.text}
+                  onChange={(event) => updateScene(index, { text: event.target.value })}
+                  rows={3}
+                  placeholder="Texto falado nesta cena"
+                />
+                <div className="space-y-2">
+                  <Field label="Posição">
+                    <Select
+                      value={scene.lookRole}
+                      onValueChange={(value) => updateScene(index, { lookRole: value as AvatarSetRole })}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {availableRoles.map((role) => (
+                          <SelectItem key={role} value={role}>{avatarSetRoleLabel(role)}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={scene.estimatedStart}
+                      onChange={(event) => updateScene(index, { estimatedStart: Number(event.target.value) || 0 })}
+                      aria-label="Início estimado"
+                      placeholder="Início"
+                    />
+                    <Input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={scene.estimatedEnd}
+                      onChange={(event) => updateScene(index, { estimatedEnd: Number(event.target.value) || 0 })}
+                      aria-label="Fim estimado"
+                      placeholder="Fim"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground">A direção automática com Claude será adicionada em um próximo slice.</p>
+        <Button type="button" size="sm" onClick={() => void save()} disabled={loading || saving || scenes.length === 0}>
+          {saving ? "Salvando..." : "Salvar plano de cenas"}
+        </Button>
+      </div>
+    </div>
   );
 }
 

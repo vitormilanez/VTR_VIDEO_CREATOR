@@ -446,6 +446,22 @@ export interface AvatarSet {
   updatedAt: string;
 }
 
+export interface ScenePlanScene {
+  id: string;
+  order: number;
+  text: string;
+  lookRole: AvatarSetRole;
+  avatarId: string;
+  estimatedStart: number;
+  estimatedEnd: number;
+}
+
+export interface ScenePlan {
+  scriptId: string;
+  scenes: ScenePlanScene[];
+  updatedAt: string;
+}
+
 export interface PackCompliance {
   ok: boolean;
   blocked: boolean;
@@ -628,6 +644,31 @@ export async function deleteAvatarSet(id: string): Promise<void> {
   await requestJson<{ ok: boolean }>(`/api/avatar-sets/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
+}
+
+export async function fetchScenePlan(scriptId: string): Promise<ScenePlan | null> {
+  const response = await requestJson<{ ok: boolean; scenePlan: ScenePlan | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan`,
+    { method: "GET" },
+  );
+  return response.scenePlan;
+}
+
+export async function saveScenePlan(
+  scriptId: string,
+  scenes: Array<{
+    id?: string;
+    text: string;
+    lookRole: AvatarSetRole;
+    estimatedStart: number;
+    estimatedEnd: number;
+  }>,
+): Promise<ScenePlan> {
+  const response = await requestJson<{ ok: boolean; scenePlan: ScenePlan }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan`,
+    { method: "PUT", body: JSON.stringify({ scenes }) },
+  );
+  return response.scenePlan;
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {

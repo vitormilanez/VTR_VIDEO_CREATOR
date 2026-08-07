@@ -182,6 +182,11 @@ def _ai_db() -> sqlite3.Connection:
             looks_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS scene_plans (
+            script_id TEXT PRIMARY KEY,
+            plan_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS visual_packs (
             script_id TEXT PRIMARY KEY,
             pack_json TEXT NOT NULL,
@@ -232,7 +237,7 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
         "avatarMode": row["avatar_mode"] or "single",
         "avatarSetId": row["avatar_set_id"],
         "primaryAvatarId": row["primary_avatar_id"] or row["avatar_id"],
-        "positionCount": int(row["position_count"] or 2),
+        "positionCount": int(row["position_count"] or 1),
         "updatedAt": row["updated_at"],
     }
 
@@ -406,6 +411,71 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
     finally:
         conn.close()
     return saved
+
+
+def _resolve_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, Any]:
+    profile = _production_profile(script_id)
+    if not profile:
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes do Scene Plan.")
+    avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    look_to_avatar = {
+        str(look["role"]): str(look["avatarId"])
+        for look in (avatar_set or {}).get("looks", [])
+        if look.get("role") and look.get("avatarId")
+    }
+    primary_avatar_id = str(profile.get("primaryAvatarId") or profile.get("avatarId") or "")
+    resolved_scenes: list[dict[str, Any]] = []
+    for index, scene in enumerate(scenes, start=1):
+        look_role = str(scene.get("lookRole") or "primary")
+        avatar_id = look_to_avatar.get(look_role) or primary_avatar_id
+        if not avatar_id:
+            raise HTTPException(status_code=422, detail=f"Não foi possível resolver o avatar da cena {index}.")
+        resolved_scenes.append(
+            {
+                "id": str(scene.get("id") or f"scene-{index}"),
+                "order": index,
+                "text": re.sub(r"\s+", " ", str(scene.get("text") or "")).strip(),
+                "lookRole": look_role if look_role in AVATAR_SET_ROLES else "primary",
+                "avatarId": avatar_id,
+                "estimatedStart": max(0, float(scene.get("estimatedStart") or 0)),
+                "estimatedEnd": max(0, float(scene.get("estimatedEnd") or 0)),
+            }
+        )
+    return {"scriptId": script_id, "scenes": resolved_scenes, "updatedAt": _now()}
+
+
+def _scene_plan(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT plan_json FROM scene_plans WHERE script_id = ?",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return json.loads(str(row["plan_json"]))
+
+
+def _save_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, Any]:
+    plan = _resolve_scene_plan(script_id, scenes)
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO scene_plans(script_id, plan_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                plan_json = excluded.plan_json,
+                updated_at = excluded.updated_at
+            """,
+            (script_id, json.dumps(plan, ensure_ascii=False), plan["updatedAt"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return plan
 
 
 def _get_visual_pack(script_id: str) -> dict[str, Any] | None:
@@ -1956,6 +2026,18 @@ class AvatarSetIn(BaseModel):
     looks: list[AvatarLookIn] = Field(min_length=2, max_length=12)
 
 
+class ScenePlanSceneIn(BaseModel):
+    id: str | None = Field(default=None, max_length=80)
+    text: str = Field(min_length=1, max_length=6000)
+    lookRole: Literal["primary", "front", "close", "three_quarter", "standing", "wide"] = "primary"
+    estimatedStart: float = Field(default=0, ge=0, le=3600)
+    estimatedEnd: float = Field(default=0, ge=0, le=3600)
+
+
+class ScenePlanIn(BaseModel):
+    scenes: list[ScenePlanSceneIn] = Field(min_length=1, max_length=30)
+
+
 SHORT_DIRECT_VIDEO_DURATIONS = DIRECT_VIDEO_DURATIONS
 SHORT_VIDEO_VOICE_SPEEDS = {key: float(value["speed"]) for key, value in SPEECH_PRESETS.items()}
 
@@ -2053,6 +2135,19 @@ def delete_avatar_set(avatar_set_id: str) -> dict:
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Avatar Set não encontrado.")
     return {"ok": True, "deleted": avatar_set_id}
+
+
+@app.get("/api/scripts/{script_id}/scene-plan")
+def get_script_scene_plan(script_id: str) -> dict:
+    _find_script(script_id)
+    return {"ok": True, "scenePlan": _scene_plan(script_id)}
+
+
+@app.put("/api/scripts/{script_id}/scene-plan")
+def save_script_scene_plan(script_id: str, payload: ScenePlanIn) -> dict:
+    _find_script(script_id)
+    plan = _save_scene_plan(script_id, [scene.model_dump() for scene in payload.scenes])
+    return {"ok": True, "scenePlan": plan}
 
 
 class NaturalizeScriptIn(BaseModel):
