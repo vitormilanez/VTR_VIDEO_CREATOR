@@ -142,6 +142,41 @@ class ScenePlanTests(unittest.TestCase):
         self.assertEqual(cache_get.call_args.args[1]["designSystemVersion"], server.VIDEO_VISUAL_DESIGN_SYSTEM_VERSION)
         record_usage.assert_not_called()
 
+    def test_visual_plan_edit_is_persisted_and_compliance_is_checked(self) -> None:
+        server._save_production_profile(
+            {
+                "scriptId": "script-edit-visual",
+                "avatarId": "look-only",
+                "voiceId": "voice-1",
+                "speechMode": "natural",
+                "generationMode": "direct",
+            }
+        )
+        server._save_scene_plan(
+            "script-edit-visual",
+            [{"id": "scene-1", "text": "Explicação", "lookRole": "primary"}],
+        )
+        with patch.object(server, "_find_script", return_value={"id": "script-edit-visual"}):
+            result = server.save_script_visual_plan(
+                "script-edit-visual",
+                server.VisualPlanIn(
+                    scenes=[
+                        server.VisualPlanSceneIn(
+                            sceneId="scene-1",
+                            visual=server.VisualPlanVisualIn(
+                                type="full_slide",
+                                layout="big_statement",
+                                headline="Não é um motivo só",
+                                body="O contexto importa",
+                                purpose="reforçar a ideia central",
+                            ),
+                        )
+                    ]
+                ),
+            )
+        self.assertEqual(result["visualPlan"]["scenes"][0]["visual"]["layout"], "big_statement")
+        self.assertEqual(server._get_visual_plan("script-edit-visual"), result["visualPlan"])
+
 
 if __name__ == "__main__":
     unittest.main()

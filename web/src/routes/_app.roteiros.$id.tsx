@@ -33,12 +33,15 @@ import {
   saveProductionProfile,
   saveScript,
   saveScenePlan,
+  saveVisualPlan,
   type AvatarSet,
   type AvatarSetLook,
   type AvatarSetRole,
   type HeyGenCatalog,
   type HeyGenStyle,
   type ScenePlan,
+  type VideoVisualLayout,
+  type VideoVisualType,
   type VisualPlan,
 } from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
@@ -2133,6 +2136,30 @@ function ScenePlanEditor({
   );
 }
 
+const VIDEO_VISUAL_TYPE_OPTIONS: Array<{ value: VideoVisualType; label: string }> = [
+  { value: "none", label: "Nenhum visual" },
+  { value: "full_slide", label: "Slide completo" },
+  { value: "overlay", label: "Overlay" },
+  { value: "statistic", label: "Estatística" },
+  { value: "comparison", label: "Comparação" },
+  { value: "quote", label: "Citação" },
+];
+
+const VIDEO_VISUAL_LAYOUT_OPTIONS: Array<{ value: VideoVisualLayout; label: string }> = [
+  { value: "hero_photo", label: "Hero com foto" },
+  { value: "photo_split", label: "Foto dividida" },
+  { value: "big_statement", label: "Big statement" },
+  { value: "question", label: "Pergunta" },
+  { value: "myth_fact", label: "Mito e fato" },
+  { value: "number_stat", label: "Número" },
+  { value: "three_points", label: "Três pontos" },
+  { value: "explainer", label: "Explicador" },
+  { value: "doctor_quote", label: "Citação médica" },
+  { value: "photo_overlay", label: "Foto com overlay" },
+  { value: "do_dont", label: "Faça / não faça" },
+  { value: "cta_photo", label: "CTA com foto" },
+];
+
 function VisualPlanDirector({
   scriptId,
   scenePlan,
@@ -2155,7 +2182,13 @@ function VisualPlanDirector({
   onSaved: (plan: VisualPlan) => void;
 }) {
   const [directing, setDirecting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [draftPlan, setDraftPlan] = useState<VisualPlan | null>(visualPlan);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraftPlan(visualPlan);
+  }, [visualPlan?.updatedAt]);
 
   async function requestVisualDirection() {
     if (!scenePlan) {
@@ -2174,11 +2207,41 @@ function VisualPlanDirector({
         emotion: performancePlan?.emotion,
       });
       onSaved(result.visualPlan);
+      setDraftPlan(result.visualPlan);
       toast.success("Direção visual gerada pelo Claude.");
     } catch (visualError) {
       setError(visualError instanceof Error ? visualError.message : "Nao foi possivel gerar direção visual.");
     } finally {
       setDirecting(false);
+    }
+  }
+
+  function updateVisual(sceneId: string, patch: Partial<VisualPlan["scenes"][number]["visual"]>) {
+    setDraftPlan((current) =>
+      current
+        ? {
+            ...current,
+            scenes: current.scenes.map((scene) =>
+              scene.sceneId === sceneId ? { ...scene, visual: { ...scene.visual, ...patch } } : scene,
+            ),
+          }
+        : current,
+    );
+  }
+
+  async function save() {
+    if (!draftPlan) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await saveVisualPlan(scriptId, draftPlan);
+      setDraftPlan(saved);
+      onSaved(saved);
+      toast.success("Direção visual salva.");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Nao foi possivel salvar a direção visual.");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -2197,9 +2260,9 @@ function VisualPlanDirector({
       </div>
       <p className="text-[11px] text-muted-foreground">Esta ação usa tokens Claude e salva uma direção estruturada, sem gerar imagens ou vídeo.</p>
       {loading ? <p className="text-xs text-muted-foreground">Carregando direção visual...</p> : null}
-      {visualPlan ? (
+      {draftPlan ? (
         <div className="space-y-2">
-          {visualPlan.scenes.map((scene, index) => (
+          {draftPlan.scenes.map((scene, index) => (
             <div key={scene.sceneId} className="rounded-md border bg-background p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold">Cena {index + 1}</span>
@@ -2207,19 +2270,55 @@ function VisualPlanDirector({
                   {scene.visual.type === "none" ? "Somente avatar" : scene.visual.layout || scene.visual.type}
                 </span>
               </div>
-              {scene.visual.type === "none" ? (
-                <p className="text-xs text-muted-foreground">Nenhum apoio visual recomendado nesta cena.</p>
-              ) : (
-                <div className="space-y-1 text-xs">
-                  <p className="font-semibold">{scene.visual.headline || "Sem headline"}</p>
-                  {scene.visual.body ? <p className="text-muted-foreground">{scene.visual.body}</p> : null}
-                  {scene.visual.purpose ? <p className="text-[11px] text-muted-foreground">Objetivo: {scene.visual.purpose}</p> : null}
+              <div className="grid gap-2 md:grid-cols-[180px_1fr]">
+                <div className="space-y-2">
+                  <Field label="Tipo">
+                    <Select
+                      value={scene.visual.type}
+                      onValueChange={(value) =>
+                        updateVisual(scene.sceneId, {
+                          type: value as VideoVisualType,
+                          layout: value === "none" ? "" : scene.visual.layout || "big_statement",
+                          headline: value === "none" ? "" : scene.visual.headline,
+                          body: value === "none" ? "" : scene.visual.body,
+                        })
+                      }
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {VIDEO_VISUAL_TYPE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  {scene.visual.type !== "none" ? (
+                    <Field label="Layout">
+                      <Select
+                        value={scene.visual.layout || "big_statement"}
+                        onValueChange={(value) => updateVisual(scene.sceneId, { layout: value as VideoVisualLayout })}
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {VIDEO_VISUAL_LAYOUT_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  ) : null}
                 </div>
-              )}
+                {scene.visual.type === "none" ? (
+                  <p className="flex items-center text-xs text-muted-foreground">Nenhum apoio visual recomendado nesta cena.</p>
+                ) : (
+                  <div className="space-y-2">
+                    <Input value={scene.visual.headline} onChange={(event) => updateVisual(scene.sceneId, { headline: event.target.value })} placeholder="Headline curta" />
+                    <Textarea value={scene.visual.body} onChange={(event) => updateVisual(scene.sceneId, { body: event.target.value })} rows={2} placeholder="Body opcional — complemente a fala" />
+                    <Input value={scene.visual.purpose} onChange={(event) => updateVisual(scene.sceneId, { purpose: event.target.value })} placeholder="Objetivo editorial" />
+                  </div>
+                )}
+              </div>
             </div>
           ))}
         </div>
       ) : null}
+      {draftPlan ? <div className="flex justify-end"><Button type="button" size="sm" onClick={() => void save()} disabled={saving || loading}>{saving ? "Salvando..." : "Salvar direção visual"}</Button></div> : null}
       {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
     </div>
   );

@@ -2117,6 +2117,23 @@ class VisualDirectorIn(BaseModel):
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
 
 
+class VisualPlanVisualIn(BaseModel):
+    type: str = Field(default="none", max_length=40)
+    layout: str = Field(default="", max_length=80)
+    headline: str = Field(default="", max_length=180)
+    body: str = Field(default="", max_length=500)
+    purpose: str = Field(default="", max_length=300)
+
+
+class VisualPlanSceneIn(BaseModel):
+    sceneId: str = Field(min_length=1, max_length=80)
+    visual: VisualPlanVisualIn
+
+
+class VisualPlanIn(BaseModel):
+    scenes: list[VisualPlanSceneIn] = Field(min_length=1, max_length=30)
+
+
 SCENE_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-scene-director"
 VISUAL_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-visual-director"
 _SCENE_DIRECTOR_SCHEMA = {
@@ -2393,6 +2410,53 @@ VERSÃO DO PROMPT: {SCENE_DIRECTOR_PROMPT_VERSION}"""
 def get_script_visual_plan(script_id: str) -> dict:
     _find_script(script_id)
     return {"ok": True, "visualPlan": _get_visual_plan(script_id)}
+
+
+@app.put("/api/scripts/{script_id}/visual-plan")
+def save_script_visual_plan(script_id: str, payload: VisualPlanIn) -> dict:
+    _find_script(script_id)
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de editar a direção visual.")
+    submitted = {scene.sceneId: scene.visual.model_dump() for scene in payload.scenes}
+    visual_scenes: list[dict[str, Any]] = []
+    for index, scene in enumerate(scene_plan["scenes"]):
+        visual = submitted.get(str(scene["id"]), {})
+        visual_type = str(visual.get("type") or "none")
+        if visual_type not in VIDEO_VISUAL_TYPES:
+            raise HTTPException(status_code=422, detail=f"Tipo visual inválido na cena {index + 1}.")
+        layout = str(visual.get("layout") or "")
+        if visual_type != "none" and layout not in VIDEO_VISUAL_LAYOUTS:
+            raise HTTPException(status_code=422, detail=f"Layout visual inválido na cena {index + 1}.")
+        headline = re.sub(r"\s+", " ", str(visual.get("headline") or "")).strip()[:180]
+        body = re.sub(r"\s+", " ", str(visual.get("body") or "")).strip()[:500]
+        purpose = re.sub(r"\s+", " ", str(visual.get("purpose") or "")).strip()[:300]
+        if visual_type == "none":
+            layout = ""
+            headline = ""
+            body = ""
+        else:
+            _validate_production_compliance(headline, field=f"Headline visual da cena {index + 1}")
+            _validate_production_compliance(body, field=f"Body visual da cena {index + 1}")
+        visual_scenes.append(
+            {
+                "sceneId": scene["id"],
+                "visual": {
+                    "type": visual_type,
+                    "layout": layout,
+                    "headline": headline,
+                    "body": body,
+                    "purpose": purpose,
+                },
+            }
+        )
+    plan = {
+        "scriptId": script_id,
+        "designSystemVersion": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
+        "promptVersion": VISUAL_DIRECTOR_PROMPT_VERSION,
+        "scenes": visual_scenes,
+    }
+    return {"ok": True, "visualPlan": _save_visual_plan(script_id, plan)}
 
 
 @app.post("/api/scripts/{script_id}/visual-plan/direct")

@@ -762,6 +762,17 @@ export async function generateVisualDirection(
   return response;
 }
 
+export async function saveVisualPlan(scriptId: string, plan: VisualPlan): Promise<VisualPlan> {
+  const response = await requestJson<{ ok: boolean; visualPlan: VisualPlan }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/visual-plan`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ scenes: plan.scenes }),
+    },
+  );
+  return response.visualPlan;
+}
+
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
   const response = await requestJson<{ ok: boolean; settings: AppSettings; updatedAt: string }>(
     "/api/settings",
