@@ -291,6 +291,15 @@ export async function saveScript(script: Script): Promise<Script> {
   return response.script;
 }
 
+/** Exclui o roteiro no Sheets; o backend bloqueia quando existe vídeo ou agendamento vinculado. */
+export async function deleteScript(scriptId: string): Promise<{ id: string; title: string }> {
+  const response = await requestJson<{ ok: boolean; id: string; title: string }>(
+    `/api/sheets/roteiros/${encodeURIComponent(scriptId)}`,
+    { method: "DELETE" },
+  );
+  return { id: response.id, title: response.title };
+}
+
 /** Cria um agendamento real na aba Calendario do Sheets. */
 export async function appendCalendarPost(post: Omit<CalendarPost, "id">): Promise<CalendarPost> {
   const response = await postJson<{ ok: boolean; post: CalendarPost }>(
@@ -421,18 +430,23 @@ export interface PackSlide {
   photoAsset?: Omit<PackPhotoAsset, "url"> | null;
 }
 
+export type VoiceMood = "confident" | "upbeat" | "warm" | "serious" | "neutral";
+export type GenerationMode = "direct" | "video_agent" | "cinematic";
+
 export interface ProductionProfile {
   scriptId: string;
   avatarId: string;
   voiceId: string;
   speechMode: "natural" | "fiel" | "direto" | "enfatico";
-  generationMode: "direct" | "video_agent";
+  voiceMood: VoiceMood;
+  generationMode: GenerationMode;
   avatarMode?: "single" | "set";
   avatarSetId?: string | null;
   primaryAvatarId?: string | null;
   positionCount?: 1 | 2;
   musicTrackId?: string | null;
   musicVolume?: number;
+  cinematicPrompt?: string;
   updatedAt?: string;
 }
 
@@ -484,6 +498,7 @@ export interface SceneGenerationRequest {
   voiceId: string;
   spokenText: string;
   speechMode: "natural" | "fiel" | "direto" | "enfatico";
+  voiceMood: VoiceMood;
   orientation: "portrait" | "landscape";
 }
 
@@ -810,11 +825,13 @@ export async function fetchSceneGenerationPlan(
   scriptId: string,
   options?: {
     speechMode?: SceneGenerationRequest["speechMode"];
+    voiceMood?: VoiceMood;
     orientation?: SceneGenerationRequest["orientation"];
   },
 ): Promise<SceneGenerationResult> {
   const query = new URLSearchParams({
     speechMode: options?.speechMode || "natural",
+    voiceMood: options?.voiceMood || "confident",
     orientation: options?.orientation || "portrait",
   });
   const response = await requestJson<{ ok: boolean; generation: SceneGenerationResult }>(
@@ -830,6 +847,7 @@ export async function submitSceneGeneration(
     orientation: "portrait" | "landscape";
     durationSeconds: 10 | 15 | 30 | 45 | 60;
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
+    voiceMood: VoiceMood;
     captions: boolean;
     optimizePronunciation: boolean;
     idempotencyKey?: string;
@@ -983,7 +1001,7 @@ export interface HeyGenCatalog {
   defaultAvatarId?: string | null;
   defaultVoiceId?: string | null;
   speechPresets?: Record<string, { speed: number; pitch: number; volume: number; locale: string }>;
-  generationModes?: Array<"direct" | "video_agent">;
+  generationModes?: GenerationMode[];
   directDurations?: Array<10 | 15 | 30 | 45 | 60>;
 }
 
@@ -1128,7 +1146,8 @@ export async function createHeyGenVideo(
     orientation: "portrait" | "landscape";
     durationSeconds: 10 | 15 | 30 | 45 | 60;
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
-    generationMode: "direct" | "video_agent";
+    voiceMood: VoiceMood;
+    generationMode: GenerationMode;
     ctaMode?: "auto" | "manual" | "none" | "visual";
     captions: boolean;
     optimizePronunciation: boolean;
@@ -1137,6 +1156,7 @@ export async function createHeyGenVideo(
     narrationText?: string;
     displayText?: string;
     spokenText?: string;
+    cinematicPrompt?: string;
     outroText?: string;
     idempotencyKey?: string;
   },
@@ -1165,7 +1185,7 @@ export async function naturalizeScript(input: {
   ctaMode?: "auto" | "manual" | "none" | "visual";
   manualCta?: string;
   recentCtas?: string[];
-  generationMode?: "direct" | "video_agent";
+  generationMode?: GenerationMode;
 }): Promise<{
   text: string;
   displayText: string;
@@ -1203,6 +1223,7 @@ export async function createHeyGenPreview(
     voiceId: string;
     orientation: "portrait" | "landscape";
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
+    voiceMood: VoiceMood;
     captions: boolean;
     optimizePronunciation: boolean;
     displayText: string;

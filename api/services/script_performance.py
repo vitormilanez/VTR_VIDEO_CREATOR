@@ -8,6 +8,7 @@ from integrations.portuguese_br import prepare_script_for_heygen_voice
 
 
 SpeechMode = Literal["natural", "direto", "enfatico", "fiel"]
+VoiceMood = Literal["confident", "upbeat", "warm", "serious", "neutral"]
 CtaMode = Literal["auto", "manual", "none", "visual"]
 
 VARIABLE_CTAS = [
@@ -25,6 +26,40 @@ SPEECH_PRESETS: dict[str, dict[str, Any]] = {
     "direto": {"speed": 1.0, "pitch": 0, "volume": 1, "locale": "pt-BR"},
     "enfatico": {"speed": 0.98, "pitch": 0, "volume": 1, "locale": "pt-BR"},
     "fiel": {"speed": 1.0, "pitch": 0, "volume": 1, "locale": "pt-BR"},
+}
+
+
+VOICE_MOOD_PRESETS: dict[str, dict[str, Any]] = {
+    "confident": {
+        "speedMultiplier": 1.02,
+        "pitch": 1,
+        "direction": (
+            "confident, positive and reassuring, with conversational energy; "
+            "never sad or melancholic"
+        ),
+    },
+    "upbeat": {
+        "speedMultiplier": 1.04,
+        "pitch": 2,
+        "direction": (
+            "upbeat, lively and optimistic, with clear enthusiasm but without sounding theatrical"
+        ),
+    },
+    "warm": {
+        "speedMultiplier": 0.99,
+        "pitch": 0,
+        "direction": "warm, empathetic and approachable; gentle, but not sad or slow",
+    },
+    "serious": {
+        "speedMultiplier": 0.99,
+        "pitch": -1,
+        "direction": "serious, objective and composed; informative, not gloomy or alarmist",
+    },
+    "neutral": {
+        "speedMultiplier": 1.0,
+        "pitch": 0,
+        "direction": "neutral, clear and natural; avoid sadness, drama or exaggerated enthusiasm",
+    },
 }
 
 
@@ -91,6 +126,26 @@ def speech_preset(mode: str) -> dict[str, Any]:
 
 def speech_speed(mode: str) -> float:
     return float(speech_preset(mode)["speed"])
+
+
+def voice_mood_preset(mood: str) -> dict[str, Any]:
+    return dict(VOICE_MOOD_PRESETS.get(mood, VOICE_MOOD_PRESETS["confident"]))
+
+
+def voice_mood_direction(mood: str) -> str:
+    return str(voice_mood_preset(mood)["direction"])
+
+
+def voice_settings(mode: str, mood: str = "confident") -> dict[str, Any]:
+    """Combina ritmo e humor usando apenas ajustes aceitos pelo Direct Avatar."""
+    settings = speech_preset(mode)
+    mood_preset = voice_mood_preset(mood)
+    settings["speed"] = round(
+        min(1.5, max(0.5, float(settings["speed"]) * float(mood_preset["speedMultiplier"]))),
+        2,
+    )
+    settings["pitch"] = float(mood_preset["pitch"])
+    return settings
 
 
 def strip_known_outros(text: str, selected_outro: str = "") -> str:

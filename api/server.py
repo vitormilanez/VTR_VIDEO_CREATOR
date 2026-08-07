@@ -62,6 +62,7 @@ from api.services.script_performance import (
     LEGACY_OUTRO,
     PERFORMANCE_SCHEMA,
     SPEECH_PRESETS,
+    VOICE_MOOD_PRESETS,
     build_performance_prompt,
     display_text as performance_display_text,
     duration_word_limits,
@@ -72,6 +73,8 @@ from api.services.script_performance import (
     speech_speed,
     strip_known_outros,
     video_agent_word_limits,
+    voice_mood_direction,
+    voice_settings,
 )
 from api.services.video_generation import (
     DIRECT_VIDEO_DURATIONS,
@@ -235,6 +238,8 @@ def _ai_db() -> sqlite3.Connection:
             position_count INTEGER NOT NULL DEFAULT 1,
             music_track_id TEXT,
             music_volume REAL NOT NULL DEFAULT 0.12,
+            cinematic_prompt TEXT NOT NULL DEFAULT '',
+            voice_mood TEXT NOT NULL DEFAULT 'confident',
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS avatar_sets (
@@ -276,6 +281,8 @@ def _ai_db() -> sqlite3.Connection:
         ("position_count", "INTEGER NOT NULL DEFAULT 1"),
         ("music_track_id", "TEXT"),
         ("music_volume", "REAL NOT NULL DEFAULT 0.12"),
+        ("cinematic_prompt", "TEXT NOT NULL DEFAULT ''"),
+        ("voice_mood", "TEXT NOT NULL DEFAULT 'confident'"),
     ):
         try:
             conn.execute(f"ALTER TABLE production_profiles ADD COLUMN {column} {definition}")
@@ -293,7 +300,7 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
             """
             SELECT script_id, avatar_id, voice_id, speech_mode, generation_mode,
                    avatar_mode, avatar_set_id, primary_avatar_id, position_count,
-                   music_track_id, music_volume, updated_at
+                   music_track_id, music_volume, cinematic_prompt, voice_mood, updated_at
             FROM production_profiles
             WHERE script_id = ?
             """,
@@ -315,6 +322,8 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
         "positionCount": int(row["position_count"] or 1),
         "musicTrackId": row["music_track_id"],
         "musicVolume": float(row["music_volume"] or 0.12),
+        "cinematicPrompt": str(row["cinematic_prompt"] or ""),
+        "voiceMood": _clean_voice_mood(row["voice_mood"]),
         "updatedAt": row["updated_at"],
     }
 
@@ -425,6 +434,18 @@ def _save_avatar_set(
     return saved
 
 
+def _clean_cinematic_prompt(value: Any) -> str:
+    raw = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw.split("\n")]
+    cleaned = "\n".join(line for line in lines if line).strip()
+    return cleaned[:2000]
+
+
+def _clean_voice_mood(value: Any) -> str:
+    mood = str(value or "confident").strip().lower()
+    return mood if mood in VOICE_MOOD_PRESETS else "confident"
+
+
 def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
     avatar_mode = str(profile.get("avatarMode") or "single")
     if avatar_mode not in {"single", "set"}:
@@ -446,6 +467,8 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
     music_volume = float(profile.get("musicVolume") or 0.12)
     if not 0.03 <= music_volume <= 0.25:
         raise HTTPException(status_code=422, detail="O volume da trilha deve estar entre 3% e 25%.")
+    cinematic_prompt = _clean_cinematic_prompt(profile.get("cinematicPrompt"))
+    voice_mood = _clean_voice_mood(profile.get("voiceMood"))
     saved = {
         "scriptId": str(profile["scriptId"]),
         "avatarId": primary_avatar_id,
@@ -458,6 +481,8 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "positionCount": 2 if avatar_mode == "set" else 1,
         "musicTrackId": music_track_id,
         "musicVolume": music_volume,
+        "cinematicPrompt": cinematic_prompt,
+        "voiceMood": voice_mood,
         "updatedAt": _now(),
     }
     conn = _ai_db()
@@ -467,8 +492,8 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO production_profiles(
                 script_id, avatar_id, voice_id, speech_mode, generation_mode,
                 avatar_mode, avatar_set_id, primary_avatar_id, position_count,
-                music_track_id, music_volume, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                music_track_id, music_volume, cinematic_prompt, voice_mood, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(script_id) DO UPDATE SET
                 avatar_id = excluded.avatar_id,
                 voice_id = excluded.voice_id,
@@ -480,6 +505,8 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 position_count = excluded.position_count,
                 music_track_id = excluded.music_track_id,
                 music_volume = excluded.music_volume,
+                cinematic_prompt = excluded.cinematic_prompt,
+                voice_mood = excluded.voice_mood,
                 updated_at = excluded.updated_at
             """,
             (
@@ -494,6 +521,8 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 saved["positionCount"],
                 saved["musicTrackId"],
                 saved["musicVolume"],
+                saved["cinematicPrompt"],
+                saved["voiceMood"],
                 saved["updatedAt"],
             ),
         )
@@ -2218,7 +2247,7 @@ def heygen_catalog() -> dict:
     )
     catalog["defaultVoiceId"] = _heygen_default_voice_id()
     catalog["speechPresets"] = SPEECH_PRESETS
-    catalog["generationModes"] = ["direct", "video_agent"]
+    catalog["generationModes"] = ["direct", "video_agent", "cinematic"]
     catalog["directDurations"] = sorted(DIRECT_VIDEO_DURATIONS)
     return catalog
 
@@ -2637,7 +2666,8 @@ class VideoCreateIn(BaseModel):
     orientation: Literal["portrait", "landscape"] = "portrait"
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
     speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
-    generationMode: Literal["direct", "video_agent"] = "direct"
+    voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident"
+    generationMode: Literal["direct", "video_agent", "cinematic"] = "direct"
     ctaMode: Literal["auto", "manual", "none", "visual"] = "manual"
     captions: bool = True
     optimizePronunciation: bool = True
@@ -2646,6 +2676,7 @@ class VideoCreateIn(BaseModel):
     narrationText: str | None = Field(default=None, max_length=6000)
     displayText: str | None = Field(default=None, max_length=6000)
     spokenText: str | None = Field(default=None, max_length=6000)
+    cinematicPrompt: str | None = Field(default=None, max_length=2000)
     outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
 
@@ -2656,6 +2687,7 @@ class VideoPreviewCreateIn(BaseModel):
     voiceId: str = Field(min_length=1, max_length=160)
     orientation: Literal["portrait", "landscape"] = "portrait"
     speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
+    voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident"
     generationMode: Literal["direct", "video_agent"] = "direct"
     captions: bool = True
     optimizePronunciation: bool = True
@@ -2669,6 +2701,7 @@ class SceneVideoConfirmIn(BaseModel):
     orientation: Literal["portrait", "landscape"] = "portrait"
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
     speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
+    voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident"
     captions: bool = True
     optimizePronunciation: bool = True
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
@@ -2678,12 +2711,14 @@ class ProductionProfileIn(BaseModel):
     avatarId: str = Field(min_length=1, max_length=160)
     voiceId: str = Field(min_length=1, max_length=160)
     speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
-    generationMode: Literal["direct", "video_agent"] = "direct"
+    voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident"
+    generationMode: Literal["direct", "video_agent", "cinematic"] = "direct"
     avatarMode: Literal["single", "set"] = "single"
     avatarSetId: str | None = Field(default=None, max_length=160)
     primaryAvatarId: str | None = Field(default=None, max_length=160)
     musicTrackId: str | None = Field(default=None, max_length=80)
     musicVolume: float = Field(default=0.12, ge=0.03, le=0.25)
+    cinematicPrompt: str = Field(default="", max_length=2000)
 
 
 class AvatarLookIn(BaseModel):
@@ -2830,6 +2865,7 @@ def _direct_video_payload(
     speech_mode: str,
     captions: bool,
     optimize_pronunciation: bool,
+    voice_mood: str = "confident",
     caption_source_matches_spoken: bool = True,
 ) -> dict[str, Any]:
     """Monta um video curto deterministico, sem impor duracao artificial."""
@@ -2840,6 +2876,7 @@ def _direct_video_payload(
         voice_id=voice_id,
         orientation=orientation,
         speech_mode=speech_mode,
+        voice_mood=voice_mood,
         captions=captions,
         optimize_pronunciation=optimize_pronunciation,
         caption_source_matches_spoken=caption_source_matches_spoken,
@@ -2878,12 +2915,14 @@ def save_script_production_profile(script_id: str, payload: ProductionProfileIn)
             "avatarId": payload.avatarId,
             "voiceId": payload.voiceId,
             "speechMode": payload.speechMode,
+            "voiceMood": payload.voiceMood,
             "generationMode": payload.generationMode,
             "avatarMode": payload.avatarMode,
             "avatarSetId": payload.avatarSetId,
             "primaryAvatarId": payload.primaryAvatarId,
             "musicTrackId": payload.musicTrackId,
             "musicVolume": payload.musicVolume,
+            "cinematicPrompt": payload.cinematicPrompt,
         }
     )
     return {"ok": True, "profile": profile}
@@ -2949,6 +2988,7 @@ def save_script_scene_plan(script_id: str, payload: ScenePlanIn) -> dict:
 def get_scene_generation_plan(
     script_id: str,
     speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural",
+    voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident",
     orientation: Literal["portrait", "landscape"] = "portrait",
 ) -> dict:
     """Expõe o contrato futuro por cena sem criar job ou chamar a HeyGen."""
@@ -2965,6 +3005,7 @@ def get_scene_generation_plan(
             scene_plan=scene_plan,
             voice_id=str(profile["voiceId"]),
             speech_mode=speechMode,
+            voice_mood=voiceMood,
             orientation=orientation,
         )
     except ValueError as exc:
@@ -2988,6 +3029,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
             scene_plan=scene_plan,
             voice_id=str(profile["voiceId"]),
             speech_mode=payload.speechMode,
+            voice_mood=payload.voiceMood,
             orientation=payload.orientation,
         )
     except ValueError as exc:
@@ -3029,6 +3071,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 "orientation": request.orientation,
                 "durationSeconds": payload.durationSeconds,
                 "speechMode": request.speech_mode,
+                "voiceMood": request.voice_mood,
                 "generationMode": "direct",
                 "captions": payload.captions,
                 "optimizePronunciation": payload.optimizePronunciation,
@@ -3058,6 +3101,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 voice_id=request.voice_id,
                 orientation=request.orientation,
                 speech_mode=request.speech_mode,
+                voice_mood=request.voice_mood,
                 captions=payload.captions,
                 optimize_pronunciation=payload.optimizePronunciation,
             )
@@ -3440,7 +3484,7 @@ class NaturalizeScriptIn(BaseModel):
     ctaMode: Literal["auto", "manual", "none", "visual"] = "auto"
     manualCta: str = Field(default="", max_length=240)
     recentCtas: list[str] = Field(default_factory=list)
-    generationMode: Literal["direct", "video_agent"] = "direct"
+    generationMode: Literal["direct", "video_agent", "cinematic"] = "direct"
 
 
 _NATURAL_SCRIPT_SCHEMA = PERFORMANCE_SCHEMA
@@ -3607,7 +3651,7 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
         cta_mode=payload.ctaMode,
         manual_cta=payload.manualCta or payload.outro,
         recent_ctas=payload.recentCtas,
-        video_agent=payload.generationMode == "video_agent",
+        video_agent=payload.generationMode in {"video_agent", "cinematic"},
     )
     try:
         client = anthropic.Anthropic()
@@ -3971,6 +4015,16 @@ def ai_costs() -> dict:
 def create_video(payload: VideoCreateIn) -> dict:
     """Cria um job real no HeyGen somente apos o clique de enviar para producao."""
     now = _now()
+    cinematic_prompt = (
+        _clean_cinematic_prompt(payload.cinematicPrompt)
+        if payload.generationMode == "cinematic"
+        else ""
+    )
+    if payload.generationMode == "cinematic" and not cinematic_prompt:
+        raise HTTPException(
+            status_code=422,
+            detail="Escreva a direção cinematic antes de enviar este modo para produção.",
+        )
     # Preserve the historical "existing video" response for callers that have
     # not supplied any editable text. Requests with production text always go
     # through the stricter pre-reservation compliance path below.
@@ -4013,6 +4067,7 @@ def create_video(payload: VideoCreateIn) -> dict:
             "orientation": payload.orientation,
             "durationSeconds": payload.durationSeconds,
             "speechMode": payload.speechMode,
+            "voiceMood": payload.voiceMood,
             "generationMode": payload.generationMode,
             "ctaMode": payload.ctaMode,
             "captions": payload.captions,
@@ -4021,6 +4076,7 @@ def create_video(payload: VideoCreateIn) -> dict:
             "narrationText": final_display_text,
             "displayText": final_display_text,
             "spokenText": final_spoken_text,
+            **({"cinematicPrompt": cinematic_prompt} if cinematic_prompt else {}),
             "outroText": payload.outroText,
         },
     }
@@ -4075,7 +4131,6 @@ def _create_video_job(
     script: dict[str, Any] | None = None,
     final_texts: tuple[str, str] | None = None,
 ) -> dict:
-    command = _heygen_cli()
     script = script or _find_script(payload.scriptId)
     if script.get("status") != "aprovado_clinicamente":
         raise HTTPException(
@@ -4083,6 +4138,17 @@ def _create_video_job(
             detail="O roteiro precisa concluir a revisão de fala e estar marcado como Pronto antes do HeyGen.",
         )
     final_display_text, final_spoken_text = final_texts or _finalize_video_texts(payload, script)
+    cinematic_prompt = (
+        _clean_cinematic_prompt(payload.cinematicPrompt)
+        if payload.generationMode == "cinematic"
+        else ""
+    )
+    if payload.generationMode == "cinematic" and not cinematic_prompt:
+        raise HTTPException(
+            status_code=422,
+            detail="Escreva a direção cinematic antes de enviar este modo para produção.",
+        )
+    command = _heygen_cli()
     try:
         balance_before, currency_before = _heygen_wallet(command)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, HTTPException):
@@ -4099,19 +4165,36 @@ def _create_video_job(
     if avatar_id not in allowed_avatar_ids:
         raise HTTPException(status_code=400, detail="Selecione um avatar privado pronto.")
 
+    existing_profile = _production_profile(payload.scriptId) or {}
     _save_production_profile(
         {
             "scriptId": payload.scriptId,
             "avatarId": avatar_id,
             "voiceId": voice_id,
             "speechMode": payload.speechMode,
+            "voiceMood": payload.voiceMood,
             "generationMode": payload.generationMode,
+            "avatarMode": existing_profile.get("avatarMode", "single"),
+            "avatarSetId": existing_profile.get("avatarSetId"),
+            "primaryAvatarId": existing_profile.get("primaryAvatarId") or avatar_id,
+            "musicTrackId": existing_profile.get("musicTrackId"),
+            "musicVolume": existing_profile.get("musicVolume", 0.12),
+            "cinematicPrompt": (
+                cinematic_prompt
+                if payload.generationMode == "cinematic"
+                else existing_profile.get("cinematicPrompt", "")
+            ),
         }
     )
     job["productionSettings"]["avatarId"] = avatar_id
     job["productionSettings"]["voiceId"] = voice_id
+    job["productionSettings"]["voiceMood"] = payload.voiceMood
     job["productionSettings"]["displayText"] = final_display_text
     job["productionSettings"]["spokenText"] = final_spoken_text
+    if payload.generationMode == "cinematic":
+        job["productionSettings"]["cinematicPrompt"] = cinematic_prompt
+    else:
+        job["productionSettings"].pop("cinematicPrompt", None)
     captions_need_normalization = payload.captions and final_display_text != final_spoken_text
     job["productionSettings"]["captionStrategy"] = (
         "sidecar_srt_normalized" if captions_need_normalization else "sidecar_srt"
@@ -4122,7 +4205,8 @@ def _create_video_job(
 
     if payload.generationMode == "direct":
         generation_mode = "direct"
-        voice_speed = speech_speed(payload.speechMode)
+        direct_voice_settings = voice_settings(payload.speechMode, payload.voiceMood)
+        voice_speed = float(direct_voice_settings["speed"])
         job["productionSettings"]["generationMode"] = generation_mode
         job["productionSettings"]["voiceSpeed"] = voice_speed
         _job_store().upsert("video", job)
@@ -4133,6 +4217,7 @@ def _create_video_job(
             voice_id=voice_id,
             orientation=payload.orientation,
             speech_mode=payload.speechMode,
+            voice_mood=payload.voiceMood,
             captions=payload.captions,
             optimize_pronunciation=payload.optimizePronunciation,
             caption_source_matches_spoken=not captions_need_normalization,
@@ -4148,17 +4233,22 @@ def _create_video_job(
         if not video_id:
             raise HTTPException(status_code=502, detail="HeyGen nao retornou o identificador do video.")
     else:
-        generation_mode = "video_agent"
+        generation_mode = payload.generationMode
         job["productionSettings"]["generationMode"] = generation_mode
         job["productionSettings"]["voiceSpeed"] = speech_speed(payload.speechMode)
         _job_store().upsert("video", job)
-        # No modo Video Agent, o conteúdo enviado é somente a fala final já
-        # aprovada/ajustada. Não levamos Scene Plan, Visual Plan, slides ou
-        # instruções visuais locais: a direção e a edição ficam com o HeyGen.
-        agent_text = final_display_text.strip()
+        # Video Agent e Cinematic usam o mesmo transporte, mas prompts isolados:
+        # o modo comum recebe só fala + performance; apenas Cinematic recebe
+        # direção visual. Scene Plan, Visual Plan e slides nunca entram aqui.
+        agent_text, agent_input_mode = _compose_video_agent_prompt(
+            final_display_text,
+            cinematic_prompt if payload.generationMode == "cinematic" else None,
+            payload.durationSeconds,
+            payload.voiceMood,
+        )
         if not agent_text:
             raise HTTPException(status_code=400, detail="A fala final não pode estar vazia para o Video Agent.")
-        job["productionSettings"]["agentInput"] = "approved_text_only"
+        job["productionSettings"]["agentInput"] = agent_input_mode
         _job_store().upsert("video", job)
         args = [
             "video-agent",
@@ -4220,6 +4310,7 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
             "orientation": payload.orientation,
             "durationSeconds": 10,
             "speechMode": payload.speechMode,
+            "voiceMood": payload.voiceMood,
             "generationMode": "direct",
             "captions": payload.captions,
             "optimizePronunciation": payload.optimizePronunciation,
@@ -4255,15 +4346,21 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
                 "avatarId": payload.avatarId,
                 "voiceId": payload.voiceId,
                 "speechMode": payload.speechMode,
+                "voiceMood": payload.voiceMood,
                 "generationMode": "direct",
                 "avatarMode": existing_profile.get("avatarMode", "single"),
                 "avatarSetId": existing_profile.get("avatarSetId"),
                 "primaryAvatarId": existing_profile.get("primaryAvatarId") or payload.avatarId,
+                "musicTrackId": existing_profile.get("musicTrackId"),
+                "musicVolume": existing_profile.get("musicVolume", 0.12),
+                "cinematicPrompt": existing_profile.get("cinematicPrompt", ""),
             }
         )
         job["submissionState"] = "submitting"
         job["productionSettings"]["generationMode"] = "direct"
-        job["productionSettings"]["voiceSpeed"] = speech_speed(payload.speechMode)
+        job["productionSettings"]["voiceSpeed"] = float(
+            voice_settings(payload.speechMode, payload.voiceMood)["speed"]
+        )
         job["productionSettings"]["captionStrategy"] = (
             "sidecar_srt_normalized"
             if payload.captions and preview_display_text != preview_spoken_text
@@ -4277,6 +4374,7 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
             voice_id=payload.voiceId,
             orientation=payload.orientation,
             speech_mode=payload.speechMode,
+            voice_mood=payload.voiceMood,
             captions=payload.captions,
             optimize_pronunciation=False,
             caption_source_matches_spoken=preview_display_text == preview_spoken_text,
@@ -5222,6 +5320,23 @@ def _update_snapshot_row(tab: str, item_id: str, patch: dict[str, Any]) -> None:
     if target is None:
         raise HTTPException(status_code=404, detail=f"item {item_id} nao encontrado no snapshot")
     target.update(patch)
+    snapshot["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    temporary = SNAPSHOT.with_suffix(".tmp")
+    temporary.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(SNAPSHOT)
+
+
+def _remove_snapshot_row(tab: str, item_id: str) -> None:
+    snapshot = _load_snapshot()
+    rows = snapshot.setdefault("sheets", {}).setdefault(tab, [])
+    prefix = TAB_PREFIX[tab]
+    target_index = next(
+        (index for index, row in enumerate(rows) if _row_id(row, prefix, index) == item_id),
+        None,
+    )
+    if target_index is None:
+        raise HTTPException(status_code=404, detail=f"item {item_id} nao encontrado no snapshot")
+    rows.pop(target_index)
     snapshot["updated_at"] = datetime.now().isoformat(timespec="seconds")
     temporary = SNAPSHOT.with_suffix(".tmp")
     temporary.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -7484,6 +7599,95 @@ def update_script(item_id: str, payload: ScriptIn) -> dict:
     return {"ok": True, "script": map_scripts([raw])[0]}
 
 
+def _delete_script_local_data(script_id: str) -> dict[str, Any]:
+    deleted_rows = 0
+    conn = _ai_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for table in (
+            "production_profiles",
+            "scene_plans",
+            "visual_plans",
+            "video_slide_renders",
+            "visual_packs",
+        ):
+            cursor = conn.execute(f"DELETE FROM {table} WHERE script_id = ?", (script_id,))
+            deleted_rows += max(cursor.rowcount, 0)
+        conn.commit()
+    finally:
+        conn.close()
+
+    slide_directory = _video_slide_output_dir(script_id)
+    slides_removed = False
+    cleanup_warning: str | None = None
+    if slide_directory.exists():
+        try:
+            resolved_root = VIDEO_SLIDE_OUTPUTS.resolve()
+            resolved_target = slide_directory.resolve()
+            if resolved_target.parent != resolved_root:
+                raise RuntimeError("Diretorio de slides fora da raiz permitida.")
+            shutil.rmtree(resolved_target)
+            slides_removed = True
+        except (OSError, RuntimeError) as exc:
+            cleanup_warning = str(exc)
+    return {
+        "localRowsRemoved": deleted_rows,
+        "slidesRemoved": slides_removed,
+        "cleanupWarning": cleanup_warning,
+    }
+
+
+@app.delete("/api/sheets/roteiros/{item_id}")
+def delete_script(item_id: str) -> dict:
+    """Exclui um roteiro sem deixar referencias de producao ou agenda quebradas."""
+    from integrations.google_sheets_rest_client import GoogleSheetsRestClient
+
+    script = _find_script(item_id)
+    linked_jobs = [
+        job
+        for job in _load_video_jobs()
+        if job.get("scriptId") == item_id and job.get("status") != "erro"
+    ]
+    if linked_jobs:
+        raise HTTPException(
+            status_code=409,
+            detail="Este roteiro possui vídeo ou prévia de produção. Preserve o roteiro para manter o histórico do vídeo.",
+        )
+
+    snapshot = _load_snapshot()
+    linked_posts = [
+        post
+        for post in map_calendar(snapshot.get("sheets", {}).get("calendario", []))
+        if post.get("scriptId") == item_id
+    ]
+    if linked_posts:
+        raise HTTPException(
+            status_code=409,
+            detail="Este roteiro está ligado ao Calendário. Remova ou altere o agendamento antes de excluir.",
+        )
+
+    try:
+        client = GoogleSheetsRestClient()
+        _ensure_tab_ids(client, "roteiros")
+        _ensure_script_headers(client)
+        values = client.get_values(TAB_RANGE["roteiros"])
+        row_number = _sheet_row_number(values, item_id, "s")
+        client.delete_row(TAB_TITLE["roteiros"], row_number)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"falha ao excluir roteiro do Sheets: {exc}") from exc
+
+    _remove_snapshot_row("roteiros", item_id)
+    cleanup = _delete_script_local_data(item_id)
+    return {
+        "ok": True,
+        "id": item_id,
+        "title": script.get("titulo") or "Roteiro",
+        **cleanup,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Geracao real do Pack de Conteudo com Claude (server-side)
 # --------------------------------------------------------------------------- #
@@ -7633,7 +7837,7 @@ def _validate_final_narration(
         for issue in _narration_quality_issues(final_text, duration_seconds, selected_outro)
         if not issue.startswith("Texto muito curto")
     ]
-    if generation_mode == "video_agent":
+    if generation_mode in {"video_agent", "cinematic"}:
         quality_issues.extend(_video_agent_narration_quality_issues(final_text, duration_seconds))
     if quality_issues:
         reasons = "; ".join(quality_issues)
@@ -7698,8 +7902,14 @@ def _production_configuration_key(payload: VideoCreateIn, display_text: str, spo
         "durationSeconds": payload.durationSeconds,
         "generationMode": payload.generationMode,
         "speechMode": payload.speechMode,
+        "voiceMood": payload.voiceMood,
         "displayText": display_text,
         "spokenText": spoken_text,
+        "cinematicPrompt": (
+            _clean_cinematic_prompt(payload.cinematicPrompt)
+            if payload.generationMode == "cinematic"
+            else ""
+        ),
         "ctaMode": payload.ctaMode,
         "outroText": payload.outroText,
         "captions": payload.captions,
@@ -7717,12 +7927,55 @@ def _preview_configuration_key(payload: VideoPreviewCreateIn, display_text: str,
         "voiceId": payload.voiceId,
         "orientation": payload.orientation,
         "speechMode": payload.speechMode,
+        "voiceMood": payload.voiceMood,
         "displayText": display_text,
         "spokenText": spoken_text,
         "captions": payload.captions,
     }
     digest = hashlib.sha256(json.dumps(configuration, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     return f"preview:{payload.scriptId}:{digest[:32]}"
+
+
+def _compose_video_agent_prompt(
+    approved_script: str,
+    cinematic_prompt: str | None,
+    duration_seconds: int,
+    voice_mood: str = "confident",
+) -> tuple[str, str]:
+    clean_script = approved_script.strip()
+    if not clean_script:
+        return "", "approved_text_plus_voice_direction"
+    clean_direction = _clean_cinematic_prompt(cinematic_prompt)
+    prompt_parts = [
+        "The presenter must speak only the approved Portuguese script below.",
+        (
+            "VOICE DELIVERY (interpret as performance direction, never read aloud): "
+            f"Speak in Brazilian Portuguese with a {voice_mood_direction(_clean_voice_mood(voice_mood))} delivery."
+        ),
+        (
+            f"Keep the video around {duration_seconds} seconds. "
+            "Do not add new medical claims, mockery, caricature, or sensational framing."
+        ),
+        f"APPROVED SCRIPT (Portuguese):\n{clean_script}",
+    ]
+    if clean_direction:
+        prompt_parts.insert(
+            2,
+            (
+                "Do not read, paraphrase, summarize, or mention the cinematic direction. "
+                "Use it only for visual staging, camera movement, pacing, background action, and B-roll."
+            ),
+        )
+        prompt_parts.append(
+            f"CINEMATIC DIRECTION (interpret visually, do not read aloud):\n{clean_direction}"
+        )
+    prompt = "\n\n".join(prompt_parts)
+    return (
+        prompt,
+        "approved_text_plus_voice_and_cinematic_direction"
+        if clean_direction
+        else "approved_text_plus_voice_direction",
+    )
 
 
 _PACK_ITEM_SCHEMA = {

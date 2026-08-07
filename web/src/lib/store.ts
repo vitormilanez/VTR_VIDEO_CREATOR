@@ -31,6 +31,7 @@ interface State {
   updateIdea: (id: string, patch: Partial<Idea>) => void;
   addScript: (s: Script) => void;
   updateScript: (id: string, patch: Partial<Script>) => void;
+  removeScript: (id: string) => void;
   addVideoJob: (v: VideoJob) => void;
   updateVideoJob: (id: string, patch: Partial<VideoJob>) => void;
   addCalendarPost: (p: CalendarPost) => void;
@@ -122,6 +123,10 @@ export const useStore = create<State>()(
       updateScript: (id, patch) =>
         set((s) => ({
           scripts: s.scripts.map((sc) => (sc.id === id ? { ...sc, ...patch } : sc)),
+        })),
+      removeScript: (id) =>
+        set((s) => ({
+          scripts: s.scripts.filter((script) => script.id !== id),
         })),
       addVideoJob: (v) =>
         set((s) => ({

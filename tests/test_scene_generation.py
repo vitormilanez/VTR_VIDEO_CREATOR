@@ -19,6 +19,7 @@ class SceneGenerationTests(unittest.TestCase):
             },
             voice_id="voice-fixed",
             speech_mode="natural",
+            voice_mood="upbeat",
             orientation="portrait",
             spoken_text_by_scene={"scene-1": "Fala exata do hook."},
         )
@@ -29,6 +30,8 @@ class SceneGenerationTests(unittest.TestCase):
         self.assertEqual([item.avatar_id for item in result.requests], ["avatar-close", "avatar-front"])
         self.assertEqual({item.voice_id for item in result.requests}, {"voice-fixed"})
         self.assertEqual(result.requests[0].spoken_text, "Fala exata do hook.")
+        self.assertEqual({item.voice_mood for item in result.requests}, {"upbeat"})
+        self.assertEqual(result.to_dict()["requests"][0]["voiceMood"], "upbeat")
         self.assertEqual(result.to_dict()["requests"][1]["orientation"], "portrait")
 
     def test_requires_resolved_avatar_per_scene(self) -> None:

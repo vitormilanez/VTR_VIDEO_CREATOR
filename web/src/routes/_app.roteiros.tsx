@@ -6,6 +6,8 @@ import { DataToolbar } from "@/components/data-toolbar";
 import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WeeklyArchiveSwitch } from "@/components/weekly-archive-switch";
+import { ConfirmAction } from "@/components/confirm-action";
+import { deleteScript } from "@/lib/api/local";
 import { familiaLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import { splitWeekly, type WeeklyView } from "@/lib/weekly-archive";
@@ -41,9 +43,12 @@ import {
   CircleCheck,
   ExternalLink,
   FileText,
+  Loader2,
   MessageSquareText,
   PanelsTopLeft,
+  Trash2,
 } from "lucide-react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/roteiros")({
   head: () => ({
@@ -64,11 +69,14 @@ function RoteirosLayout() {
 export function RoteirosPage() {
   const scripts = useStore((s) => s.scripts);
   const videoJobs = useStore((s) => s.videoJobs);
+  const calendarPosts = useStore((s) => s.calendarPosts);
+  const removeScript = useStore((s) => s.removeScript);
   const [status, setStatus] = useState("todos");
   const [prioridade, setPrioridade] = useState("todas");
   const [busca, setBusca] = useState("");
   const [weeklyView, setWeeklyView] = useState<WeeklyView>("current");
   const [selectedScript, setSelectedScript] = useState<Script | null>(null);
+  const [deletingScriptId, setDeletingScriptId] = useState<string | null>(null);
 
   const weekly = splitWeekly(scripts, (script) => script.criadoEm);
   const weeklyScripts = weeklyView === "current" ? weekly.current : weekly.archive;
@@ -96,6 +104,24 @@ export function RoteirosPage() {
     videoJobs.filter((job) => job.status !== "erro").map((job) => job.scriptId),
   );
   const usedCount = weeklyScripts.filter((script) => usedScriptIds.has(script.id)).length;
+  const scheduledScriptIds = new Set(
+    calendarPosts.map((post) => post.scriptId).filter((scriptId): scriptId is string => Boolean(scriptId)),
+  );
+
+  async function excluirRoteiro(script: Script) {
+    if (deletingScriptId) return;
+    setDeletingScriptId(script.id);
+    try {
+      await deleteScript(script.id);
+      removeScript(script.id);
+      if (selectedScript?.id === script.id) setSelectedScript(null);
+      toast.success(`Roteiro “${script.titulo}” excluído.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível excluir o roteiro.");
+    } finally {
+      setDeletingScriptId(null);
+    }
+  }
 
   return (
     <AppShell title="Roteiros">
@@ -176,20 +202,24 @@ export function RoteirosPage() {
         />
       ) : (
         <TooltipProvider delayDuration={180}>
-          <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
-            <Table className="min-w-[920px] table-fixed">
+          <div className="overflow-x-auto rounded-xl border bg-card shadow-sm">
+            <Table className="min-w-[1040px] table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[27%]">Roteiro</TableHead>
-                  <TableHead className="w-[23%]">Resumo</TableHead>
-                  <TableHead className="w-[23%]">Fala</TableHead>
+                  <TableHead className="w-[26%]">Roteiro</TableHead>
+                  <TableHead className="w-[22%]">Resumo</TableHead>
+                  <TableHead className="w-[22%]">Fala</TableHead>
                   <TableHead className="w-[9%] text-center">Sinais</TableHead>
                   <TableHead className="w-[9%]">Status</TableHead>
-                  <TableHead className="w-[9%] text-right">Ações</TableHead>
+                  <TableHead className="w-[12%] text-right">Ações</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {ordered.map((s) => (
+                {ordered.map((s) => {
+                  const hasVideo = usedScriptIds.has(s.id);
+                  const hasCalendarPost = scheduledScriptIds.has(s.id);
+                  const deletionProtected = hasVideo || hasCalendarPost;
+                  return (
                   <TableRow key={s.id} className="group">
                     <TableCell className="align-top py-4">
                       <Link
@@ -250,10 +280,41 @@ export function RoteirosPage() {
                             <ExternalLink className="h-3.5 w-3.5" />
                           </Link>
                         </Button>
+                        <ConfirmAction
+                          destructive
+                          title={deletionProtected ? "Este roteiro não pode ser excluído" : "Excluir roteiro?"}
+                          description={
+                            deletionProtected
+                              ? hasVideo
+                                ? "Existe um vídeo ou uma prévia vinculada. O roteiro será preservado para manter o histórico da produção."
+                                : "Existe um item do Calendário vinculado. Remova ou altere o agendamento antes de excluir o roteiro."
+                              : `“${s.titulo}” será removido do Google Sheets junto com Scene Plan, slides e Pack locais. Esta ação não pode ser desfeita pelo app.`
+                          }
+                          confirmLabel="Excluir roteiro"
+                          confirmDisabled={deletionProtected || deletingScriptId === s.id}
+                          onConfirm={() => void excluirRoteiro(s)}
+                          trigger={
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              aria-label={`Excluir roteiro ${s.titulo}`}
+                              title="Excluir roteiro"
+                              disabled={deletingScriptId !== null}
+                              className="text-muted-foreground hover:bg-status-danger/10 hover:text-status-danger"
+                            >
+                              {deletingScriptId === s.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5" />
+                              )}
+                            </Button>
+                          }
+                        />
                       </div>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           </div>

@@ -11,8 +11,10 @@ from typing import Any, Literal, Mapping
 
 
 SceneSpeechMode = Literal["natural", "fiel", "direto", "enfatico"]
+SceneVoiceMood = Literal["confident", "upbeat", "warm", "serious", "neutral"]
 SceneOrientation = Literal["portrait", "landscape"]
 SCENE_SPEECH_MODES = frozenset({"natural", "fiel", "direto", "enfatico"})
+SCENE_VOICE_MOODS = frozenset({"confident", "upbeat", "warm", "serious", "neutral"})
 SCENE_ORIENTATIONS = frozenset({"portrait", "landscape"})
 
 
@@ -26,6 +28,7 @@ class SceneGenerationRequest:
     voice_id: str
     spoken_text: str
     speech_mode: SceneSpeechMode
+    voice_mood: SceneVoiceMood
     orientation: SceneOrientation
 
     def to_dict(self) -> dict[str, Any]:
@@ -36,6 +39,7 @@ class SceneGenerationRequest:
             "voiceId": self.voice_id,
             "spokenText": self.spoken_text,
             "speechMode": self.speech_mode,
+            "voiceMood": self.voice_mood,
             "orientation": self.orientation,
         }
 
@@ -72,6 +76,7 @@ def build_scene_generation_result(
     scene_plan: Mapping[str, Any],
     voice_id: str,
     speech_mode: str = "natural",
+    voice_mood: str = "confident",
     orientation: str = "portrait",
     spoken_text_by_scene: Mapping[str, str] | None = None,
 ) -> SceneGenerationResult:
@@ -87,6 +92,8 @@ def build_scene_generation_result(
         raise ValueError("voice_id é obrigatório para todas as cenas.")
     if speech_mode not in SCENE_SPEECH_MODES:
         raise ValueError(f"speech_mode inválido: {speech_mode}")
+    if voice_mood not in SCENE_VOICE_MOODS:
+        raise ValueError(f"voice_mood inválido: {voice_mood}")
     if orientation not in SCENE_ORIENTATIONS:
         raise ValueError(f"orientation inválida: {orientation}")
 
@@ -118,6 +125,7 @@ def build_scene_generation_result(
                 voice_id=voice_id.strip(),
                 spoken_text=spoken_text,
                 speech_mode=speech_mode,  # type: ignore[arg-type]
+                voice_mood=voice_mood,  # type: ignore[arg-type]
                 orientation=orientation,  # type: ignore[arg-type]
             )
         )

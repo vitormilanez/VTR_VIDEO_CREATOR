@@ -52,6 +52,29 @@ class ScenePlanTests(unittest.TestCase):
         self.assertEqual([scene["order"] for scene in plan["scenes"]], [1, 2])
         self.assertEqual(server._scene_plan("script-1"), plan)
 
+    def test_production_profile_persists_cinematic_prompt(self) -> None:
+        profile = server._save_production_profile(
+            {
+                "scriptId": "script-cinematic",
+                "avatarId": "look-only",
+                "voiceId": "voice-1",
+                "speechMode": "natural",
+                "generationMode": "cinematic",
+                "cinematicPrompt": "Gui andando pela cidade com apoios discretos no fundo.",
+                "voiceMood": "upbeat",
+            }
+        )
+
+        self.assertEqual(
+            profile["cinematicPrompt"],
+            "Gui andando pela cidade com apoios discretos no fundo.",
+        )
+        self.assertEqual(
+            server._production_profile("script-cinematic")["cinematicPrompt"],
+            "Gui andando pela cidade com apoios discretos no fundo.",
+        )
+        self.assertEqual(server._production_profile("script-cinematic")["voiceMood"], "upbeat")
+
     def test_single_avatar_profile_falls_back_to_primary_avatar(self) -> None:
         server._save_production_profile(
             {

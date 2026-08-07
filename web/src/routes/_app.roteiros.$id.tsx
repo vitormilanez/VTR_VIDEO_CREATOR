@@ -44,12 +44,14 @@ import {
   type AvatarSetRole,
   type HeyGenCatalog,
   type MusicTrack,
+  type GenerationMode,
   type ScenePlan,
   type SceneGenerationResult,
   type VideoVisualLayout,
   type VideoVisualType,
   type VideoSlideRender,
   type VisualPlan,
+  type VoiceMood,
 } from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
@@ -115,6 +117,53 @@ const HEYGEN_CATALOG_FALLBACK_VOICES: HeyGenCatalog["voices"] = [
   { id: "33a98f732fe144d9a40f5cf33a7e95ec", name: "drguilhermeia", gender: "male" },
 ];
 
+const VOICE_MOOD_OPTIONS: Array<{
+  value: VoiceMood;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "confident",
+    label: "Confiante",
+    description: "Positivo, seguro e com energia natural.",
+  },
+  {
+    value: "upbeat",
+    label: "Animado",
+    description: "Mais vivo, otimista e dinâmico.",
+  },
+  {
+    value: "warm",
+    label: "Acolhedor",
+    description: "Próximo e empático, sem ficar triste.",
+  },
+  {
+    value: "serious",
+    label: "Sério",
+    description: "Objetivo e informativo, sem dramatizar.",
+  },
+  {
+    value: "neutral",
+    label: "Neutro",
+    description: "Mantém a voz mais próxima do original.",
+  },
+];
+
+type StudioDefaults = {
+  orientation?: "portrait" | "landscape";
+  captions?: boolean;
+};
+
+function readStudioDefaults(): StudioDefaults | null {
+  try {
+    const saved = localStorage.getItem("ai-video-creator-studio-defaults");
+    if (!saved) return null;
+    return JSON.parse(saved) as StudioDefaults;
+  } catch {
+    return null;
+  }
+}
+
 function RoteiroDetalhe() {
   const { id } = Route.useParams();
   const script = useStore((s) => s.scripts.find((x) => x.id === id));
@@ -175,11 +224,14 @@ function RoteiroDetalhe() {
   const [speechMode, setSpeechMode] = useState<"natural" | "fiel" | "direto" | "enfatico">(
     "natural",
   );
-  const [generationMode, setGenerationMode] = useState<"direct" | "video_agent">("direct");
-  const heygenAgentMode = generationMode === "video_agent";
+  const [voiceMood, setVoiceMood] = useState<VoiceMood>("confident");
+  const [generationMode, setGenerationMode] = useState<GenerationMode>("direct");
+  const cinematicMode = generationMode === "cinematic";
+  const heygenAgentMode = generationMode !== "direct";
   const [musicTracks, setMusicTracks] = useState<MusicTrack[]>([]);
   const [musicTrackId, setMusicTrackId] = useState<string | null>(null);
   const [musicVolume, setMusicVolume] = useState(0.12);
+  const [cinematicPrompt, setCinematicPrompt] = useState("");
   const [ctaMode, setCtaMode] = useState<"auto" | "manual" | "none" | "visual">("auto");
   const [captions, setCaptions] = useState(true);
   const [optimizePronunciation, setOptimizePronunciation] = useState(true);
@@ -262,11 +314,13 @@ function RoteiroDetalhe() {
     setProfileLoaded(false);
     setAvatarId("");
     setVoiceId("");
+    setVoiceMood("confident");
     setAvatarMode("single");
     setAvatarSetId(null);
     setPrimaryAvatarId("");
     setMusicTrackId(null);
     setMusicVolume(0.12);
+    setCinematicPrompt("");
     lastSavedProfileKey.current = "";
     fetchProductionProfile(id)
       .then((profile) => {
@@ -278,19 +332,23 @@ function RoteiroDetalhe() {
           setAvatarSetId(profile.avatarSetId || null);
           setPrimaryAvatarId(profile.primaryAvatarId || profile.avatarId);
           setSpeechMode(profile.speechMode);
+          setVoiceMood(profile.voiceMood || "confident");
           setGenerationMode(profile.generationMode);
           setMusicTrackId(profile.musicTrackId || null);
           setMusicVolume(profile.musicVolume || 0.12);
+          setCinematicPrompt(profile.cinematicPrompt || "");
           lastSavedProfileKey.current = [
             profile.avatarId,
             profile.voiceId,
             profile.speechMode,
+            profile.voiceMood || "confident",
             profile.generationMode,
             profile.avatarMode || "single",
             profile.avatarSetId || "",
             profile.primaryAvatarId || profile.avatarId,
             profile.musicTrackId || "",
             profile.musicVolume || 0.12,
+            profile.cinematicPrompt || "",
           ].join("|");
         }
       })
@@ -359,19 +417,9 @@ function RoteiroDetalhe() {
       .then((render) => setVideoSlideRender(render))
       .catch(() => toast.error("Nao consegui carregar os previews visuais deste roteiro."))
       .finally(() => setVideoSlideRenderLoading(false));
-    try {
-      const saved = localStorage.getItem("ai-video-creator-studio-defaults");
-      if (saved) {
-        const defaults = JSON.parse(saved) as {
-          orientation?: "portrait" | "landscape";
-          captions?: boolean;
-        };
-        if (defaults.orientation) setOrientation(defaults.orientation);
-        if (typeof defaults.captions === "boolean") setCaptions(defaults.captions);
-      }
-    } catch {
-      /* configuracao local antiga ou invalida */
-    }
+    const defaults = readStudioDefaults();
+    if (defaults?.orientation) setOrientation(defaults.orientation);
+    if (typeof defaults?.captions === "boolean") setCaptions(defaults.captions);
   }, []);
 
   useEffect(() => {
@@ -381,7 +429,7 @@ function RoteiroDetalhe() {
     }
     let cancelled = false;
     setSceneGenerationPlanLoading(true);
-    fetchSceneGenerationPlan(id, { speechMode, orientation })
+    fetchSceneGenerationPlan(id, { speechMode, voiceMood, orientation })
       .then((plan) => {
         if (!cancelled) setSceneGenerationPlan(plan);
       })
@@ -394,7 +442,7 @@ function RoteiroDetalhe() {
     return () => {
       cancelled = true;
     };
-  }, [avatarMode, avatarSetId, id, orientation, primaryAvatarId, profileLoaded, scenePlan?.updatedAt, speechMode, voiceId]);
+  }, [avatarMode, avatarSetId, id, orientation, primaryAvatarId, profileLoaded, scenePlan?.updatedAt, speechMode, voiceId, voiceMood]);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(script), [draft, script]);
   const selectedAvatar = useMemo(
     () => catalog?.avatars.find((avatar) => avatar.id === avatarId),
@@ -480,12 +528,14 @@ function RoteiroDetalhe() {
       avatarId,
       voiceId,
       speechMode,
+      voiceMood,
       generationMode,
       avatarMode,
       avatarSetId || "",
       primaryAvatarId,
       musicTrackId || "",
       musicVolume,
+      cinematicPrompt,
     ].join("|");
     if (key === lastSavedProfileKey.current) return;
     const timeout = window.setTimeout(() => {
@@ -493,30 +543,34 @@ function RoteiroDetalhe() {
         avatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
         voiceId,
         speechMode,
+        voiceMood,
         generationMode,
         avatarMode,
         avatarSetId: avatarMode === "set" ? avatarSetId : null,
         primaryAvatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
         musicTrackId,
         musicVolume,
+        cinematicPrompt,
       })
         .then((profile) => {
           lastSavedProfileKey.current = [
             profile.avatarId,
             profile.voiceId,
             profile.speechMode,
+            profile.voiceMood || "confident",
             profile.generationMode,
             profile.avatarMode || "single",
             profile.avatarSetId || "",
             profile.primaryAvatarId || profile.avatarId,
             profile.musicTrackId || "",
             profile.musicVolume || 0.12,
+            profile.cinematicPrompt || "",
           ].join("|");
         })
         .catch(() => toast.error("Nao consegui salvar o perfil de producao."));
     }, 500);
     return () => window.clearTimeout(timeout);
-  }, [avatarId, avatarMode, avatarSetId, avatarSetReady, generationMode, id, musicTrackId, musicVolume, primaryAvatarId, profileLoaded, speechMode, voiceId]);
+  }, [avatarId, avatarMode, avatarSetId, avatarSetReady, cinematicPrompt, generationMode, id, musicTrackId, musicVolume, primaryAvatarId, profileLoaded, speechMode, voiceId, voiceMood]);
 
   async function handleAvatarSetSaved(saved: AvatarSet) {
     setAvatarSets((current) => {
@@ -600,6 +654,8 @@ function RoteiroDetalhe() {
           ? "Carregando avatares e vozes da HeyGen."
           : !profileLoaded
             ? "Carregando perfil de producao do roteiro."
+            : cinematicMode && !cinematicPrompt.trim()
+              ? "Escreva a direção cinematic antes de enviar este modo."
             : avatarMode === "set" && !selectedAvatarSet
               ? "Selecione um Avatar Set."
               : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
@@ -643,11 +699,24 @@ function RoteiroDetalhe() {
       ready: Boolean(voiceId),
       detail: voiceId ? selectedVoiceName : "Selecione uma voz.",
     },
+    ...(cinematicMode
+      ? [
+          {
+            label: "Direção cinematic",
+            ready: Boolean(cinematicPrompt.trim()),
+            detail: cinematicPrompt.trim()
+              ? "Briefing exclusivo preenchido."
+              : "Escreva câmera, encenação e acontecimentos no ambiente.",
+          },
+        ]
+      : []),
     {
       label: "Cenas",
       ready: heygenAgentMode || avatarMode === "single" || Boolean(scenePlan && scenePlan.scenes.length >= 1),
       detail:
-        heygenAgentMode
+        cinematicMode
+          ? "O Cinematic cria a encenação sem usar o Scene Plan antigo."
+          : heygenAgentMode
           ? "O HeyGen Video Agent decide a estrutura visual e os cortes."
           : avatarMode === "single"
           ? "Look único não precisa de plano de cenas."
@@ -659,7 +728,9 @@ function RoteiroDetalhe() {
       label: "Slide de transição",
       ready: heygenAgentMode || avatarMode === "single" || requiredVisualCount === 0 || visualProductionReady,
       detail:
-        heygenAgentMode
+        cinematicMode
+          ? "O Cinematic cria os apoios dentro do próprio vídeo."
+          : heygenAgentMode
           ? "O HeyGen cria os visuais dentro do próprio vídeo."
           : avatarMode === "single" || requiredVisualCount === 0
           ? "Não obrigatório para este formato."
@@ -676,7 +747,7 @@ function RoteiroDetalhe() {
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
-    if (avatarMode === "set" && generationMode !== "video_agent" && !sceneGenerationPlan) {
+    if (avatarMode === "set" && generationMode === "direct" && !sceneGenerationPlan) {
       toast.error("Salve o Scene Plan antes de gerar o vídeo por cenas.");
       return;
     }
@@ -697,11 +768,12 @@ function RoteiroDetalhe() {
         setDraft(saved);
         scriptToSend = saved;
       }
-      if (avatarMode === "set" && generationMode !== "video_agent") {
+      if (avatarMode === "set" && generationMode === "direct") {
         const sceneResult = await submitSceneGeneration(scriptToSend.id, {
           orientation,
           durationSeconds,
           speechMode,
+          voiceMood,
           captions,
           optimizePronunciation,
         });
@@ -718,6 +790,7 @@ function RoteiroDetalhe() {
         orientation,
         durationSeconds,
         speechMode,
+        voiceMood,
         generationMode,
         ctaMode,
         captions,
@@ -726,6 +799,7 @@ function RoteiroDetalhe() {
         narrationText: displayText,
         displayText,
         spokenText,
+        cinematicPrompt: cinematicMode ? cinematicPrompt : undefined,
         outroText: ctaMode === "manual" ? outroText : "",
       });
       addVideoJob(job);
@@ -752,12 +826,14 @@ function RoteiroDetalhe() {
         avatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
         voiceId,
         speechMode,
+        voiceMood,
         generationMode,
         avatarMode,
         avatarSetId: avatarMode === "set" ? avatarSetId : null,
         primaryAvatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
         musicTrackId,
         musicVolume,
+        cinematicPrompt,
       });
       const job = await composeFinalVideo(id);
       addVideoJob(job);
@@ -870,6 +946,7 @@ function RoteiroDetalhe() {
         voiceId,
         orientation,
         speechMode,
+        voiceMood,
         captions,
         optimizePronunciation,
         displayText,
@@ -1073,6 +1150,8 @@ function RoteiroDetalhe() {
                       <Sparkles className="mr-1 h-4 w-4" />
                       {naturalizing
                         ? "Ajustando..."
+                        : cinematicMode
+                          ? `Otimizar para Cinematic (${durationSeconds}s)`
                         : heygenAgentMode
                           ? `Otimizar para Video Agent (${durationSeconds}s)`
                         : narrationWords > maximumWordsForDuration(durationSeconds)
@@ -1128,7 +1207,9 @@ function RoteiroDetalhe() {
                       <div className="flex items-center gap-1.5 font-semibold">
                         <TriangleAlert className="h-3.5 w-3.5" />
                         {blockingQualityIssues.length
-                          ? heygenAgentMode
+                          ? cinematicMode
+                            ? "Ajuste a fala antes de enviar ao Cinematic"
+                          : heygenAgentMode
                             ? "Ajuste a fala antes de enviar ao Video Agent"
                             : "Revise antes de enviar ao HeyGen"
                           : "Aviso antes do envio"}
@@ -1156,7 +1237,8 @@ function RoteiroDetalhe() {
                     </ul>
                     {heygenAgentMode ? (
                       <p className="mt-2">
-                        O Video Agent cria pausas e interações; por isso a fala precisa ser mais curta para respeitar a duração escolhida.
+                        {cinematicMode ? "O Cinematic" : "O Video Agent"} cria pausas e interações;
+                        por isso a fala precisa ser mais curta para respeitar a duração escolhida.
                       </p>
                     ) : null}
                   </div>
@@ -1338,12 +1420,49 @@ function RoteiroDetalhe() {
               </div>
               <div className="space-y-2">
                 <div>
-                  <Label className="text-xs">Quem monta o vídeo?</Label>
+                  <Label className="text-xs">Humor da voz</Label>
                   <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    Escolha se o app conduz as cenas ou se o próprio HeyGen cria a edição visual.
+                    Escolha a emoção da fala. “Confiante” é o padrão para evitar uma voz triste ou melancólica.
                   </p>
                 </div>
-                <div className="grid gap-2 md:grid-cols-2">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                  {VOICE_MOOD_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={voiceMood === option.value}
+                      onClick={() => setVoiceMood(option.value)}
+                      className={cn(
+                        "min-h-20 rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        voiceMood === option.value &&
+                          "border-primary bg-primary/5 ring-1 ring-primary/30",
+                      )}
+                    >
+                      <span className="flex items-center justify-between gap-2 text-xs font-semibold">
+                        {option.label}
+                        {voiceMood === option.value ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-primary" />
+                        ) : null}
+                      </span>
+                      <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                        {option.description}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  No Video Agent e no Cinematic, o humor vira direção de performance. Na produção
+                  guiada, o app ajusta ritmo e entonação dentro dos limites da voz clonada.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <div>
+                  <Label className="text-xs">Quem monta o vídeo?</Label>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Escolha entre produção guiada, Video Agent comum ou o fluxo Cinematic separado.
+                  </p>
+                </div>
+                <div className="grid gap-2 md:grid-cols-3">
                   <button
                     type="button"
                     aria-pressed={generationMode === "direct"}
@@ -1376,13 +1495,37 @@ function RoteiroDetalhe() {
                       O HeyGen decide os cortes, interações e visuais do vídeo a partir do roteiro.
                     </span>
                   </button>
+                  <button
+                    type="button"
+                    aria-pressed={generationMode === "cinematic"}
+                    onClick={() => setGenerationMode("cinematic")}
+                    className={cn(
+                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
+                      generationMode === "cinematic" &&
+                        "border-primary bg-primary/5 ring-1 ring-primary/30",
+                    )}
+                  >
+                    <span className="flex items-center gap-2 text-xs font-semibold">
+                      <Film className="h-4 w-4 text-primary" /> Cinematic
+                    </span>
+                    <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                      Um fluxo separado para câmera, encenação e acontecimentos no ambiente.
+                    </span>
+                  </button>
                 </div>
-                {heygenAgentMode ? (
+                {generationMode === "video_agent" ? (
                   <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                     <span className="font-semibold text-foreground">Modo autônomo do HeyGen.</span>{" "}
-                    Enviamos somente a fala aprovada, avatar, voz, duração e formato. Não é necessário
+                    Enviamos fala aprovada, avatar, voz, humor, duração e formato. Nenhuma direção
+                    cinematic entra neste fluxo. Não é necessário
                     criar Scene Plan, slides ou render local; a montagem e os elementos visuais são
                     produzidos pelo HeyGen e consomem créditos dele.
+                  </div>
+                ) : cinematicMode ? (
+                  <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                    <span className="font-semibold text-foreground">Fluxo Cinematic separado.</span>{" "}
+                    Somente este modo recebe o briefing de câmera, encenação e ações de fundo. Ele não
+                    usa Scene Plan, slides ou a direção dos fluxos anteriores.
                   </div>
                 ) : null}
               </div>
@@ -1407,6 +1550,8 @@ function RoteiroDetalhe() {
                 <p className="text-[11px] leading-4 text-muted-foreground">
                   {durationSeconds <= 15
                     ? "A duração final acompanha a fala, sem silêncio para completar o tempo."
+                    : cinematicMode
+                      ? "O Cinematic organiza câmera, encenação e acontecimentos dentro deste tempo aproximado."
                     : heygenAgentMode
                       ? "O HeyGen Video Agent organiza ritmo, cortes e visuais dentro deste tempo aproximado."
                       : "O app distribui a fala e as cenas dentro deste tempo aproximado."}
@@ -1434,15 +1579,16 @@ function RoteiroDetalhe() {
                         </div>
                       </div>
                       <Field label="Modo de geração">
-                        <Select value={generationMode} onValueChange={(value) => setGenerationMode(value as "direct" | "video_agent")}>
+                        <Select value={generationMode} onValueChange={(value) => setGenerationMode(value as GenerationMode)}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
                             <SelectItem value="direct" disabled={selectedAvatar?.supportsDirectAvatar === false}>Direct Avatar</SelectItem>
                             <SelectItem value="video_agent">Video Agent</SelectItem>
+                            <SelectItem value="cinematic">Cinematic separado</SelectItem>
                           </SelectContent>
                         </Select>
                       </Field>
-                      <Field label="Jeito de falar">
+                      <Field label="Ritmo da fala">
                         <Select value={speechMode} onValueChange={(value) => setSpeechMode(value as "natural" | "fiel" | "direto" | "enfatico")}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
@@ -1563,22 +1709,55 @@ function RoteiroDetalhe() {
               index={3}
               title="Direção"
               description={
-                heygenAgentMode
-                  ? "O HeyGen vai criar a direção visual dentro do vídeo, sem etapas manuais de cenas ou slides."
+                cinematicMode
+                  ? "Briefing exclusivo do Cinematic. Ele não altera Scene Plan, slides ou o Video Agent comum."
+                  : generationMode === "video_agent"
+                    ? "O Video Agent comum cria a edição sem receber nenhuma direção cinematic."
                   : "Depois de escolher duração e avatar, deixe o Claude organizar cenas, cortes de look e slide de transição."
               }
             />
             <div className="mt-4">
-              {heygenAgentMode ? (
+              {cinematicMode ? (
+                <div className="space-y-3">
+                  <div className="rounded-xl border bg-muted/20 p-4">
+                    <Label htmlFor="cinematic-prompt" className="text-sm font-semibold">
+                      Direção cinematic
+                    </Label>
+                    <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                      Escreva clima, câmera, ações de fundo e apoios visuais. O agente interpreta isso
+                      como direção visual, nunca como fala.
+                    </p>
+                    <Textarea
+                      id="cinematic-prompt"
+                      rows={5}
+                      value={cinematicPrompt}
+                      onChange={(event) => setCinematicPrompt(event.target.value)}
+                      className="mt-3 leading-6"
+                      placeholder="Ex.: Gui andando pela cidade, tom editorial sóbrio, câmera acompanhando. Ao fundo, sinais discretos de busca por solução rápida, limitação de mobilidade e dificuldade no transporte. Evitar humor, caricatura e exagero."
+                    />
+                  </div>
+                  <div className="rounded-xl border border-primary/30 bg-primary/5 p-4">
+                    <div className="flex items-start gap-2">
+                      <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                      <div>
+                        <h3 className="text-sm font-semibold">Direção exclusiva do Cinematic</h3>
+                        <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                          Ao enviar este modo, o agente recebe a fala aprovada e somente este briefing.
+                          Os fluxos de cenas, slides e Video Agent comum permanecem separados.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : generationMode === "video_agent" ? (
                 <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4">
                   <div className="flex items-start gap-2">
                     <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
                     <div>
-                      <h3 className="text-sm font-semibold">Direção entregue ao HeyGen Video Agent</h3>
+                      <h3 className="text-sm font-semibold">Video Agent sem Cinematic</h3>
                       <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                        Nenhuma cena, slide de transição ou preview local precisa ser montado aqui. Ao
-                        enviar, o HeyGen recebe a fala aprovada e cria a edição, os cortes e os apoios
-                        visuais dentro do vídeo final.
+                        Este fluxo recebe somente fala, performance, avatar, duração e formato. Nenhum
+                        briefing cinematic, Scene Plan ou slide local é enviado.
                       </p>
                     </div>
                   </div>
