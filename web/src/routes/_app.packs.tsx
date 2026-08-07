@@ -54,7 +54,7 @@ export const Route = createFileRoute("/_app/packs")({
       { title: "Pack de conteudo | AI Video Creator" },
       {
         name: "description",
-        content: "Carrossel editorial de 6 slides criado a partir de um roteiro.",
+        content: "Carrossel editorial de 7 slides criado a partir de um roteiro.",
       },
       { property: "og:title", content: "Pack de conteudo | AI Video Creator" },
       {
@@ -224,7 +224,7 @@ function PacksPage() {
       const response = await generatePack(script);
       setPack(response.pack);
       setOutdatedAvatar(false);
-      toast.success("Carrossel de 6 slides criado.", { id: notice });
+      toast.success("Carrossel de 7 slides criado.", { id: notice });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar o Pack.", {
         id: notice,
@@ -350,7 +350,7 @@ function PacksPage() {
         <EmptyState
           icon={<PanelsTopLeft className="h-4 w-4" />}
           title="Nenhum roteiro para transformar"
-          description="Crie um roteiro para gerar o carrossel editorial de 6 slides."
+          description="Crie um roteiro para gerar o carrossel editorial de 7 slides."
           action={
             <Button asChild size="sm" variant="secondary">
               <Link to="/ideias">Ir para Ideias</Link>
@@ -409,7 +409,7 @@ function PacksPage() {
               description={
                 loadingPack
                   ? "Buscando a versao salva deste roteiro."
-                  : "Gere seis slides com copy curta, fotos aprovadas e identidade visual consistente."
+                  : "Gere 7 slides com copy curta, contexto explicado e identidade visual consistente."
               }
               action={
                 <Button size="sm" onClick={generateVisualPack} disabled={generating || loadingPack}>
@@ -619,7 +619,8 @@ function PacksPage() {
                         {(pack.checklist.length
                           ? pack.checklist
                           : [
-                              "6 slides com layouts diferentes",
+                              "7 slides em sequencia narrativa",
+                              "1 slide explicativo com contexto da IA",
                               "Uma ideia principal por tela",
                               "No maximo 3 slides com foto",
                               "Texto curto e sem jargao",

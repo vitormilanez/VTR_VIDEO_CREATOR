@@ -103,6 +103,15 @@ def _headline_size(layout_id: str, headline: str, base: int) -> int:
     return base - 16 if ratio > 0.94 else base - 8 if ratio > 0.82 else base
 
 
+def _copy_size(text: str, *, base: int, medium: int, small: int, medium_at: int, small_at: int) -> int:
+    length = len(str(text or ""))
+    if length >= small_at:
+        return small
+    if length >= medium_at:
+        return medium
+    return base
+
+
 def _photo_markup(uri: str, meta: dict[str, Any], css_class: str = "photo") -> str:
     if not uri:
         return ""
@@ -174,10 +183,14 @@ def _myth_fact(slide: dict[str, Any], index: int, total: int) -> str:
     f = slide["fields"]
     myth = f["item1"]
     fact = f["item2"]
+    myth_text = _esc(myth.get("text"))
+    fact_text = _esc(fact.get("text"))
+    myth_size = _copy_size(str(myth.get("text") or ""), base=66, medium=58, small=50, medium_at=28, small_at=36)
+    fact_size = _copy_size(str(fact.get("text") or ""), base=66, medium=58, small=50, medium_at=28, small_at=36)
     return f"""<section class="slide myth-fact bg-light"><div class="myth-panel">{_brand(dark=True)}
-      <div class="label label-myth">{_esc(myth.get('title') or 'Mito')}</div><h2>{_esc(myth.get('text'))}</h2></div>
+      <div class="label label-myth">{_esc(myth.get('title') or 'Mito')}</div><h2 style="font-size:{myth_size}px">{myth_text}</h2></div>
       <div class="split-accent"></div><div class="fact-panel"><div class="label label-fact">{_esc(fact.get('title') or 'Fato')}</div>
-      <h2>{_esc(fact.get('text'))}</h2><p>{_esc(f['body'])}</p><div class="fact-counter">{_counter(index,total)}</div></div></section>"""
+      <h2 style="font-size:{fact_size}px">{fact_text}</h2><p>{_esc(f['body'])}</p><div class="fact-counter">{_counter(index,total)}</div></div></section>"""
 
 
 def _number_stat(slide: dict[str, Any], index: int, total: int) -> str:
@@ -252,9 +265,10 @@ def _cta_photo(slide: dict[str, Any], index: int, total: int) -> str:
     uri, meta = _photo(slide)
     left = slide.get("variant") == "photo-left"
     size = _headline_size("cta_photo", f["headline"], 82)
+    body_size = _copy_size(str(f.get("body") or ""), base=32, medium=28, small=25, medium_at=52, small_at=66)
     return f"""<section class="slide cta-photo bg-dark {'photo-left' if left else ''}">{_photo_markup(uri, meta)}<div class="cta-fade"></div>
       {_brand(dark=True,cta=True)}<div class="cta-copy"><div class="accent-bar"></div><h1 style="font-size:{size}px">{_esc(f['headline'])}</h1>
-      <p>{_esc(f['body'])}</p><div class="cta-pill">{_esc(f['cta'])}</div></div>
+      <p style="font-size:{body_size}px">{_esc(f['body'])}</p><div class="cta-pill">{_esc(f['cta'])}</div></div>
       <div class="cta-footer"><span>{_esc(f['disclaimer'])}</span>{_counter(index,total,light=True)}</div></section>"""
 
 
@@ -290,7 +304,7 @@ def _css() -> str:
     .photo-split{{display:flex}}.split-photo{{position:relative;width:486px;height:1350px;flex:none}}.split-photo img,.split-photo div{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}}.split-copy{{position:relative;flex:1;padding:96px 80px 88px 72px;display:flex;flex-direction:column}}.split-copy .brand{{position:static}}.split-spacer{{height:88px;flex:none}}.split-copy .eyebrow{{margin-top:32px}}.split-copy h1{{margin-top:28px;font-weight:800;line-height:1;letter-spacing:-.03em}}.split-copy p{{margin-top:40px;font-size:34px;line-height:1.5;color:{COLORS['body_dark']}}}.split-footer{{margin-top:auto;display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(10,26,47,.14);padding-top:28px;font-size:24px;color:{COLORS['footer_dark']}}}
     .statement-copy{{position:absolute;left:80px;right:80px;top:380px;display:flex;flex-direction:column;gap:44px}}.statement-copy h1{{font-weight:800;line-height:.94;letter-spacing:-.04em}}.statement-footer{{position:absolute;left:80px;right:80px;bottom:88px;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid rgba(10,26,47,.14);padding-top:32px;font-size:30px;line-height:1.4;color:{COLORS['body_dark']}}.big-statement.light-text .statement-footer{{border-color:rgba(244,242,237,.14);color:{COLORS['body_light']}}}.statement-footer>span{{max-width:640px}}
     .question-mark{{position:absolute;right:-60px;top:180px;font-size:760px;font-weight:800;line-height:.7;letter-spacing:-.06em;color:rgba(18,178,166,.10)}}.question-copy{{position:absolute;left:80px;right:80px;top:440px;display:flex;flex-direction:column;gap:48px}}.question-copy h1{{font-weight:800;line-height:.98;letter-spacing:-.035em}}.question-copy p{{max-width:820px;font-size:36px;line-height:1.5;color:{COLORS['body_dark']}}.question.light-text .question-copy p{{color:{COLORS['body_light']}}}
-    .myth-fact{{display:flex;flex-direction:column}}.myth-panel{{height:620px;background:{COLORS['dark']};padding:96px 80px 64px;display:flex;flex-direction:column;gap:36px;position:relative}}.myth-panel .brand{{position:static}}.label{{display:inline-flex;align-self:flex-start;padding:14px 24px;border-radius:4px;font-size:24px;font-weight:700;line-height:1;letter-spacing:.24em;text-transform:uppercase;color:{COLORS['dark']}}.label-myth{{background:{COLORS['muted']}}}.label-fact{{background:{COLORS['sand']}}}.myth-panel h2,.fact-panel h2{{font-size:72px;font-weight:800;line-height:1.02;letter-spacing:-.025em}}.myth-panel h2{{color:{COLORS['light']};text-decoration:line-through;text-decoration-color:rgba(244,242,237,.42);text-decoration-thickness:5px}}.split-accent{{height:8px;background:{COLORS['teal']}}.fact-panel{{position:relative;flex:1;padding:64px 80px 120px;display:flex;flex-direction:column;gap:36px}}.fact-panel p{{font-size:34px;line-height:1.5;color:{COLORS['body_dark']}}.fact-counter{{position:absolute;right:80px;bottom:88px}}
+    .myth-fact{{display:flex;flex-direction:column}}.myth-panel{{height:620px;background:{COLORS['dark']};padding:96px 80px 64px;display:flex;flex-direction:column;gap:36px;position:relative}}.myth-panel .brand{{position:static}}.label{{display:inline-flex;align-self:flex-start;padding:14px 24px;border-radius:4px;font-size:24px;font-weight:700;line-height:1;letter-spacing:.24em;text-transform:uppercase;color:{COLORS['dark']}}.label-myth{{background:{COLORS['muted']}}}.label-fact{{background:{COLORS['sand']}}}.myth-panel h2,.fact-panel h2{{font-size:72px;font-weight:800;line-height:1.02;letter-spacing:-.025em}}.myth-panel h2{{color:{COLORS['light']}}}.split-accent{{height:8px;background:{COLORS['teal']}}.fact-panel{{position:relative;flex:1;padding:64px 80px 120px;display:flex;flex-direction:column;gap:36px}}.fact-panel p{{font-size:34px;line-height:1.5;color:{COLORS['body_dark']}}.fact-counter{{position:absolute;right:80px;bottom:88px}}
     .stat-copy{{position:absolute;left:80px;right:80px;top:300px;display:flex;flex-direction:column;gap:24px}}.statistic{{font-size:270px;font-weight:800;line-height:.82;letter-spacing:-.055em;color:{COLORS['teal']}}.hairline{{height:1px;background:rgba(10,26,47,.16);margin-top:18px}}.number-stat.light-text .hairline{{background:rgba(244,242,237,.16)}}.stat-copy h1{{max-width:880px;font-size:58px;font-weight:700;line-height:1.08;letter-spacing:-.02em}}.stat-copy p{{max-width:820px;font-size:32px;line-height:1.5;color:{COLORS['body_dark']}}.number-stat.light-text .stat-copy p{{color:{COLORS['body_light']}}}
     .three-copy{{position:absolute;left:80px;right:80px;top:240px}}.three-copy>h1{{max-width:860px;font-size:68px;font-weight:800;line-height:1.02;letter-spacing:-.025em}}.points{{margin-top:64px;display:flex;flex-direction:column;gap:38px}}.point-row{{display:flex;gap:40px;align-items:flex-start;border-top:1px solid rgba(244,242,237,.14);padding-top:34px}}.three-points.bg-light .point-row{{border-color:rgba(10,26,47,.14)}}.point-number{{width:110px;flex:none;font-size:64px;font-weight:800;line-height:.9;letter-spacing:-.03em;color:{COLORS['teal']}}.point-row h3{{font-size:43px;font-weight:700;line-height:1.1;letter-spacing:-.02em}}.point-row p{{margin-top:12px;font-size:28px;line-height:1.4;color:{COLORS['body_light']}}.three-points.bg-light .point-row p{{color:{COLORS['body_dark']}}}.bottom-counter{{position:absolute;right:80px;bottom:88px}}
     .explainer-copy{{position:absolute;left:80px;right:80px;top:260px}}.explainer-copy h1{{margin-top:28px;max-width:880px;font-size:66px;font-weight:800;line-height:1.03;letter-spacing:-.025em}}.explainer-copy>p{{margin-top:36px;max-width:880px;font-size:34px;line-height:1.5;color:{COLORS['body_dark']}}.steps{{margin-top:72px;display:flex;align-items:center;gap:24px}}.steps i{{flex:1;height:2px;background:rgba(10,26,47,.18)}}.step{{width:250px;height:150px;padding:0 28px;border-radius:12px;background:{COLORS['dark']};display:flex;flex-direction:column;justify-content:center;gap:8px;color:#fff}}.step span{{font-size:20px;font-weight:600;letter-spacing:.2em;color:{COLORS['teal']}}}.step strong{{font-size:32px;line-height:1.1}}.step-final{{background:{COLORS['teal']};color:{COLORS['deep']}}}.step-final span{{color:{COLORS['deep']}}}.explainer-footer{{position:absolute;left:80px;right:80px;bottom:88px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(10,26,47,.14);padding-top:28px;font-size:22px;color:{COLORS['footer_dark']}}}

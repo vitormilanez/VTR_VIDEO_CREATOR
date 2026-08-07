@@ -7503,7 +7503,7 @@ _PACK_SCHEMA = {
 }
 
 _PACK_SYSTEM = """Voce e o editor de carrosseis do Instituto Guilherme Martins.
-Sua unica tarefa e transformar um roteiro medico em um carrossel de 6 slides,
+Sua unica tarefa e transformar um roteiro medico em um carrossel de 7 slides,
 em portugues do Brasil, usando o schema estruturado fornecido.
 
 IDENTIDADE:
@@ -7530,17 +7530,22 @@ COMPLIANCE:
 - Nunca invente numero, estatistica, mito ou comparacao. Sem fonte real, escolha outro layout.
 
 COMPOSICAO:
-- Exatamente 6 slides, todos com layoutId diferente.
-- Slide 1: hero_photo ou photo_overlay. Slide 6: cta_photo.
-- Slides 2 a 5: escolha livre entre os 12 layouts conforme a funcao narrativa.
+- Exatamente 7 slides.
+- Slide 1: hero_photo ou photo_overlay. Slide 7: cta_photo.
+- Slides 2 a 6: escolha livre entre os 12 layouts conforme a funcao narrativa.
+- Inclua obrigatoriamente um slide explainer entre os slides 3 e 5. Esse e o slide de contexto: mais explicativo, pode ter body maior e deve traduzir o contexto gerado pela IA para linguagem comum.
+- Os layouts sao uma paleta visual, nao uma grade obrigatoria. Voce pode repetir um layout se isso deixar a mensagem mais clara.
+- Use pelo menos 4 tipos de layout no total, para manter ritmo.
 - Maximo 3 slides com foto; nunca dois full bleed seguidos.
 - Maximo 2 fundos escuros consecutivos.
-- Sequencia: gancho -> tensao -> explicacao/evidencia -> ponto central -> aplicacao/autoridade -> CTA.
+- Sequencia: gancho -> tensao -> contexto explicado -> evidencia/riscos -> ponto central -> aplicacao/autoridade -> CTA.
 - photoId deve vir apenas da biblioteca enviada no pedido.
 - Layout e texto devem obedecer aos limites descritos no pedido.
+- Se a ideia nao couber com leitura confortavel em um layout, reescreva a copy ou escolha outro layout. Nunca deixe frase cortada, incompleta ou dependente de contexto oculto.
 - Use do_dont somente para uma comparação prática real: cada item deve ter, à esquerda, algo a evitar e, à direita, a alternativa preferível. Nunca use esse layout para cronologia, mecanismos ou listas de consequências.
 - Para mecanismo, sequência ou três consequências, use three_points.
-- Em myth_fact, item1 precisa conter o mito específico do roteiro e item2 o fato correspondente. Nunca deixe o sistema inventar um mito genérico.
+- Em myth_fact, item1 precisa conter um mito especifico, curto e popular do roteiro; item2 precisa conter o fato correspondente, tambem curto. Se nao existir mito real e claro, nao use myth_fact.
+- Em efeitos colaterais, riscos e sinais de alerta, prefira lista visual, pergunta, explicador ou grande afirmacao. Nao transforme lista de riscos em mito/fato.
 - Voce nao gera HTML, CSS ou imagens."""
 
 
@@ -7663,7 +7668,8 @@ def _normalize_pack_design(pack: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault(
         "checklist",
         [
-            "6 slides em sequencia narrativa",
+            "7 slides em sequencia narrativa",
+            "1 slide explicativo com contexto da IA",
             "12 layouts de marca disponiveis",
             "Copy curta e validada por campo",
             "PNG 1080 x 1350 pronto para Instagram",
@@ -7747,7 +7753,8 @@ def _pack_generation_context(script_id: str, script: dict[str, Any]) -> tuple[di
         "photoLibrary": list(PHOTO_LIBRARY),
         "rules": [
             "Claude escolhe copy, narrativa, layout e photoId; o renderer controla HTML/CSS.",
-            "Exatamente 6 slides, sem layouts repetidos.",
+            "Exatamente 7 slides; layouts sao sugestoes flexiveis e podem repetir quando fizer sentido.",
+            "Um slide explainer no meio traduz o contexto da IA em linguagem simples.",
             "O Pack herda a identidade do Roteiro e não escolhe outro avatar.",
         ],
     }
@@ -7780,7 +7787,7 @@ def get_pack_photo_asset(asset_id: str) -> FileResponse:
 
 @app.post("/api/packs/generate")
 def generate_pack(payload: PackIn) -> dict:
-    """Gera um carrossel de 6 slides com copy curta e layout deterministico."""
+    """Gera um carrossel de 7 slides com copy curta e layout deterministico."""
     script_id = payload.scriptId
     if not script_id:
         raise HTTPException(status_code=422, detail="Informe scriptId para gerar o Pack visual.")
@@ -7842,6 +7849,12 @@ def generate_pack(payload: PackIn) -> dict:
                 "statistic": 6,
                 "disclaimer": 90,
             },
+            "editorialFreedom": [
+                "Escolha o layout que melhor explica a mensagem, mesmo que diferente da sugestao inicial.",
+                "Pode repetir layout se isso evitar corte de texto ou melhorar entendimento.",
+                "Priorize uma frase forte por slide; detalhes ficam na legenda.",
+                "Nao use myth_fact para listas de riscos ou efeitos colaterais.",
+            ],
         },
         ensure_ascii=False,
         indent=2,

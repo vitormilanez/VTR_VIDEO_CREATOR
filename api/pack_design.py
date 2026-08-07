@@ -11,7 +11,7 @@ from copy import deepcopy
 from typing import Any
 
 PACK_SCHEMA_VERSION = "institute-carousel-v1"
-PACK_SLIDE_COUNT = 6
+PACK_SLIDE_COUNT = 7
 
 PACK_LAYOUTS = (
     "hero_photo",
@@ -31,6 +31,7 @@ PACK_LAYOUTS = (
 FALLBACK_LAYOUTS = (
     "hero_photo",
     "question",
+    "explainer",
     "myth_fact",
     "three_points",
     "doctor_quote",
@@ -131,10 +132,10 @@ LAYOUT_SPECS: dict[str, dict[str, Any]] = {
     "photo_split": {"required": ("headline", "body", "photoId"), "max": {"eyebrow": 22, "headline": 52, "body": 160, "footer": 48}},
     "big_statement": {"required": ("headline",), "max": {"headline": 64, "footer": 90}},
     "question": {"required": ("headline",), "max": {"eyebrow": 22, "headline": 52, "body": 110, "footer": 48}},
-    "myth_fact": {"required": ("item1", "item2"), "max": {"body": 120}, "item_max": {"title": 12, "text": 42}},
+    "myth_fact": {"required": ("item1", "item2"), "max": {"body": 90}, "item_max": {"title": 12, "text": 38}},
     "number_stat": {"required": ("statistic", "headline", "caption"), "max": {"eyebrow": 22, "statistic": 6, "headline": 60, "body": 110, "caption": 72}},
     "three_points": {"required": ("headline", "item1", "item2", "item3"), "max": {"headline": 40}, "item_max": {"title": 24, "text": 90}},
-    "explainer": {"required": ("headline", "body"), "max": {"eyebrow": 22, "headline": 56, "body": 200, "disclaimer": 90}, "item_max": {"title": 24, "text": 54}},
+    "explainer": {"required": ("headline", "body"), "max": {"eyebrow": 22, "headline": 56, "body": 280, "disclaimer": 90}, "item_max": {"title": 24, "text": 54}},
     "doctor_quote": {"required": ("quote", "caption"), "max": {"quote": 90, "caption": 48}},
     "photo_overlay": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 60, "footer": 48}},
     "do_dont": {"required": ("item1", "item2"), "max": {"disclaimer": 90}, "item_max": {"title": 34, "text": 34}},
@@ -241,7 +242,44 @@ def _fit_copy(value: Any, maximum: int) -> str:
             return complete
     if " " in clipped:
         clipped = clipped.rsplit(" ", 1)[0].rstrip()
-    return clipped.rstrip(" ,;:-–—") or text[:maximum].rstrip()
+    return _remove_dangling_words(clipped.rstrip(" ,;:-–—")) or text[:maximum].rstrip()
+
+
+_DANGLING_WORDS = {
+    "a",
+    "as",
+    "ao",
+    "aos",
+    "com",
+    "como",
+    "da",
+    "das",
+    "de",
+    "do",
+    "dos",
+    "e",
+    "em",
+    "na",
+    "nas",
+    "no",
+    "nos",
+    "o",
+    "os",
+    "ou",
+    "para",
+    "por",
+    "que",
+    "se",
+    "sem",
+}
+
+
+def _remove_dangling_words(value: str) -> str:
+    """Remove conectivos finais que denunciam um corte mecanico de copy."""
+    text = _text(value)
+    while text and text.split()[-1].casefold().strip(".,;:") in _DANGLING_WORDS:
+        text = " ".join(text.split()[:-1]).rstrip(" ,;:-–—")
+    return text
 
 
 _GENERIC_MYTH_FALLBACKS = {
@@ -271,10 +309,22 @@ def _repair_layout_semantics(slide: dict[str, Any]) -> None:
     if slide["layoutId"] != "myth_fact":
         return
     item1 = fields.get("item1") if isinstance(fields.get("item1"), dict) else {}
+    item2 = fields.get("item2") if isinstance(fields.get("item2"), dict) else {}
     item1_text = _text(item1.get("text"))
+    item2_text = _text(item2.get("text"))
     headline = _text(fields.get("headline"))
     if headline and _text(item1_text).lower() in _GENERIC_MYTH_FALLBACKS:
         fields["item1"] = {"title": "Mito", "text": headline}
+        item1_text = headline
+
+    lower_myth = item1_text.casefold()
+    lower_fact = item2_text.casefold()
+    if "efeitos colaterais" in lower_myth and "comuns" in lower_myth:
+        fields["item1"] = {"title": "Mito", "text": "So existem efeitos comuns"}
+        if any(term in lower_fact for term in ("desnutri", "alerg", "crise", "pancreat", "vesicula", "hipoglic")):
+            fields["item2"] = {"title": "Fato", "text": "Alguns sinais exigem avaliação"}
+            if not _text(fields.get("body")):
+                fields["body"] = "Dor intensa ou reação incomum precisa ser comunicada ao médico."
 
 
 def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[str, Any]) -> None:
@@ -389,7 +439,7 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     slides = pack.get("slides") if isinstance(pack.get("slides"), list) else pack.get("carousel")
     if not isinstance(slides, list):
-        return ["slides precisa ser uma lista com 6 itens"]
+        return [f"slides precisa ser uma lista com {PACK_SLIDE_COUNT} itens"]
     if len(slides) != PACK_SLIDE_COUNT:
         errors.append(f"slides tem {len(slides)} itens; esperado: {PACK_SLIDE_COUNT}")
 
@@ -402,9 +452,11 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
     if layouts and layouts[0] not in {"hero_photo", "photo_overlay"}:
         errors.append("slide 1 precisa usar hero_photo ou photo_overlay")
     if len(layouts) >= PACK_SLIDE_COUNT and layouts[-1] != "cta_photo":
-        errors.append("slide 6 precisa usar cta_photo")
-    if len(layouts) != len(set(layouts)):
-        errors.append("os 6 layoutId precisam ser diferentes")
+        errors.append(f"slide {PACK_SLIDE_COUNT} precisa usar cta_photo")
+    if len(layouts) >= 4 and "explainer" not in layouts[2:5]:
+        errors.append("slides 3 a 5 precisam incluir um explainer com contexto da IA")
+    if len(set(layouts)) < 4:
+        errors.append("use pelo menos 4 tipos de layout para manter ritmo visual")
     if sum(layout in PHOTO_LAYOUTS for layout in layouts) > 3:
         errors.append("o carrossel pode ter no maximo 3 slides com foto")
     for index in range(1, len(layouts)):
