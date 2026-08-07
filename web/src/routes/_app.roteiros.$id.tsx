@@ -4,7 +4,6 @@ import { AppShell } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { CompliancePanel, HighlightedText } from "@/components/compliance-panel";
 import { StatusTimeline, type TimelineStep } from "@/components/status-timeline";
-import { NextStepBanner } from "@/components/next-step-banner";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import {
@@ -79,6 +78,7 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import {
+  ArrowRight,
   ArrowLeft,
   Captions,
   CheckCircle2,
@@ -162,6 +162,7 @@ function RoteiroDetalhe() {
   const [sceneGenerationPlanLoading, setSceneGenerationPlanLoading] = useState(false);
   const [visualPlan, setVisualPlan] = useState<VisualPlan | null>(null);
   const [visualPlanLoading, setVisualPlanLoading] = useState(true);
+  const [transitionSlideGenerating, setTransitionSlideGenerating] = useState(false);
   const [videoSlideRender, setVideoSlideRender] = useState<VideoSlideRender | null>(null);
   const [videoSlideRenderLoading, setVideoSlideRenderLoading] = useState(true);
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
@@ -565,27 +566,83 @@ function RoteiroDetalhe() {
   });
   const productionBlockedReason = blockingQualityIssues[0]
     ? `Revise a fala final: ${blockingQualityIssues[0]}`
-    : !approvalReady
-      ? 'Conclua a revisão e altere o status do roteiro para "Pronto".'
-      : catalogLoading
-        ? "Carregando avatares e vozes da HeyGen."
-        : !profileLoaded
-          ? "Carregando perfil de producao do roteiro."
-          : avatarMode === "set" && !selectedAvatarSet
-            ? "Selecione um Avatar Set."
-            : avatarMode === "set" && !avatarSetReady
-              ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
-              : avatarMode === "set" && !productionModeReady
-                ? "Salve o Scene Plan antes de gerar o vídeo com duas posições."
-                : avatarMode === "set" && !visualProductionReady
-                  ? `Gere e renderize ${requiredVisualCount} apoio(s) visual(is) antes de enviar.`
-                : !avatarId
-                  ? "Selecione um avatar pronto."
-            : !voiceId
-              ? "Selecione uma voz."
-              : saving
-                ? "Salvando roteiro."
-                : null;
+    : dirty
+      ? "Salve o roteiro antes de enviar."
+      : !approvalReady
+        ? 'Conclua a revisão e altere o status do roteiro para "Pronto".'
+        : catalogLoading
+          ? "Carregando avatares e vozes da HeyGen."
+          : !profileLoaded
+            ? "Carregando perfil de producao do roteiro."
+            : avatarMode === "set" && !selectedAvatarSet
+              ? "Selecione um Avatar Set."
+              : avatarMode === "set" && !avatarSetReady
+                ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
+                : avatarMode === "set" && !productionModeReady
+                  ? "Salve o Scene Plan antes de gerar o vídeo com duas posições."
+                  : avatarMode === "set" && !visualProductionReady
+                    ? `Gere e renderize ${requiredVisualCount} apoio(s) visual(is) antes de enviar.`
+                  : !avatarId
+                    ? "Selecione um avatar pronto."
+              : !voiceId
+                ? "Selecione uma voz."
+                : saving
+                  ? "Salvando roteiro."
+                  : null;
+  const productionChecklist = [
+    {
+      label: "Roteiro revisado",
+      ready: approvalReady,
+      detail: approvalReady ? "Status Pronto" : 'Mude o status para "Pronto" em Roteiro → Ver contexto.',
+    },
+    {
+      label: "Roteiro salvo",
+      ready: !dirty,
+      detail: dirty ? "Salve as alterações antes de enviar." : "Sem alterações pendentes.",
+    },
+    {
+      label: avatarMode === "set" ? "Avatar Set" : "Avatar",
+      ready: selectedAvatarReady,
+      detail:
+        avatarMode === "set"
+          ? selectedAvatarSet
+            ? `${selectedSetLooks.length} look(s) carregado(s).`
+            : "Escolha um conjunto de looks."
+          : selectedAvatar
+            ? selectedAvatar.name
+            : "Escolha um avatar.",
+    },
+    {
+      label: "Voz",
+      ready: Boolean(voiceId),
+      detail: voiceId ? selectedVoiceName : "Selecione uma voz.",
+    },
+    {
+      label: "Cenas",
+      ready: avatarMode === "single" || Boolean(scenePlan && scenePlan.scenes.length >= 1),
+      detail:
+        avatarMode === "single"
+          ? "Look único não precisa de plano de cenas."
+          : scenePlan
+            ? `${scenePlan.scenes.length} cena(s) salvas.`
+            : "Salve o plano de cenas.",
+    },
+    {
+      label: "Slide de transição",
+      ready: avatarMode === "single" || requiredVisualCount === 0 || visualProductionReady,
+      detail:
+        avatarMode === "single" || requiredVisualCount === 0
+          ? "Não obrigatório para este formato."
+          : visualProductionReady
+            ? `${requiredVisualCount} apoio(s) renderizado(s).`
+            : `Gere e renderize ${requiredVisualCount} apoio(s).`,
+    },
+    {
+      label: "Compliance da fala",
+      ready: blockingQualityIssues.length === 0,
+      detail: blockingQualityIssues[0] || "Sem bloqueios.",
+    },
+  ];
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
@@ -593,7 +650,7 @@ function RoteiroDetalhe() {
       toast.error("Salve o Scene Plan antes de gerar o vídeo por cenas.");
       return;
     }
-    if (!canSendToProduction) {
+    if (productionBlockedReason || !canSendToProduction) {
       toast.error(
         blockingQualityIssues[0]
           ? `Revise o texto falado antes de enviar: ${blockingQualityIssues[0]}`
@@ -668,6 +725,31 @@ function RoteiroDetalhe() {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel salvar o roteiro.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function gerarSlidesTransicao(savedPlan: ScenePlan) {
+    setTransitionSlideGenerating(true);
+    try {
+      const result = await generateVisualDirection(id, {
+        displayText: displayText || narrationText,
+        spokenText,
+        durationSeconds,
+        tone: performancePlan?.tone,
+        pace: performancePlan?.pace,
+        emotion: performancePlan?.emotion,
+      });
+      setVisualPlan(result.visualPlan);
+      toast.success(
+        savedPlan.scenes.length > 2
+          ? "Slides de transição gerados pelo Claude."
+          : "Slide de transição gerado pelo Claude.",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar slide de transição.");
+      throw error;
+    } finally {
+      setTransitionSlideGenerating(false);
     }
   }
 
@@ -785,14 +867,12 @@ function RoteiroDetalhe() {
                     size="sm"
                     variant="secondary"
                     title={
-                      !canSendToProduction
-                        ? "Revise o texto falado antes de enviar"
-                        : dirty
-                          ? "Salvar alteracoes e gerar outra versao"
-                          : "Gerar outra versão deste roteiro"
+                      productionBlockedReason || !canSendToProduction
+                        ? productionBlockedReason || "Revise o texto falado antes de enviar"
+                        : "Gerar outra versão deste roteiro"
                     }
                     disabled={
-                      saving || sending || !selectedAvatarReady || !voiceId || !canSendToProduction
+                      saving || sending || Boolean(productionBlockedReason) || !selectedAvatarReady || !voiceId || !canSendToProduction
                     }
                   >
                     <History className="mr-1 h-4 w-4" /> Refazer vídeo
@@ -841,18 +921,16 @@ function RoteiroDetalhe() {
                   <Button
                     size="sm"
                     title={
-                      !canSendToProduction
-                        ? "Revise o texto falado antes de enviar"
-                        : dirty
-                          ? "Salvar alteracoes e enviar roteiro ao HeyGen"
-                          : "Enviar roteiro ao HeyGen"
+                      productionBlockedReason || !canSendToProduction
+                        ? productionBlockedReason || "Revise o texto falado antes de enviar"
+                        : "Enviar roteiro ao HeyGen"
                     }
                     disabled={
-                      saving || sending || !selectedAvatarReady || !voiceId || !canSendToProduction
+                      saving || sending || Boolean(productionBlockedReason) || !selectedAvatarReady || !voiceId || !canSendToProduction
                     }
                   >
                     <Film className="mr-1 h-4 w-4" />{" "}
-                    {dirty ? "Salvar e gerar" : "Gerar vídeo final"}
+                    Gerar vídeo final
                   </Button>
                 }
               />
@@ -1146,10 +1224,12 @@ function RoteiroDetalhe() {
                     sets={avatarSets}
                     selectedId={avatarSetId}
                     selected={selectedAvatarSet}
+                    avatars={catalog?.avatars || []}
                     selectedLooks={selectedSetLooks}
                     primaryAvatarId={primaryAvatarId}
                     loading={avatarSetsLoading}
                     onSelect={chooseAvatarSet}
+                    onSaved={handleAvatarSetSaved}
                     onCreate={() => {
                       setEditingAvatarSet(null);
                       setAvatarSetDialogOpen(true);
@@ -1336,7 +1416,9 @@ function RoteiroDetalhe() {
                 durationSeconds={durationSeconds}
                 performancePlan={performancePlan}
                 availableRoles={sceneRoles}
+                transitionSlideGenerating={transitionSlideGenerating}
                 onSaved={setScenePlan}
+                onGenerateTransitionSlides={gerarSlidesTransicao}
               />
               <VisualPlanDirector
                 scriptId={id}
@@ -1371,20 +1453,19 @@ function RoteiroDetalhe() {
           <div id="roteiro-gerar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
             <SectionHeading index={4} title="Gerar" description="Confirme que fala, avatar, direção e compliance estão prontos antes de gastar créditos." />
             <div className="mt-4 space-y-3">
-              <NextStepBanner
-                title={latestJob ? "Este roteiro já tem vídeo criado" : dirty ? "Salvar ajustes e enviar para o HeyGen" : "Enviar roteiro para produção"}
-                description={latestJob ? "Você pode abrir a produção existente ou gerar uma nova versão se quiser testar outro avatar, duração ou fala." : "Revise a fala final do avatar, confira avatar/voz e envie para criar o vídeo."}
-                actionLabel={latestJob ? "Ver vídeo" : dirty ? "Salvar e enviar" : "Enviar para produção"}
-                onAction={latestJob ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } }) : () => void enviarProducao(false)}
-                disabled={!latestJob && Boolean(productionBlockedReason)}
-                disabledReason={!latestJob ? productionBlockedReason || undefined : undefined}
-                meta={
-                  <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                    <span className="rounded-full bg-background px-2.5 py-1">{narrationWords} palavras</span>
-                    <span className="rounded-full bg-background px-2.5 py-1">~{estimatedSpeechSeconds}s de fala</span>
-                    <span className="rounded-full bg-background px-2.5 py-1">{dirty ? "Alterações pendentes" : "Roteiro salvo"}</span>
-                  </div>
+              <ProductionGateChecklist
+                items={productionChecklist}
+                blockedReason={productionBlockedReason}
+                latestJobId={latestJob?.id}
+                dirty={dirty}
+                narrationWords={narrationWords}
+                estimatedSpeechSeconds={estimatedSpeechSeconds}
+                onOpenLatest={
+                  latestJob
+                    ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } })
+                    : undefined
                 }
+                onSend={() => void enviarProducao(false)}
               />
               {latestPreview ? (
                 <div className="rounded-lg border border-status-info/30 bg-status-info/5 p-3 text-sm">
@@ -1610,10 +1691,12 @@ function AvatarSetSelector({
   sets,
   selectedId,
   selected,
+  avatars,
   selectedLooks,
   primaryAvatarId,
   loading,
   onSelect,
+  onSaved,
   onCreate,
   onEdit,
   onDelete,
@@ -1622,15 +1705,71 @@ function AvatarSetSelector({
   sets: AvatarSet[];
   selectedId: string | null;
   selected: AvatarSet | null;
+  avatars: HeyGenCatalog["avatars"];
   selectedLooks: Array<{ look: AvatarSetLook; avatar: HeyGenCatalog["avatars"][number] }>;
   primaryAvatarId: string;
   loading: boolean;
   onSelect: (avatarSet: AvatarSet) => void;
+  onSaved: (avatarSet: AvatarSet) => void | Promise<void>;
   onCreate: () => void;
   onEdit: (avatarSet: AvatarSet) => void;
   onDelete: (avatarSet: AvatarSet) => void;
   onPrimaryChange: (avatarId: string) => void;
 }) {
+  const [draftLooks, setDraftLooks] = useState<AvatarSetLook[]>([]);
+  const [choosingRole, setChoosingRole] = useState<AvatarSetRole | null>(null);
+  const [savingPack, setSavingPack] = useState(false);
+  const [packError, setPackError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraftLooks(selected?.looks || []);
+    setChoosingRole(null);
+    setPackError(null);
+  }, [selected?.id, selected?.updatedAt]);
+
+  const packDirty = Boolean(selected && JSON.stringify(draftLooks) !== JSON.stringify(selected.looks));
+
+  function updateDraftAvatar(role: AvatarSetRole, avatarId: string) {
+    setDraftLooks((current) =>
+      current.map((look) => (look.role === role ? { ...look, avatarId } : look)),
+    );
+    setChoosingRole(null);
+    setPackError(null);
+  }
+
+  function resetDraftPack() {
+    setDraftLooks(selected?.looks || []);
+    setChoosingRole(null);
+    setPackError(null);
+  }
+
+  async function saveDraftPack() {
+    if (!selected) return;
+    if (draftLooks.length < 2 || new Set(draftLooks.map((look) => look.avatarId)).size < 2) {
+      setPackError("Escolha pelo menos dois looks diferentes antes de salvar o pack.");
+      return;
+    }
+    if (new Set(draftLooks.map((look) => look.role)).size !== draftLooks.length) {
+      setPackError("Cada posição precisa ter um papel diferente.");
+      return;
+    }
+    setSavingPack(true);
+    setPackError(null);
+    try {
+      const saved = await saveAvatarSet(
+        { name: selected.name, voiceId: selected.voiceId, looks: draftLooks },
+        selected.id,
+      );
+      await onSaved(saved);
+      setDraftLooks(saved.looks);
+      setChoosingRole(null);
+    } catch (error) {
+      setPackError(error instanceof Error ? error.message : "Nao foi possivel salvar o pack.");
+    } finally {
+      setSavingPack(false);
+    }
+  }
+
   if (loading) {
     return <div className="rounded-lg border bg-muted/25 p-3 text-xs text-muted-foreground">Carregando Avatar Sets...</div>;
   }
@@ -1668,36 +1807,134 @@ function AvatarSetSelector({
       {selected ? (
         <>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {selected.looks.map((look) => {
-              const item = selectedLooks.find((candidate) => candidate.look.avatarId === look.avatarId);
+            {draftLooks.map((look) => {
+              const item =
+                avatars.find((avatar) => avatar.id === look.avatarId) ||
+                selectedLooks.find((candidate) => candidate.look.avatarId === look.avatarId)?.avatar;
               const primary = look.avatarId === primaryAvatarId;
               return (
-                <button
+                <div
                   key={`${look.role}-${look.avatarId}`}
-                  type="button"
-                  onClick={() => onPrimaryChange(look.avatarId)}
                   className={cn(
-                    "flex items-center gap-2 rounded-md border bg-background p-2 text-left transition-colors hover:border-primary/50",
+                    "rounded-md border bg-background p-2 transition-colors",
                     primary && "border-primary ring-1 ring-primary/30",
+                    choosingRole === look.role && "border-status-info bg-status-info/5",
                   )}
                 >
-                  {item?.avatar ? <AvatarThumbnail avatar={item.avatar} className="h-12 w-12" /> : <UserRound className="h-8 w-8 text-muted-foreground" />}
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-semibold">{look.label}</span>
-                    <span className="block truncate text-[11px] text-muted-foreground">
-                      {avatarSetRoleLabel(look.role)} · {item?.avatar?.name || "Look não carregado"}
+                  <button
+                    type="button"
+                    onClick={() => setChoosingRole((current) => (current === look.role ? null : look.role))}
+                    className="flex w-full items-center gap-2 rounded-md text-left transition-colors hover:bg-muted/40"
+                  >
+                    {item ? (
+                      <AvatarThumbnail avatar={item} className="h-14 w-14" fit="contain" />
+                    ) : (
+                      <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border bg-muted">
+                        <UserRound className="h-7 w-7 text-muted-foreground" />
+                      </div>
+                    )}
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-semibold">{look.label}</span>
+                      <span className="block truncate text-[11px] text-muted-foreground">
+                        {avatarSetRoleLabel(look.role)} · {item?.name || "Look não carregado"}
+                      </span>
+                      <span className="mt-0.5 block text-[10px] font-medium text-status-info">
+                        Clique para trocar
+                      </span>
                     </span>
-                    {primary ? <span className="mt-0.5 block text-[10px] font-medium text-primary">Posição principal</span> : null}
-                  </span>
-                </button>
+                  </button>
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    {primary ? (
+                      <span className="text-[10px] font-medium text-primary">Posição principal</span>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-[11px]"
+                        onClick={() => onPrimaryChange(look.avatarId)}
+                      >
+                        Usar como principal
+                      </Button>
+                    )}
+                    {packDirty ? (
+                      <span className="rounded-full bg-status-warning/10 px-2 py-0.5 text-[10px] text-status-warning">
+                        Não salvo
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
               );
             })}
           </div>
+          {choosingRole ? (
+            <div className="rounded-lg border border-status-info/30 bg-background p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-semibold">Escolha o avatar para {avatarSetRoleLabel(choosingRole)}</div>
+                  <p className="text-[11px] text-muted-foreground">Veja as miniaturas e clique no look que quer usar nesta posição.</p>
+                </div>
+                <Button type="button" size="sm" variant="ghost" onClick={() => setChoosingRole(null)}>
+                  Fechar
+                </Button>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {avatars.map((avatar) => {
+                  const active = draftLooks.some(
+                    (look) => look.role === choosingRole && look.avatarId === avatar.id,
+                  );
+                  const alreadyUsed = draftLooks.some(
+                    (look) => look.role !== choosingRole && look.avatarId === avatar.id,
+                  );
+                  return (
+                    <button
+                      key={avatar.id}
+                      type="button"
+                      onClick={() => updateDraftAvatar(choosingRole, avatar.id)}
+                      className={cn(
+                        "flex min-w-0 items-center gap-2 rounded-md border bg-muted/20 p-2 text-left transition-colors hover:border-primary/50 hover:bg-muted/40",
+                        active && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                        alreadyUsed && !active && "opacity-70",
+                      )}
+                    >
+                      <AvatarThumbnail avatar={avatar} className="h-14 w-14" fit="contain" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-semibold">{avatar.name}</span>
+                        <span className="block truncate text-[10px] text-muted-foreground">
+                          {avatar.groupName || "Identidade HeyGen"}
+                        </span>
+                        {alreadyUsed && !active ? (
+                          <span className="mt-0.5 block text-[10px] text-status-warning">
+                            Já usado neste pack
+                          </span>
+                        ) : null}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+          {packError ? (
+            <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">
+              {packError}
+            </p>
+          ) : null}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-[11px] leading-4 text-muted-foreground">
-              Para preservar continuidade, use looks da mesma pessoa, roupa e sessão visual sempre que possível.
+              Clique em um look para trocar por miniatura. Salve o pack para usar as mudanças na produção.
             </p>
             <div className="flex gap-1">
+              {packDirty ? (
+                <>
+                  <Button type="button" size="sm" variant="ghost" onClick={resetDraftPack}>
+                    Descartar
+                  </Button>
+                  <Button type="button" size="sm" onClick={() => void saveDraftPack()} disabled={savingPack}>
+                    {savingPack ? "Salvando..." : "Salvar pack"}
+                  </Button>
+                </>
+              ) : null}
               <Button type="button" size="sm" variant="ghost" onClick={() => onEdit(selected)}>
                 <Pencil className="h-3.5 w-3.5" /> Editar
               </Button>
@@ -1743,6 +1980,7 @@ function AvatarSetEditorDialog({
   const [name, setName] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [looks, setLooks] = useState<AvatarSetLook[]>([]);
+  const [choosingLookIndex, setChoosingLookIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -1756,6 +1994,7 @@ function AvatarSetEditorDialog({
     setName(initial?.name || "");
     setVoiceId(initial?.voiceId || avatars[0]?.defaultVoiceId || voices[0]?.id || "");
     setLooks(initial?.looks?.length ? initial.looks : fallbackLooks);
+    setChoosingLookIndex(null);
     setError(null);
   }, [avatars, initial, open, voices]);
 
@@ -1830,26 +2069,99 @@ function AvatarSetEditorDialog({
               </Button>
             </div>
             <div className="space-y-2">
-              {looks.map((look, index) => (
-                <div key={`${index}-${look.avatarId}`} className="grid gap-2 rounded-lg border bg-muted/20 p-2 sm:grid-cols-[1.2fr_0.8fr_1fr_auto]">
-                  <Select value={look.avatarId} onValueChange={(value) => updateLook(index, { avatarId: value })}>
-                    <SelectTrigger><SelectValue placeholder="Look do catálogo" /></SelectTrigger>
-                    <SelectContent>
-                      {avatars.map((avatar) => <SelectItem key={avatar.id} value={avatar.id}>{avatar.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  <Select value={look.role} onValueChange={(value) => updateLook(index, { role: value as AvatarSetRole, label: avatarSetRoleLabel(value as AvatarSetRole) })}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {AVATAR_SET_ROLE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  <Input value={look.label} onChange={(event) => updateLook(index, { label: event.target.value })} placeholder="Rótulo" />
-                  <Button type="button" size="icon" variant="ghost" onClick={() => setLooks((current) => current.filter((_, lookIndex) => lookIndex !== index))} disabled={looks.length <= 2} aria-label="Remover look">
-                    <Trash2 className="h-4 w-4 text-status-danger" />
-                  </Button>
-                </div>
-              ))}
+              {looks.map((look, index) => {
+                const selectedAvatar = avatars.find((avatar) => avatar.id === look.avatarId);
+                return (
+                  <div
+                    key={`${index}-${look.avatarId}`}
+                    className="grid gap-2 rounded-lg border bg-muted/20 p-2 sm:grid-cols-[minmax(0,1.45fr)_0.8fr_1fr_auto]"
+                  >
+                    <div className="flex min-w-0 items-center gap-2 rounded-md border bg-background p-1.5">
+                      {selectedAvatar ? (
+                        <AvatarThumbnail
+                          avatar={selectedAvatar}
+                          className="h-14 w-14"
+                          fit="contain"
+                        />
+                      ) : (
+                        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border bg-muted">
+                          <UserRound className="h-6 w-6 text-muted-foreground" />
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">
+                          {selectedAvatar?.name || "Look não encontrado"}
+                        </div>
+                        <div className="truncate text-[11px] text-muted-foreground">
+                          {selectedAvatar?.groupName || "Identidade HeyGen"}
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() =>
+                          setChoosingLookIndex((current) => (current === index ? null : index))
+                        }
+                      >
+                        Escolher
+                      </Button>
+                    </div>
+                    <Select value={look.role} onValueChange={(value) => updateLook(index, { role: value as AvatarSetRole, label: avatarSetRoleLabel(value as AvatarSetRole) })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {AVATAR_SET_ROLE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <Input value={look.label} onChange={(event) => updateLook(index, { label: event.target.value })} placeholder="Rótulo" />
+                    <Button type="button" size="icon" variant="ghost" onClick={() => setLooks((current) => current.filter((_, lookIndex) => lookIndex !== index))} disabled={looks.length <= 2} aria-label="Remover look">
+                      <Trash2 className="h-4 w-4 text-status-danger" />
+                    </Button>
+                    {choosingLookIndex === index ? (
+                      <div className="grid gap-2 rounded-md border bg-background p-2 sm:col-span-4 sm:grid-cols-2 lg:grid-cols-3">
+                        {avatars.map((avatar) => {
+                          const active = avatar.id === look.avatarId;
+                          const alreadyUsed = looks.some(
+                            (candidate, lookIndex) =>
+                              lookIndex !== index && candidate.avatarId === avatar.id,
+                          );
+                          return (
+                            <button
+                              key={avatar.id}
+                              type="button"
+                              onClick={() => {
+                                updateLook(index, { avatarId: avatar.id });
+                                setChoosingLookIndex(null);
+                              }}
+                              className={cn(
+                                "flex min-w-0 items-center gap-2 rounded-md border p-2 text-left transition-colors hover:border-primary/50 hover:bg-muted/30",
+                                active && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                                alreadyUsed && !active && "opacity-70",
+                              )}
+                            >
+                              <AvatarThumbnail avatar={avatar} className="h-12 w-12" fit="contain" />
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-xs font-semibold">
+                                  {avatar.name}
+                                </span>
+                                <span className="block truncate text-[10px] text-muted-foreground">
+                                  {avatar.groupName || "Identidade HeyGen"}
+                                </span>
+                                {alreadyUsed && !active ? (
+                                  <span className="mt-0.5 block text-[10px] text-status-warning">
+                                    Já usado em outro look
+                                  </span>
+                                ) : null}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           </div>
           {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
@@ -1900,6 +2212,41 @@ function defaultSceneDraft(text: string, roles: AvatarSetRole[]): EditableScene[
   ];
 }
 
+function coerceToTwoSceneDraft(
+  suggestions: Array<{ text: string; lookRole: AvatarSetRole }>,
+  roles: AvatarSetRole[],
+  fallbackText: string,
+): EditableScene[] {
+  const source = suggestions.length
+    ? suggestions
+    : defaultSceneDraft(fallbackText, roles).map((scene) => ({
+        text: scene.text,
+        lookRole: scene.lookRole,
+      }));
+  const firstText = source[0]?.text || "";
+  const secondText = source.slice(1).map((scene) => scene.text).join(" ").trim();
+  const fallback = defaultSceneDraft(
+    source.map((scene) => scene.text).join(" ").trim() || fallbackText,
+    roles,
+  );
+  return [
+    {
+      id: "scene-1",
+      text: firstText || fallback[0]?.text || "",
+      lookRole: resolveSceneRole(source[0]?.lookRole || roles[0] || "primary", 0, roles),
+      estimatedStart: 0,
+      estimatedEnd: 0,
+    },
+    {
+      id: "scene-2",
+      text: secondText || fallback[1]?.text || "",
+      lookRole: resolveSceneRole(source[1]?.lookRole || roles[1] || roles[0] || "primary", 1, roles),
+      estimatedStart: 0,
+      estimatedEnd: 0,
+    },
+  ];
+}
+
 function ScenePlanEditor({
   scriptId,
   loading,
@@ -1910,7 +2257,9 @@ function ScenePlanEditor({
   durationSeconds,
   performancePlan,
   availableRoles,
+  transitionSlideGenerating = false,
   onSaved,
+  onGenerateTransitionSlides,
 }: {
   scriptId: string;
   loading: boolean;
@@ -1921,7 +2270,9 @@ function ScenePlanEditor({
   durationSeconds: 10 | 15 | 30 | 45 | 60;
   performancePlan: { tone: string; pace: string; emotion: string; recommendedVoiceSpeed: number } | null;
   availableRoles: AvatarSetRole[];
+  transitionSlideGenerating?: boolean;
   onSaved: (plan: ScenePlan) => void;
+  onGenerateTransitionSlides?: (plan: ScenePlan) => Promise<void>;
 }) {
   const [scenes, setScenes] = useState<EditableScene[]>([]);
   const [saving, setSaving] = useState(false);
@@ -1961,6 +2312,13 @@ function ScenePlanEditor({
     ]);
   }
 
+  function useTwoScenes() {
+    const mergedText = scenes.map((scene) => scene.text).join(" ").replace(/\s+/g, " ").trim();
+    setScenes(defaultSceneDraft(mergedText || fallbackText, availableRoles));
+    setDirectionNotice("Plano reorganizado em 2 cenas. Revise os textos e salve.");
+    setError(null);
+  }
+
   async function requestDirection() {
     setDirecting(true);
     setError(null);
@@ -1974,16 +2332,22 @@ function ScenePlanEditor({
         pace: performancePlan?.pace,
         emotion: performancePlan?.emotion,
       });
-      setScenes(
-        result.scenes.map((scene, index) => ({
-          id: `scene-${index + 1}`,
-          text: scene.text,
-          lookRole: resolveSceneRole(scene.lookRole, index, availableRoles),
-          estimatedStart: 0,
-          estimatedEnd: 0,
-        })),
+      const nextScenes =
+        availableRoles.length >= 2
+          ? coerceToTwoSceneDraft(result.scenes, availableRoles, displayText || fallbackText)
+          : result.scenes.map((scene, index) => ({
+              id: `scene-${index + 1}`,
+              text: scene.text,
+              lookRole: resolveSceneRole(scene.lookRole, index, availableRoles),
+              estimatedStart: 0,
+              estimatedEnd: 0,
+            }));
+      setScenes(nextScenes);
+      setDirectionNotice(
+        availableRoles.length >= 2
+          ? "Claude sugeriu uma divisão e o app manteve em 2 cenas, para preservar um único corte de look."
+          : "Claude sugeriu uma divisão. Revise e salve o plano quando estiver de acordo.",
       );
-      setDirectionNotice("Claude sugeriu uma divisão. Revise e salve o plano quando estiver de acordo.");
     } catch (directionError) {
       setError(directionError instanceof Error ? directionError.message : "Nao foi possivel gerar direção com Claude.");
     } finally {
@@ -1991,25 +2355,56 @@ function ScenePlanEditor({
     }
   }
 
-  async function save() {
+  function validateScenes() {
     if (scenes.some((scene) => !scene.text.trim())) {
-      setError("Cada cena precisa ter um texto falado.");
-      return;
+      return "Cada cena precisa ter um texto falado.";
     }
     if (availableRoles.length >= 2 && new Set(scenes.map((scene) => scene.lookRole)).size < 2) {
-      setError("Use pelo menos duas posições diferentes quando o Avatar Set estiver ativo.");
-      return;
+      return "Use pelo menos duas posições diferentes quando o Avatar Set estiver ativo.";
+    }
+    return null;
+  }
+
+  async function persistScenes(showToast = true) {
+    const validationError = validateScenes();
+    if (validationError) {
+      setError(validationError);
+      return null;
     }
     setSaving(true);
     setError(null);
     try {
       const saved = await saveScenePlan(scriptId, scenes);
       onSaved(saved);
-      toast.success("Scene Plan salvo.");
+      if (showToast) toast.success("Scene Plan salvo.");
+      return saved;
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Nao foi possivel salvar o Scene Plan.");
+      return null;
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function save() {
+    await persistScenes(true);
+  }
+
+  async function generateTransitionSlides() {
+    if (!onGenerateTransitionSlides) return;
+    const saved = await persistScenes(false);
+    if (!saved) return;
+    setDirectionNotice(null);
+    setError(null);
+    try {
+      await onGenerateTransitionSlides(saved);
+      setDirectionNotice(
+        saved.scenes.length > 2
+          ? "Claude gerou os slides de transição. Revise a Direção visual dos apoios abaixo."
+          : "Claude gerou o slide de transição. Revise a Direção visual dos apoios abaixo.",
+      );
+    } catch {
+      setError("Nao foi possivel gerar o slide de transição com Claude.");
     }
   }
 
@@ -2024,8 +2419,13 @@ function ScenePlanEditor({
         </div>
         <div className="flex flex-wrap gap-2">
           <Button type="button" size="sm" variant="secondary" onClick={() => void requestDirection()} disabled={loading || directing}>
-            <Sparkles className="h-3.5 w-3.5" /> {directing ? "Claude pensando..." : "Gerar direção com Claude"}
+            <Sparkles className="h-3.5 w-3.5" /> {directing ? "Claude pensando..." : "Gerar 2 cenas com Claude"}
           </Button>
+          {scenes.length !== 2 && availableRoles.length >= 2 ? (
+            <Button type="button" size="sm" variant="outline" onClick={useTwoScenes}>
+              Usar 2 cenas
+            </Button>
+          ) : null}
           <Button type="button" size="sm" variant="outline" onClick={addScene}>
             <Plus className="h-3.5 w-3.5" /> Adicionar cena
           </Button>
@@ -2037,63 +2437,87 @@ function ScenePlanEditor({
       ) : (
         <div className="space-y-2">
           {scenes.map((scene, index) => (
-            <div key={scene.id} className="rounded-lg border bg-background p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold">Cena {index + 1}</span>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  onClick={() => setScenes((current) => current.filter((_, sceneIndex) => sceneIndex !== index))}
-                  disabled={scenes.length <= 1}
-                  aria-label={`Remover cena ${index + 1}`}
-                >
-                  <Trash2 className="h-4 w-4 text-status-danger" />
-                </Button>
-              </div>
-              <div className="grid gap-2 md:grid-cols-[1fr_180px]">
-                <Textarea
-                  value={scene.text}
-                  onChange={(event) => updateScene(index, { text: event.target.value })}
-                  rows={3}
-                  placeholder="Texto falado nesta cena"
-                />
-                <div className="space-y-2">
-                  <Field label="Posição">
-                    <Select
-                      value={scene.lookRole}
-                      onValueChange={(value) => updateScene(index, { lookRole: value as AvatarSetRole })}
-                    >
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {availableRoles.map((role) => (
-                          <SelectItem key={role} value={role}>{avatarSetRoleLabel(role)}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Input
-                      type="number"
-                      min={0}
-                      step={0.1}
-                      value={scene.estimatedStart}
-                      onChange={(event) => updateScene(index, { estimatedStart: Number(event.target.value) || 0 })}
-                      aria-label="Início estimado"
-                      placeholder="Início"
-                    />
-                    <Input
-                      type="number"
-                      min={0}
-                      step={0.1}
-                      value={scene.estimatedEnd}
-                      onChange={(event) => updateScene(index, { estimatedEnd: Number(event.target.value) || 0 })}
-                      aria-label="Fim estimado"
-                      placeholder="Fim"
-                    />
+            <div key={scene.id} className="space-y-2">
+              <div className="rounded-lg border bg-background p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold">Cena {index + 1}</span>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => setScenes((current) => current.filter((_, sceneIndex) => sceneIndex !== index))}
+                    disabled={scenes.length <= 1}
+                    aria-label={`Remover cena ${index + 1}`}
+                  >
+                    <Trash2 className="h-4 w-4 text-status-danger" />
+                  </Button>
+                </div>
+                <div className="grid gap-2 md:grid-cols-[1fr_180px]">
+                  <Textarea
+                    value={scene.text}
+                    onChange={(event) => updateScene(index, { text: event.target.value })}
+                    rows={3}
+                    placeholder="Texto falado nesta cena"
+                  />
+                  <div className="space-y-2">
+                    <Field label="Posição">
+                      <Select
+                        value={scene.lookRole}
+                        onValueChange={(value) => updateScene(index, { lookRole: value as AvatarSetRole })}
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {availableRoles.map((role) => (
+                            <SelectItem key={role} value={role}>{avatarSetRoleLabel(role)}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        value={scene.estimatedStart}
+                        onChange={(event) => updateScene(index, { estimatedStart: Number(event.target.value) || 0 })}
+                        aria-label="Início estimado"
+                        placeholder="Início"
+                      />
+                      <Input
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        value={scene.estimatedEnd}
+                        onChange={(event) => updateScene(index, { estimatedEnd: Number(event.target.value) || 0 })}
+                        aria-label="Fim estimado"
+                        placeholder="Fim"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
+              {index < scenes.length - 1 ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2">
+                  <div>
+                    <div className="text-xs font-semibold text-status-info">
+                      Transição Cena {index + 1} → Cena {index + 2}
+                    </div>
+                    <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                      Crie um slide visual para entrar durante a fala antes do próximo look.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void generateTransitionSlides()}
+                    disabled={saving || transitionSlideGenerating || !onGenerateTransitionSlides}
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    {transitionSlideGenerating ? "Claude gerando..." : "Gerar slide de transição"}
+                  </Button>
+                </div>
+              ) : null}
             </div>
           ))}
         </div>
@@ -2227,10 +2651,10 @@ function VisualPlanDirector({
     }
   }
 
-  async function renderPreviews() {
+  async function renderPreviews(): Promise<VideoSlideRender | null> {
     if (!draftPlan) {
       setError("Salve ou gere a direção visual antes de renderizar os previews.");
-      return;
+      return null;
     }
     setRendering(true);
     setError(null);
@@ -2241,10 +2665,25 @@ function VisualPlanDirector({
       const rendered = await renderVideoSlides(scriptId);
       onRendered(rendered);
       toast.success(`${rendered.renderedCount} preview(s) 1080×1920 renderizado(s).`);
+      return rendered;
     } catch (renderError) {
       setError(renderError instanceof Error ? renderError.message : "Nao foi possivel renderizar os previews.");
+      return null;
     } finally {
       setRendering(false);
+    }
+  }
+
+  async function renderAndOpenSlide(sceneId: string) {
+    const existing = videoSlideRender?.assets.find((asset) => asset.sceneId === sceneId && asset.url);
+    if (existing?.url) {
+      window.open(existing.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    const rendered = await renderPreviews();
+    const asset = rendered?.assets.find((candidate) => candidate.sceneId === sceneId && candidate.url);
+    if (asset?.url) {
+      window.open(asset.url, "_blank", "noopener,noreferrer");
     }
   }
 
@@ -2268,13 +2707,49 @@ function VisualPlanDirector({
           {draftPlan.scenes.map((scene, index) => {
             const requiresVisual = index < requiredVisualCount;
             const closesOnAvatar = requiredVisualCount > 0 && index >= requiredVisualCount;
+            const previewAsset = videoSlideRender?.assets.find(
+              (asset) => asset.sceneId === scene.sceneId && asset.url,
+            );
             return (
             <div key={scene.sceneId} className="rounded-md border bg-background p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold">Cena {index + 1}</span>
-                <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium uppercase">
-                  {closesOnAvatar ? "Fechamento no avatar" : scene.visual.type === "none" ? "Apoio obrigatório" : scene.visual.layout || scene.visual.type}
-                </span>
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <span className="text-xs font-semibold">
+                    {closesOnAvatar
+                      ? `Cena ${index + 1}`
+                      : `Transição Cena ${index + 1} → Cena ${index + 2}`}
+                  </span>
+                  {!closesOnAvatar ? (
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      Entra durante a fala antes do próximo look.
+                    </p>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  {!closesOnAvatar && scene.visual.type !== "none" ? (
+                    previewAsset?.url ? (
+                      <Button type="button" size="sm" variant="outline" asChild>
+                        <a href={previewAsset.url} target="_blank" rel="noreferrer">
+                          <Film className="h-3.5 w-3.5" /> Ver slide
+                        </a>
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void renderAndOpenSlide(scene.sceneId)}
+                        disabled={rendering || loading}
+                      >
+                        <Film className="h-3.5 w-3.5" />
+                        {rendering ? "Renderizando..." : "Renderizar e ver slide"}
+                      </Button>
+                    )
+                  ) : null}
+                  <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium uppercase">
+                    {closesOnAvatar ? "Fechamento no avatar" : scene.visual.type === "none" ? "Apoio obrigatório" : "Slide de transição"}
+                  </span>
+                </div>
               </div>
               <div className="grid gap-2 md:grid-cols-[180px_1fr]">
                 <div className="space-y-2">
@@ -2525,6 +3000,95 @@ function FriendlySwitch({
         <p className="text-[11px] leading-4 text-muted-foreground">{description}</p>
       </div>
       <Switch checked={checked} onCheckedChange={onCheckedChange} aria-label={label} />
+    </div>
+  );
+}
+
+function ProductionGateChecklist({
+  items,
+  blockedReason,
+  latestJobId,
+  dirty,
+  narrationWords,
+  estimatedSpeechSeconds,
+  onOpenLatest,
+  onSend,
+}: {
+  items: Array<{ label: string; ready: boolean; detail: string }>;
+  blockedReason: string | null;
+  latestJobId?: string;
+  dirty: boolean;
+  narrationWords: number;
+  estimatedSpeechSeconds: number;
+  onOpenLatest?: () => void;
+  onSend: () => void;
+}) {
+  const nextPending = items.find((item) => !item.ready);
+  const ready = !nextPending && !blockedReason;
+  const nextIssue = blockedReason || nextPending?.detail || null;
+  return (
+    <div
+      className={cn(
+        "rounded-xl border p-4 shadow-sm",
+        ready ? "border-status-success/30 bg-status-success/5" : "border-status-warning/30 bg-status-warning/10",
+      )}
+    >
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-status-info">
+            {ready ? (
+              <CheckCircle2 className="h-3.5 w-3.5 text-status-success" />
+            ) : (
+              <TriangleAlert className="h-3.5 w-3.5 text-status-warning" />
+            )}
+            Checklist final
+          </div>
+          <h2 className="mt-1 font-display text-sm font-semibold">
+            {ready ? "Tudo certo para enviar ao HeyGen" : "Falta resolver antes de gerar"}
+          </h2>
+          <p className="mt-0.5 max-w-3xl text-xs leading-5 text-muted-foreground">
+            O botão só libera quando todos os itens abaixo estiverem validados.
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          {latestJobId && onOpenLatest ? (
+            <Button type="button" size="sm" variant="secondary" onClick={onOpenLatest}>
+              Ver vídeo
+            </Button>
+          ) : null}
+          <Button type="button" size="sm" onClick={onSend} disabled={!ready}>
+            Enviar para produção
+            <ArrowRight className="ml-1 h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        {items.map((item) => (
+          <div key={item.label} className="flex items-start gap-2 rounded-lg border bg-background/70 px-3 py-2">
+            {item.ready ? (
+              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-status-success" />
+            ) : (
+              <Circle className="mt-0.5 h-4 w-4 shrink-0 text-status-warning" />
+            )}
+            <div className="min-w-0">
+              <div className="text-xs font-semibold">{item.label}</div>
+              <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{item.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {nextIssue ? (
+        <div className="mt-3 rounded-lg border border-status-warning/40 bg-background px-3 py-2 text-xs font-medium text-status-warn-foreground">
+          Próximo ajuste: {nextIssue}
+        </div>
+      ) : null}
+      <div className="mt-3 flex flex-wrap gap-2 border-t border-status-info/15 pt-3 text-xs text-muted-foreground">
+        <span className="rounded-full bg-background px-2.5 py-1">{narrationWords} palavras</span>
+        <span className="rounded-full bg-background px-2.5 py-1">~{estimatedSpeechSeconds}s de fala</span>
+        <span className="rounded-full bg-background px-2.5 py-1">{dirty ? "Alterações pendentes" : "Roteiro salvo"}</span>
+      </div>
     </div>
   );
 }
