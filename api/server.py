@@ -557,9 +557,9 @@ def _normalize_video_visual(
     body = re.sub(r"\s+", " ", str(visual.get("body") or "")).strip()[:500]
     purpose = re.sub(r"\s+", " ", str(visual.get("purpose") or "")).strip()[:300]
     try:
-        start_ratio = float(visual.get("startRatio", 0.35))
+        start_ratio = float(visual.get("startRatio", 0.65))
     except (TypeError, ValueError):
-        start_ratio = 0.35
+        start_ratio = 0.65
     start_ratio = max(0.15, min(0.70, start_ratio))
     try:
         duration_seconds = float(visual.get("durationSeconds", 2.5))
@@ -908,11 +908,19 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
             visual = visual_by_scene.get(scene_id) or {}
             slide_path = asset_by_scene.get(scene_id)
             slide_duration = float(visual.get("durationSeconds") or 0) if isinstance(visual, dict) else 0.0
-            start_ratio = float(visual.get("startRatio") or 0.35) if isinstance(visual, dict) else 0.35
-            start_ratio = max(0.15, min(0.70, start_ratio))
-            start_seconds = max(0.0, min(duration * start_ratio, max(0.0, duration - 0.5)))
-            usable_duration = max(0.3, duration - start_seconds - 0.1)
-            slide_duration = min(max(1.0, slide_duration or 2.5), 5.0, usable_duration)
+            has_explicit_timing = isinstance(visual, dict) and "startRatio" in visual and "durationSeconds" in visual
+            if index <= required_supports:
+                slide_duration = min(max(1.0, slide_duration or 3.0), 5.0, max(0.3, duration))
+                start_seconds = max(0.0, duration - slide_duration)
+            elif has_explicit_timing:
+                start_ratio = float(visual.get("startRatio") or 0.65)
+                start_ratio = max(0.15, min(0.70, start_ratio))
+                start_seconds = max(0.0, min(duration * start_ratio, max(0.0, duration - 0.5)))
+                usable_duration = max(0.3, duration - start_seconds)
+                slide_duration = min(max(1.0, slide_duration or 2.5), 5.0, usable_duration)
+            else:
+                slide_duration = min(3.0, max(1.0, duration))
+                start_seconds = max(0.0, duration - slide_duration)
             if index <= required_supports and not slide_path:
                 raise HTTPException(status_code=409, detail=f"Apoio visual da cena {index} não foi renderizado.")
             composition_scenes.append(
@@ -2552,7 +2560,7 @@ class VisualPlanVisualIn(BaseModel):
     headline: str = Field(default="", max_length=180)
     body: str = Field(default="", max_length=500)
     purpose: str = Field(default="", max_length=300)
-    startRatio: float = Field(default=0.35, ge=0, le=1)
+    startRatio: float = Field(default=0.65, ge=0, le=1)
     durationSeconds: float = Field(default=2.5, ge=0, le=60)
     motionPreset: str = Field(default="fade", max_length=40)
 

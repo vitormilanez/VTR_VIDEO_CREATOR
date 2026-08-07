@@ -146,7 +146,6 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
             visual_filters.extend(
                 [
                     f"fade=t=in:st={start:.3f}:d={fade:.3f}:alpha=1",
-                    f"fade=t=out:st={max(start, end - fade):.3f}:d={fade:.3f}:alpha=1",
                 ]
             )
         filters.append(",".join(visual_filters) + "[visualslide]")
