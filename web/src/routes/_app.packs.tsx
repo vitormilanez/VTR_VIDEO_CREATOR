@@ -263,7 +263,7 @@ function PacksPage() {
   async function saveLocal() {
     if (!script || !pack) return;
     if (packIsLegacy) {
-      toast.error("Este Pack ainda esta no formato antigo. Clique em Gerar versao com 7 slides antes de salvar PNGs.");
+      toast.error("Salvar PNGs esta bloqueado porque este Pack ainda tem 6 slides. Gere a versao com 7 slides primeiro.");
       return;
     }
     setSaving(true);
@@ -332,7 +332,7 @@ function PacksPage() {
             ) : (
               <Wand2 className="mr-1 h-3.5 w-3.5" />
             )}
-            {packIsLegacy ? "Gerar versao com 7 slides" : pack ? "Gerar nova versao" : "Gerar Pack"}
+            {packIsLegacy ? "Gerar 7 slides agora" : pack ? "Gerar nova versao" : "Gerar Pack"}
           </Button>
           {outdatedAvatar && pack ? (
             <Button size="sm" variant="outline" onClick={() => void refreshIdentity()} disabled={generating}>
@@ -350,7 +350,7 @@ function PacksPage() {
             ) : (
               <FolderDown className="mr-1 h-3.5 w-3.5" />
             )}
-            Salvar PNGs
+            {packIsLegacy ? "Salvar PNGs bloqueado" : "Salvar PNGs"}
           </Button>
           <Button asChild size="sm" variant="ghost">
             <Link to="/roteiros">
@@ -391,8 +391,9 @@ function PacksPage() {
                   {script?.titulo ?? "Selecione um roteiro"}
                 </h2>
                 <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-                  7 slides com uma ideia por tela, leitura em poucos segundos e composicao visual
-                  fixa.
+                  {packIsLegacy
+                    ? `Este Pack salvo ainda tem ${pack.carousel.length} slides. Gere a versao nova para adicionar o slide de contexto e liberar os PNGs.`
+                    : "7 slides com uma ideia por tela, leitura em poucos segundos e composicao visual fixa."}
                 </p>
               </div>
               <Select value={selectedId} onValueChange={selectScript}>
@@ -441,12 +442,22 @@ function PacksPage() {
           {script && pack ? (
             <>
               {packIsLegacy ? (
-                <section className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 shadow-sm">
-                  <div className="font-semibold">Este Pack tem {pack.carousel.length} de {REQUIRED_CAROUSEL_SLIDES} slides.</div>
-                  <p className="mt-1">
-                    Ele foi salvo antes do novo contrato com slide explicativo de contexto. Gere uma nova versao
-                    para criar 7 slides e liberar o salvamento dos PNGs.
-                  </p>
+                <section className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 shadow-sm md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="font-semibold">Ainda nao existe a versao de 7 slides deste Pack.</div>
+                    <p className="mt-1">
+                      O arquivo salvo tem {pack.carousel.length} de {REQUIRED_CAROUSEL_SLIDES} slides. Por isso o
+                      app bloqueia “Salvar PNGs” até gerar a nova versão com o slide de contexto.
+                    </p>
+                  </div>
+                  <Button size="sm" onClick={generateVisualPack} disabled={generating}>
+                    {generating ? (
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Wand2 className="mr-1 h-3.5 w-3.5" />
+                    )}
+                    Gerar 7 slides agora
+                  </Button>
                 </section>
               ) : null}
               <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
