@@ -2129,6 +2129,16 @@ class VideoPreviewCreateIn(BaseModel):
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
 
 
+class SceneVideoConfirmIn(BaseModel):
+    confirmed: Literal[True]
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
+    captions: bool = True
+    optimizePronunciation: bool = True
+    idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+
+
 class ProductionProfileIn(BaseModel):
     avatarId: str = Field(min_length=1, max_length=160)
     voiceId: str = Field(min_length=1, max_length=160)
@@ -2391,6 +2401,116 @@ def get_scene_generation_plan(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"ok": True, "generation": result.to_dict()}
+
+
+@app.post("/api/scripts/{script_id}/scene-generation/submit")
+def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dict:
+    """Submete uma chamada HeyGen por cena somente após confirmação explícita."""
+    script = _find_script(script_id)
+    if script.get("status") != "aprovado_clinicamente":
+        raise HTTPException(status_code=409, detail="O roteiro precisa estar marcado como Pronto antes da geração paga.")
+    scene_plan = _scene_plan(script_id)
+    profile = _production_profile(script_id)
+    if not scene_plan or not profile or not profile.get("voiceId"):
+        raise HTTPException(status_code=409, detail="Salve perfil de produção e Scene Plan antes de gerar por cena.")
+    try:
+        generation = build_scene_generation_result(
+            script_id=script_id,
+            scene_plan=scene_plan,
+            voice_id=str(profile["voiceId"]),
+            speech_mode=payload.speechMode,
+            orientation=payload.orientation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    command = _heygen_cli()
+    _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
+    ready_avatar_ids = {
+        str(look.get("id"))
+        for look in private_looks
+        if isinstance(look, dict) and look.get("status") == "completed" and look.get("id")
+    }
+    missing = [request.avatar_id for request in generation.requests if request.avatar_id not in ready_avatar_ids]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Looks não prontos na HeyGen: {', '.join(missing)}")
+
+    jobs: list[dict[str, Any]] = []
+    base_key = payload.idempotencyKey or hashlib.sha256(
+        json.dumps(generation.to_dict(), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    for request in generation.requests:
+        now = _now()
+        scene_key = f"scene-video:{script_id}:{request.scene_id}:{base_key}"
+        reserved_job = {
+            "id": f"sv-{uuid.uuid4().hex[:12]}",
+            "scriptId": script_id,
+            "status": "fila",
+            "provider": "heygen",
+            "progresso": 0,
+            "criadoEm": now,
+            "atualizadoEm": now,
+            "submissionState": "reserved",
+            "isScene": True,
+            "sceneId": request.scene_id,
+            "sceneOrder": request.order,
+            "productionSettings": {
+                "avatarId": request.avatar_id,
+                "voiceId": request.voice_id,
+                "orientation": request.orientation,
+                "durationSeconds": payload.durationSeconds,
+                "speechMode": request.speech_mode,
+                "generationMode": "direct",
+                "captions": payload.captions,
+                "optimizePronunciation": payload.optimizePronunciation,
+                "spokenText": request.spoken_text,
+                "sceneCount": generation.scene_count,
+                "cutPolicy": "hard_cut",
+            },
+        }
+        job, reservation = _job_store().reserve_video(reserved_job, idempotency_key=scene_key)
+        if reservation == "duplicate":
+            jobs.append(job)
+            continue
+        if reservation == "conflict":
+            raise HTTPException(status_code=409, detail=f"A cena {request.scene_id} já está em produção.")
+        try:
+            job["submissionState"] = "submitting"
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            direct_payload = _direct_video_payload(
+                script=script,
+                narration_text=request.spoken_text,
+                avatar_id=request.avatar_id,
+                voice_id=request.voice_id,
+                orientation=request.orientation,
+                speech_mode=request.speech_mode,
+                captions=payload.captions,
+                optimize_pronunciation=payload.optimizePronunciation,
+            )
+            response = _run_heygen_json(command, ["video", "create"], payload=direct_payload, timeout=60)
+            video_id = _find_value(response, "video_id", "videoId", "id")
+            if not video_id:
+                raise RuntimeError("HeyGen não retornou o identificador da cena.")
+            job["status"] = "fila"
+            job["submissionState"] = "submitted"
+            job["remoteVideoId"] = video_id
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            jobs.append(job)
+        except (HTTPException, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            job["status"] = "erro"
+            job["erro"] = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            job["retrySafe"] = job.get("submissionState") != "submitting"
+            job["submissionState"] = "failed_safe" if job["retrySafe"] else "submission_uncertain"
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            raise HTTPException(status_code=502, detail=f"Falha ao gerar a cena {request.scene_id}: {job['erro']}") from exc
+    return {
+        "ok": True,
+        "generation": generation.to_dict(),
+        "jobs": jobs,
+    }
 
 
 @app.post("/api/scripts/{script_id}/scene-plan/direct")

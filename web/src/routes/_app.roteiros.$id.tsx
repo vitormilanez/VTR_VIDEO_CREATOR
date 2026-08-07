@@ -24,6 +24,7 @@ import {
   fetchHeyGenCatalog,
   fetchHeyGenStyles,
   fetchProductionProfile,
+  fetchSceneGenerationPlan,
   fetchScenePlan,
   fetchVideoSlideRender,
   fetchVisualPlan,
@@ -35,6 +36,7 @@ import {
   saveScript,
   saveScenePlan,
   renderVideoSlides,
+  submitSceneGeneration,
   saveVisualPlan,
   type AvatarSet,
   type AvatarSetLook,
@@ -42,6 +44,7 @@ import {
   type HeyGenCatalog,
   type HeyGenStyle,
   type ScenePlan,
+  type SceneGenerationResult,
   type VideoVisualLayout,
   type VideoVisualType,
   type VideoSlideRender,
@@ -149,6 +152,8 @@ function RoteiroDetalhe() {
   const [editingAvatarSet, setEditingAvatarSet] = useState<AvatarSet | null>(null);
   const [scenePlan, setScenePlan] = useState<ScenePlan | null>(null);
   const [scenePlanLoading, setScenePlanLoading] = useState(true);
+  const [sceneGenerationPlan, setSceneGenerationPlan] = useState<SceneGenerationResult | null>(null);
+  const [sceneGenerationPlanLoading, setSceneGenerationPlanLoading] = useState(false);
   const [visualPlan, setVisualPlan] = useState<VisualPlan | null>(null);
   const [visualPlanLoading, setVisualPlanLoading] = useState(true);
   const [videoSlideRender, setVideoSlideRender] = useState<VideoSlideRender | null>(null);
@@ -343,6 +348,28 @@ function RoteiroDetalhe() {
       /* configuracao local antiga ou invalida */
     }
   }, []);
+
+  useEffect(() => {
+    if (!scenePlan) {
+      setSceneGenerationPlan(null);
+      return;
+    }
+    let cancelled = false;
+    setSceneGenerationPlanLoading(true);
+    fetchSceneGenerationPlan(id, { speechMode, orientation })
+      .then((plan) => {
+        if (!cancelled) setSceneGenerationPlan(plan);
+      })
+      .catch(() => {
+        if (!cancelled) setSceneGenerationPlan(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSceneGenerationPlanLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [avatarMode, avatarSetId, id, orientation, primaryAvatarId, profileLoaded, scenePlan?.updatedAt, speechMode, voiceId]);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(script), [draft, script]);
   const selectedAvatar = useMemo(
     () => catalog?.avatars.find((avatar) => avatar.id === avatarId),
@@ -372,7 +399,7 @@ function RoteiroDetalhe() {
     [catalog?.avatars, selectedAvatarSet],
   );
   const avatarSetReady = Boolean(selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId);
-  const productionModeReady = avatarMode === "single";
+  const productionModeReady = avatarMode === "single" || Boolean(avatarMode === "set" && sceneGenerationPlan);
   const selectedAvatarReady = avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
   const sceneRoles = useMemo<AvatarSetRole[]>(
     () =>
@@ -529,8 +556,8 @@ function RoteiroDetalhe() {
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
-    if (avatarMode === "set") {
-      toast.error("A geração com duas posições será habilitada após o Scene Plan.");
+    if (avatarMode === "set" && !sceneGenerationPlan) {
+      toast.error("Salve o Scene Plan antes de gerar o vídeo por cenas.");
       return;
     }
     if (!canSendToProduction) {
@@ -549,6 +576,21 @@ function RoteiroDetalhe() {
         updateScript(saved.id, saved);
         setDraft(saved);
         scriptToSend = saved;
+      }
+      if (avatarMode === "set") {
+        const sceneResult = await submitSceneGeneration(scriptToSend.id, {
+          orientation,
+          durationSeconds,
+          speechMode,
+          captions,
+          optimizePronunciation,
+        });
+        sceneResult.jobs.forEach((job) => addVideoJob(job));
+        const firstJob = sceneResult.jobs[0];
+        if (!firstJob) throw new Error("A HeyGen não retornou jobs por cena.");
+        toast.success(`${sceneResult.jobs.length} cena(s) enviada(s) para produção no HeyGen.`);
+        navigate({ to: "/producao/$id", params: { id: firstJob.id } });
+        return;
       }
       const job = await createHeyGenVideo(scriptToSend.id, {
         avatarId,
@@ -1158,6 +1200,12 @@ function RoteiroDetalhe() {
                   videoSlideRender={videoSlideRender}
                   videoSlideRenderLoading={videoSlideRenderLoading}
                   onRendered={setVideoSlideRender}
+                />
+                <SceneGenerationSummary
+                  plan={sceneGenerationPlan}
+                  loading={sceneGenerationPlanLoading}
+                  durationSeconds={durationSeconds}
+                  avatarMode={avatarMode}
                 />
               </div>
               <Field label="Formato do vídeo">
@@ -2406,6 +2454,55 @@ function AvatarThumbnail({
         <UserRound className="m-auto h-full w-1/2 text-muted-foreground" />
       )}
     </span>
+  );
+}
+
+function SceneGenerationSummary({
+  plan,
+  loading,
+  durationSeconds,
+  avatarMode,
+}: {
+  plan: SceneGenerationResult | null;
+  loading: boolean;
+  durationSeconds: 10 | 15 | 30 | 45 | 60;
+  avatarMode: "single" | "set";
+}) {
+  return (
+    <div className="mt-3 space-y-2 rounded-lg border border-status-warning/30 bg-status-warning/5 p-3">
+      <div className="flex items-start gap-2">
+        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-status-warning" />
+        <div>
+          <h4 className="text-xs font-semibold">Checklist de geração por cena</h4>
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            Nenhum job foi criado. Antes de qualquer geração paga, confira cenas, looks, voz e duração.
+          </p>
+        </div>
+      </div>
+      {loading ? <p className="text-xs text-muted-foreground">Montando estimativa...</p> : null}
+      {plan ? (
+        <>
+          <div className="flex flex-wrap gap-2 text-[11px]">
+            <span className="rounded-full bg-background px-2 py-1">{plan.sceneCount} cenas</span>
+            <span className="rounded-full bg-background px-2 py-1">{plan.estimatedCalls} chamadas HeyGen estimadas</span>
+            <span className="rounded-full bg-background px-2 py-1">{durationSeconds}s selecionados</span>
+            <span className="rounded-full bg-background px-2 py-1">{plan.requests[0]?.voiceId || "voz não definida"}</span>
+          </div>
+          <div className="space-y-1">
+            {plan.requests.map((request) => (
+              <div key={request.sceneId} className="grid gap-1 rounded-md border bg-background px-2 py-1.5 text-[11px] md:grid-cols-[80px_1fr_1.5fr]">
+                <span className="font-semibold">Cena {request.order}</span>
+                <span>{avatarMode === "set" ? `Look ${request.avatarId}` : "Avatar principal"}</span>
+                <span className="truncate text-muted-foreground">{request.spokenText}</span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-status-warning">{plan.warning}</p>
+        </>
+      ) : (
+        <p className="text-[11px] text-muted-foreground">Salve um Scene Plan para visualizar a estimativa por cena.</p>
+      )}
+    </div>
   );
 }
 

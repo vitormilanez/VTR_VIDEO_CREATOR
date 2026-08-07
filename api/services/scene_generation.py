@@ -59,6 +59,9 @@ class SceneGenerationResult:
             "status": self.status,
             "provider": self.provider,
             "sceneCount": self.scene_count,
+            "estimatedCalls": self.scene_count,
+            "requiresExplicitConfirmation": True,
+            "warning": "Cada cena representa uma chamada HeyGen potencial; nenhum job foi criado.",
             "requests": [request.to_dict() for request in self.requests],
         }
 

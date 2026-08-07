@@ -481,6 +481,9 @@ export interface SceneGenerationResult {
   status: "not_submitted";
   provider: "heygen";
   sceneCount: number;
+  estimatedCalls: number;
+  requiresExplicitConfirmation: boolean;
+  warning: string;
   requests: SceneGenerationRequest[];
 }
 
@@ -780,6 +783,28 @@ export async function fetchSceneGenerationPlan(
     { method: "GET" },
   );
   return response.generation;
+}
+
+export async function submitSceneGeneration(
+  scriptId: string,
+  input: {
+    orientation: "portrait" | "landscape";
+    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    speechMode: "natural" | "fiel" | "direto" | "enfatico";
+    captions: boolean;
+    optimizePronunciation: boolean;
+    idempotencyKey?: string;
+  },
+): Promise<{ generation: SceneGenerationResult; jobs: VideoJob[] }> {
+  const response = await requestJson<{
+    ok: boolean;
+    generation: SceneGenerationResult;
+    jobs: VideoJob[];
+  }>(`/api/scripts/${encodeURIComponent(scriptId)}/scene-generation/submit`, {
+    method: "POST",
+    body: JSON.stringify({ confirmed: true, ...input }),
+  });
+  return { generation: response.generation, jobs: response.jobs };
 }
 
 export async function generateSceneDirection(
