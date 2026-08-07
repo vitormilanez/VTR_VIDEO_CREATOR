@@ -107,6 +107,41 @@ class ScenePlanTests(unittest.TestCase):
         self.assertEqual(cache_get.call_args.args[1]["promptVersion"], server.SCENE_DIRECTOR_PROMPT_VERSION)
         record_usage.assert_not_called()
 
+    def test_visual_director_requires_saved_scene_plan(self) -> None:
+        payload = server.VisualDirectorIn(displayText="Texto educativo para apoiar visualmente.")
+        with patch.object(server, "_find_script", return_value={"id": "script-visual"}), patch.object(
+            server, "_scene_plan", return_value=None
+        ):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.direct_visual_plan("script-visual", payload)
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_visual_director_cache_avoids_new_paid_call(self) -> None:
+        cached = {
+            "ok": True,
+            "provider": "claude",
+            "visualPlan": {"scriptId": "script-visual", "scenes": []},
+        }
+        payload = server.VisualDirectorIn(displayText="Texto educativo para apoiar visualmente.")
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False), patch.object(
+            server, "_find_script", return_value={"id": "script-visual", "titulo": "Visual"}
+        ), patch.object(
+            server,
+            "_scene_plan",
+            return_value={"scriptId": "script-visual", "scenes": [{"id": "scene-1", "order": 1}]},
+        ), patch.object(
+            server,
+            "_production_profile",
+            return_value={"avatarMode": "single", "avatarId": "look-only"},
+        ), patch.object(server, "_ai_cache_get", return_value=cached) as cache_get, patch.object(
+            server, "_record_anthropic_usage"
+        ) as record_usage:
+            result = server.direct_visual_plan("script-visual", payload)
+        self.assertEqual(result, cached)
+        self.assertEqual(cache_get.call_args.args[0], "visual-plan.direct")
+        self.assertEqual(cache_get.call_args.args[1]["designSystemVersion"], server.VIDEO_VISUAL_DESIGN_SYSTEM_VERSION)
+        record_usage.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

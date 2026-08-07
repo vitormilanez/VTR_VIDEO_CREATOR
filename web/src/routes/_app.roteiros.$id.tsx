@@ -25,7 +25,9 @@ import {
   fetchHeyGenStyles,
   fetchProductionProfile,
   fetchScenePlan,
+  fetchVisualPlan,
   generateSceneDirection,
+  generateVisualDirection,
   naturalizeScript,
   saveAvatarSet,
   saveProductionProfile,
@@ -37,6 +39,7 @@ import {
   type HeyGenCatalog,
   type HeyGenStyle,
   type ScenePlan,
+  type VisualPlan,
 } from "@/lib/api/local";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
@@ -140,6 +143,8 @@ function RoteiroDetalhe() {
   const [editingAvatarSet, setEditingAvatarSet] = useState<AvatarSet | null>(null);
   const [scenePlan, setScenePlan] = useState<ScenePlan | null>(null);
   const [scenePlanLoading, setScenePlanLoading] = useState(true);
+  const [visualPlan, setVisualPlan] = useState<VisualPlan | null>(null);
+  const [visualPlanLoading, setVisualPlanLoading] = useState(true);
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(
     initialCaptureDuration ?? 45,
@@ -300,6 +305,11 @@ function RoteiroDetalhe() {
       .then((plan) => setScenePlan(plan))
       .catch(() => toast.error("Nao consegui carregar o Scene Plan deste roteiro."))
       .finally(() => setScenePlanLoading(false));
+    setVisualPlanLoading(true);
+    fetchVisualPlan(id)
+      .then((plan) => setVisualPlan(plan))
+      .catch(() => toast.error("Nao consegui carregar a direção visual deste roteiro."))
+      .finally(() => setVisualPlanLoading(false));
     fetchHeyGenStyles("cinematic")
       .then((data) => setStyles(data.styles))
       .catch(() => setStyles([]));
@@ -1121,6 +1131,17 @@ function RoteiroDetalhe() {
                   performancePlan={performancePlan}
                   availableRoles={sceneRoles}
                   onSaved={setScenePlan}
+                />
+                <VisualPlanDirector
+                  scriptId={id}
+                  scenePlan={scenePlan}
+                  visualPlan={visualPlan}
+                  loading={visualPlanLoading}
+                  displayText={displayText || narrationText}
+                  spokenText={spokenText}
+                  durationSeconds={durationSeconds}
+                  performancePlan={performancePlan}
+                  onSaved={setVisualPlan}
                 />
               </div>
               <Field label="Formato do vídeo">
@@ -2108,6 +2129,98 @@ function ScenePlanEditor({
           {saving ? "Salvando..." : "Salvar plano de cenas"}
         </Button>
       </div>
+    </div>
+  );
+}
+
+function VisualPlanDirector({
+  scriptId,
+  scenePlan,
+  visualPlan,
+  loading,
+  displayText,
+  spokenText,
+  durationSeconds,
+  performancePlan,
+  onSaved,
+}: {
+  scriptId: string;
+  scenePlan: ScenePlan | null;
+  visualPlan: VisualPlan | null;
+  loading: boolean;
+  displayText: string;
+  spokenText: string;
+  durationSeconds: 10 | 15 | 30 | 45 | 60;
+  performancePlan: { tone: string; pace: string; emotion: string; recommendedVoiceSpeed: number } | null;
+  onSaved: (plan: VisualPlan) => void;
+}) {
+  const [directing, setDirecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function requestVisualDirection() {
+    if (!scenePlan) {
+      setError("Salve o Scene Plan antes de pedir direção visual.");
+      return;
+    }
+    setDirecting(true);
+    setError(null);
+    try {
+      const result = await generateVisualDirection(scriptId, {
+        displayText,
+        spokenText,
+        durationSeconds,
+        tone: performancePlan?.tone,
+        pace: performancePlan?.pace,
+        emotion: performancePlan?.emotion,
+      });
+      onSaved(result.visualPlan);
+      toast.success("Direção visual gerada pelo Claude.");
+    } catch (visualError) {
+      setError(visualError instanceof Error ? visualError.message : "Nao foi possivel gerar direção visual.");
+    } finally {
+      setDirecting(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 space-y-3 rounded-lg border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h4 className="text-xs font-semibold">Direção visual dos apoios</h4>
+          <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+            Claude analisa a narrativa completa e decide quando o visual ajuda ou apenas repete a fala.
+          </p>
+        </div>
+        <Button type="button" size="sm" variant="secondary" onClick={() => void requestVisualDirection()} disabled={loading || directing || !scenePlan}>
+          <Sparkles className="h-3.5 w-3.5" /> {directing ? "Claude pensando..." : "Gerar direção visual com Claude"}
+        </Button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">Esta ação usa tokens Claude e salva uma direção estruturada, sem gerar imagens ou vídeo.</p>
+      {loading ? <p className="text-xs text-muted-foreground">Carregando direção visual...</p> : null}
+      {visualPlan ? (
+        <div className="space-y-2">
+          {visualPlan.scenes.map((scene, index) => (
+            <div key={scene.sceneId} className="rounded-md border bg-background p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold">Cena {index + 1}</span>
+                <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium uppercase">
+                  {scene.visual.type === "none" ? "Somente avatar" : scene.visual.layout || scene.visual.type}
+                </span>
+              </div>
+              {scene.visual.type === "none" ? (
+                <p className="text-xs text-muted-foreground">Nenhum apoio visual recomendado nesta cena.</p>
+              ) : (
+                <div className="space-y-1 text-xs">
+                  <p className="font-semibold">{scene.visual.headline || "Sem headline"}</p>
+                  {scene.visual.body ? <p className="text-muted-foreground">{scene.visual.body}</p> : null}
+                  {scene.visual.purpose ? <p className="text-[11px] text-muted-foreground">Objetivo: {scene.visual.purpose}</p> : null}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
     </div>
   );
 }

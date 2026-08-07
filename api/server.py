@@ -187,6 +187,11 @@ def _ai_db() -> sqlite3.Connection:
             plan_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS visual_plans (
+            script_id TEXT PRIMARY KEY,
+            plan_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS visual_packs (
             script_id TEXT PRIMARY KEY,
             pack_json TEXT NOT NULL,
@@ -465,6 +470,60 @@ def _save_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, 
         conn.execute(
             """
             INSERT INTO scene_plans(script_id, plan_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                plan_json = excluded.plan_json,
+                updated_at = excluded.updated_at
+            """,
+            (script_id, json.dumps(plan, ensure_ascii=False), plan["updatedAt"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return plan
+
+
+VIDEO_VISUAL_DESIGN_SYSTEM_VERSION = "video-vertical-v1"
+VIDEO_VISUAL_TYPES = frozenset({"none", "full_slide", "overlay", "statistic", "comparison", "quote"})
+VIDEO_VISUAL_LAYOUTS = frozenset(
+    {
+        "hero_photo",
+        "photo_split",
+        "big_statement",
+        "question",
+        "myth_fact",
+        "number_stat",
+        "three_points",
+        "explainer",
+        "doctor_quote",
+        "photo_overlay",
+        "do_dont",
+        "cta_photo",
+    }
+)
+
+
+def _get_visual_plan(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT plan_json FROM visual_plans WHERE script_id = ?",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return json.loads(str(row["plan_json"]))
+
+
+def _save_visual_plan(script_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    plan = {**plan, "scriptId": script_id, "updatedAt": _now()}
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO visual_plans(script_id, plan_json, updated_at)
             VALUES (?, ?, ?)
             ON CONFLICT(script_id) DO UPDATE SET
                 plan_json = excluded.plan_json,
@@ -2048,7 +2107,18 @@ class SceneDirectorIn(BaseModel):
     durationSeconds: Literal[10, 15, 30, 45, 60] = 45
 
 
+class VisualDirectorIn(BaseModel):
+    displayText: str = Field(min_length=1, max_length=6000)
+    spokenText: str = Field(default="", max_length=6000)
+    tone: str = Field(default="médico humano e seguro", max_length=300)
+    pace: str = Field(default="frases curtas, com pausas naturais", max_length=300)
+    emotion: str = Field(default="calmo e convincente", max_length=300)
+    emphasisWords: list[str] = Field(default_factory=list, max_length=20)
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+
+
 SCENE_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-scene-director"
+VISUAL_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-visual-director"
 _SCENE_DIRECTOR_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -2064,6 +2134,36 @@ _SCENE_DIRECTOR_SCHEMA = {
                     "reason": {"type": "string"},
                 },
                 "required": ["text", "lookRole", "reason"],
+            },
+        }
+    },
+    "required": ["scenes"],
+}
+_VISUAL_DIRECTOR_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "sceneId": {"type": "string"},
+                    "visual": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "type": {"type": "string"},
+                            "layout": {"type": "string"},
+                            "headline": {"type": "string"},
+                            "body": {"type": "string"},
+                            "purpose": {"type": "string"},
+                        },
+                        "required": ["type", "layout", "headline", "body", "purpose"],
+                    },
+                },
+                "required": ["sceneId", "visual"],
             },
         }
     },
@@ -2286,6 +2386,163 @@ VERSÃO DO PROMPT: {SCENE_DIRECTOR_PROMPT_VERSION}"""
     response = {"ok": True, "provider": "claude", "promptVersion": SCENE_DIRECTOR_PROMPT_VERSION, "scenes": suggestions}
     _record_anthropic_usage("scene-plan.direct", model, message)
     _ai_cache_put("scene-plan.direct", cache_payload, response)
+    return response
+
+
+@app.get("/api/scripts/{script_id}/visual-plan")
+def get_script_visual_plan(script_id: str) -> dict:
+    _find_script(script_id)
+    return {"ok": True, "visualPlan": _get_visual_plan(script_id)}
+
+
+@app.post("/api/scripts/{script_id}/visual-plan/direct")
+def direct_visual_plan(script_id: str, payload: VisualDirectorIn) -> dict:
+    """Analisa o vídeo inteiro e sugere apoios visuais somente após clique explícito."""
+    script = _find_script(script_id)
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de pedir direção visual.")
+    profile = _production_profile(script_id)
+    if not profile:
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes de pedir direção visual.")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(status_code=503, detail="Defina ANTHROPIC_API_KEY para gerar direção visual com Claude.")
+
+    avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    design_system = {
+        "version": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
+        "canvas": "1080x1920",
+        "allowedTypes": sorted(VIDEO_VISUAL_TYPES),
+        "allowedLayouts": sorted(VIDEO_VISUAL_LAYOUTS),
+        "rules": [
+            "headline de 3 a 8 palavras quando houver headline",
+            "linguagem simples e complementar à fala",
+            "não transcrever o roteiro",
+            "não gerar HTML, CSS ou JavaScript",
+        ],
+    }
+    cache_payload = {
+        "promptVersion": VISUAL_DIRECTOR_PROMPT_VERSION,
+        "designSystemVersion": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
+        "script": {
+            "scriptId": script_id,
+            "titulo": script.get("titulo"),
+            "hook": script.get("hook"),
+            "dorConflito": script.get("dorConflito"),
+            "explicacaoSimples": script.get("explicacaoSimples"),
+            "virada": script.get("virada"),
+            "cta": script.get("cta"),
+            "cuidadosMedicos": script.get("cuidadosMedicos"),
+        },
+        "performance": payload.model_dump(),
+        "scenePlan": scene_plan,
+        "avatarSet": avatar_set,
+        "designSystem": design_system,
+    }
+    cached = _ai_cache_get("visual-plan.direct", cache_payload)
+    if cached:
+        return cached
+
+    user_prompt = json.dumps(
+        {
+            "ROTEIRO_COMPLETO": cache_payload["script"],
+            "PERFORMANCE": payload.model_dump(),
+            "PLANO_DE_CENAS": scene_plan,
+            "AVATAR_SET": avatar_set or {"mode": "single", "primaryAvatarId": profile.get("primaryAvatarId")},
+            "DESIGN_SYSTEM": design_system,
+            "COMPLIANCE": "O visual não pode ser mais assertivo que o roteiro. Trate associações como associações.",
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    system_prompt = f"""Você é diretor visual de vídeos médicos verticais.
+Analise o vídeo como uma narrativa completa, considerando o que foi dito antes,
+o que está sendo dito agora e o que será explicado depois.
+
+Regras obrigatórias:
+- Retorne exatamente uma entrada para cada cena do PLANO_DE_CENAS.
+- Use visual.type none quando o médico sozinho for mais forte.
+- Quando usar visual, escolha somente tipos e layouts permitidos no DESIGN_SYSTEM.
+- O visual deve complementar, não repetir ou transcrever, a fala.
+- Headline ideal: 3–8 palavras. Evite parágrafos.
+- Não crie afirmações médicas mais fortes que o roteiro.
+- Não gere HTML, CSS, JavaScript ou avatarId.
+- Retorne somente JSON no schema solicitado.
+
+VERSÃO DO PROMPT: {VISUAL_DIRECTOR_PROMPT_VERSION}"""
+
+    import anthropic
+
+    try:
+        client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_VISUAL_MODEL", os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"))
+        message = client.messages.create(
+            model=model,
+            max_tokens=1600,
+            system=system_prompt,
+            output_config={"format": {"type": "json_schema", "schema": _VISUAL_DIRECTOR_SCHEMA}},
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        raw_text = "".join(getattr(block, "text", "") for block in message.content)
+        parsed = json.loads(raw_text)
+    except anthropic.APIStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="A direção visual do Claude não veio em JSON válido.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao gerar direção visual: {exc}")
+
+    returned_by_id = {
+        str(item.get("sceneId")): item
+        for item in parsed.get("scenes") or []
+        if isinstance(item, dict)
+    }
+    visual_scenes: list[dict[str, Any]] = []
+    for index, scene in enumerate(scene_plan["scenes"]):
+        raw_item = returned_by_id.get(str(scene["id"]))
+        if raw_item is None:
+            raw_items = parsed.get("scenes") or []
+            raw_item = raw_items[index] if index < len(raw_items) and isinstance(raw_items[index], dict) else {}
+        raw_visual = raw_item.get("visual") if isinstance(raw_item, dict) else {}
+        raw_visual = raw_visual if isinstance(raw_visual, dict) else {}
+        visual_type = str(raw_visual.get("type") or "none")
+        if visual_type not in VIDEO_VISUAL_TYPES:
+            visual_type = "none"
+        layout = str(raw_visual.get("layout") or "")
+        if layout not in VIDEO_VISUAL_LAYOUTS:
+            layout = ""
+        headline = re.sub(r"\s+", " ", str(raw_visual.get("headline") or "")).strip()[:180]
+        body = re.sub(r"\s+", " ", str(raw_visual.get("body") or "")).strip()[:500]
+        purpose = re.sub(r"\s+", " ", str(raw_visual.get("purpose") or "")).strip()[:300]
+        if visual_type == "none":
+            layout = ""
+            headline = ""
+            body = ""
+        else:
+            _validate_production_compliance(headline, field=f"Headline visual da cena {index + 1}")
+            _validate_production_compliance(body, field=f"Body visual da cena {index + 1}")
+        visual_scenes.append(
+            {
+                "sceneId": scene["id"],
+                "visual": {
+                    "type": visual_type,
+                    "layout": layout,
+                    "headline": headline,
+                    "body": body,
+                    "purpose": purpose,
+                },
+            }
+        )
+    plan = {
+        "scriptId": script_id,
+        "designSystemVersion": VIDEO_VISUAL_DESIGN_SYSTEM_VERSION,
+        "promptVersion": VISUAL_DIRECTOR_PROMPT_VERSION,
+        "scenes": visual_scenes,
+    }
+    saved_plan = _save_visual_plan(script_id, plan)
+    response = {"ok": True, "provider": "claude", "visualPlan": saved_plan}
+    _record_anthropic_usage("visual-plan.direct", model, message)
+    _ai_cache_put("visual-plan.direct", cache_payload, response)
     return response
 
 

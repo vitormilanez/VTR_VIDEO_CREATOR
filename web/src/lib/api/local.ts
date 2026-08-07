@@ -468,6 +468,40 @@ export interface SceneDirectionSuggestion {
   reason: string;
 }
 
+export type VideoVisualType = "none" | "full_slide" | "overlay" | "statistic" | "comparison" | "quote";
+export type VideoVisualLayout =
+  | "hero_photo"
+  | "photo_split"
+  | "big_statement"
+  | "question"
+  | "myth_fact"
+  | "number_stat"
+  | "three_points"
+  | "explainer"
+  | "doctor_quote"
+  | "photo_overlay"
+  | "do_dont"
+  | "cta_photo";
+
+export interface VisualPlanScene {
+  sceneId: string;
+  visual: {
+    type: VideoVisualType;
+    layout: VideoVisualLayout | "";
+    headline: string;
+    body: string;
+    purpose: string;
+  };
+}
+
+export interface VisualPlan {
+  scriptId: string;
+  designSystemVersion: string;
+  promptVersion: string;
+  scenes: VisualPlanScene[];
+  updatedAt: string;
+}
+
 export interface PackCompliance {
   ok: boolean;
   blocked: boolean;
@@ -698,6 +732,33 @@ export async function generateSceneDirection(
     method: "POST",
     body: JSON.stringify(input),
   });
+  return response;
+}
+
+export async function fetchVisualPlan(scriptId: string): Promise<VisualPlan | null> {
+  const response = await requestJson<{ ok: boolean; visualPlan: VisualPlan | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/visual-plan`,
+    { method: "GET" },
+  );
+  return response.visualPlan;
+}
+
+export async function generateVisualDirection(
+  scriptId: string,
+  input: {
+    displayText: string;
+    spokenText?: string;
+    tone?: string;
+    pace?: string;
+    emotion?: string;
+    emphasisWords?: string[];
+    durationSeconds: 10 | 15 | 30 | 45 | 60;
+  },
+): Promise<{ provider: "claude"; visualPlan: VisualPlan }> {
+  const response = await requestJson<{ ok: boolean; provider: "claude"; visualPlan: VisualPlan }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/visual-plan/direct`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
   return response;
 }
 
