@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from api import server
@@ -69,6 +70,42 @@ class ScenePlanTests(unittest.TestCase):
 
         self.assertEqual(plan["scenes"][0]["avatarId"], "look-only")
         self.assertEqual(plan["scenes"][0]["lookRole"], "close")
+
+    def test_scene_director_requires_explicit_claude_configuration(self) -> None:
+        payload = server.SceneDirectorIn(displayText="Texto educativo para dividir em cenas.")
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": ""}, clear=False), patch.object(
+            server, "_find_script", return_value={"id": "script-director"}
+        ), patch.object(
+            server,
+            "_production_profile",
+            return_value={"avatarMode": "single", "avatarId": "look-only"},
+        ):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.direct_scene_plan("script-director", payload)
+        self.assertEqual(raised.exception.status_code, 503)
+
+    def test_scene_director_cache_avoids_new_paid_call(self) -> None:
+        cached = {
+            "ok": True,
+            "provider": "claude",
+            "promptVersion": server.SCENE_DIRECTOR_PROMPT_VERSION,
+            "scenes": [{"text": "Cache", "lookRole": "primary", "reason": "hook"}],
+        }
+        payload = server.SceneDirectorIn(displayText="Texto educativo para dividir em cenas.")
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False), patch.object(
+            server, "_find_script", return_value={"id": "script-director"}
+        ), patch.object(
+            server,
+            "_production_profile",
+            return_value={"avatarMode": "single", "avatarId": "look-only"},
+        ), patch.object(server, "_ai_cache_get", return_value=cached) as cache_get, patch.object(
+            server, "_record_anthropic_usage"
+        ) as record_usage:
+            result = server.direct_scene_plan("script-director", payload)
+        self.assertEqual(result, cached)
+        self.assertEqual(cache_get.call_args.args[0], "scene-plan.direct")
+        self.assertEqual(cache_get.call_args.args[1]["promptVersion"], server.SCENE_DIRECTOR_PROMPT_VERSION)
+        record_usage.assert_not_called()
 
 
 if __name__ == "__main__":

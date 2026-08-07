@@ -2038,6 +2038,39 @@ class ScenePlanIn(BaseModel):
     scenes: list[ScenePlanSceneIn] = Field(min_length=1, max_length=30)
 
 
+class SceneDirectorIn(BaseModel):
+    displayText: str = Field(min_length=1, max_length=6000)
+    spokenText: str = Field(default="", max_length=6000)
+    tone: str = Field(default="médico humano e seguro", max_length=300)
+    pace: str = Field(default="frases curtas, com pausas naturais", max_length=300)
+    emotion: str = Field(default="calmo e convincente", max_length=300)
+    emphasisWords: list[str] = Field(default_factory=list, max_length=20)
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+
+
+SCENE_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-scene-director"
+_SCENE_DIRECTOR_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "text": {"type": "string"},
+                    "lookRole": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["text", "lookRole", "reason"],
+            },
+        }
+    },
+    "required": ["scenes"],
+}
+
+
 SHORT_DIRECT_VIDEO_DURATIONS = DIRECT_VIDEO_DURATIONS
 SHORT_VIDEO_VOICE_SPEEDS = {key: float(value["speed"]) for key, value in SPEECH_PRESETS.items()}
 
@@ -2148,6 +2181,112 @@ def save_script_scene_plan(script_id: str, payload: ScenePlanIn) -> dict:
     _find_script(script_id)
     plan = _save_scene_plan(script_id, [scene.model_dump() for scene in payload.scenes])
     return {"ok": True, "scenePlan": plan}
+
+
+@app.post("/api/scripts/{script_id}/scene-plan/direct")
+def direct_scene_plan(script_id: str, payload: SceneDirectorIn) -> dict:
+    """Sugere a divisão de cenas somente após ação explícita do usuário."""
+    script = _find_script(script_id)
+    profile = _production_profile(script_id)
+    if not profile:
+        raise HTTPException(status_code=409, detail="Salve o perfil de produção antes de pedir direção ao Claude.")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(status_code=503, detail="Defina ANTHROPIC_API_KEY para gerar direção com Claude.")
+
+    avatar_set = _get_avatar_set(str(profile.get("avatarSetId") or "")) if profile.get("avatarMode") == "set" else None
+    available_roles = [str(look["role"]) for look in (avatar_set or {}).get("looks", []) if look.get("role")]
+    if not available_roles:
+        available_roles = ["primary"]
+    cache_payload = {
+        "promptVersion": SCENE_DIRECTOR_PROMPT_VERSION,
+        "scriptId": script_id,
+        "script": {
+            "titulo": script.get("titulo"),
+            "hook": script.get("hook"),
+            "dorConflito": script.get("dorConflito"),
+            "explicacaoSimples": script.get("explicacaoSimples"),
+            "virada": script.get("virada"),
+            "cta": script.get("cta"),
+            "cuidadosMedicos": script.get("cuidadosMedicos"),
+        },
+        "performance": payload.model_dump(),
+        "avatarMode": profile.get("avatarMode"),
+        "availableRoles": available_roles,
+    }
+    cached = _ai_cache_get("scene-plan.direct", cache_payload)
+    if cached:
+        return cached
+
+    user_prompt = json.dumps(
+        {
+            "IDEIA_E_ROTEIRO": cache_payload["script"],
+            "PERFORMANCE": payload.model_dump(),
+            "AVATAR_SET": {
+                "mode": profile.get("avatarMode"),
+                "availableRoles": available_roles,
+                "instruction": "Escolha somente lookRole. Nunca escolha ou invente avatarId.",
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    system_prompt = f"""Você é diretor de cenas para vídeos curtos médicos em português brasileiro.
+Divida a narrativa em poucas cenas coerentes, sem transformar cada frase em uma cena.
+
+Regras obrigatórias:
+- Preserve exatamente o texto falado; não reescreva a fala.
+- Use 1–2 cenas para vídeos de 10–15s, 2–3 para 30s, 3–4 para 45s e 3–5 para 60s.
+- Mude de posição principalmente no hook, mudança de argumento, virada ou conclusão.
+- Se houver dois ou mais roles disponíveis, use pelo menos dois roles distintos.
+- Escolha somente um lookRole por cena dentre os roles disponíveis no contexto.
+- Nunca retorne avatarId; o backend resolve o avatar real.
+- Uma cena possui um único look fixo. Nunca descreva transição de posição dentro da cena.
+- Retorne somente JSON no schema solicitado.
+
+VERSÃO DO PROMPT: {SCENE_DIRECTOR_PROMPT_VERSION}"""
+
+    import anthropic
+
+    try:
+        client = anthropic.Anthropic()
+        model = os.getenv("ANTHROPIC_SCENE_MODEL", os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"))
+        message = client.messages.create(
+            model=model,
+            max_tokens=1200,
+            system=system_prompt,
+            output_config={"format": {"type": "json_schema", "schema": _SCENE_DIRECTOR_SCHEMA}},
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        raw_text = "".join(getattr(block, "text", "") for block in message.content)
+        parsed = json.loads(raw_text)
+    except anthropic.APIStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="A direção do Claude não veio em JSON válido.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao gerar direção de cenas: {exc}")
+
+    suggestions: list[dict[str, str]] = []
+    for item in parsed.get("scenes") or []:
+        if not isinstance(item, dict):
+            continue
+        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+        if not text:
+            continue
+        role = str(item.get("lookRole") or "primary")
+        suggestions.append(
+            {
+                "text": text,
+                "lookRole": role if role in available_roles else "primary",
+                "reason": re.sub(r"\s+", " ", str(item.get("reason") or "mudança narrativa")).strip(),
+            }
+        )
+    if not suggestions:
+        raise HTTPException(status_code=502, detail="Claude não retornou nenhuma cena utilizável.")
+    response = {"ok": True, "provider": "claude", "promptVersion": SCENE_DIRECTOR_PROMPT_VERSION, "scenes": suggestions}
+    _record_anthropic_usage("scene-plan.direct", model, message)
+    _ai_cache_put("scene-plan.direct", cache_payload, response)
+    return response
 
 
 class NaturalizeScriptIn(BaseModel):

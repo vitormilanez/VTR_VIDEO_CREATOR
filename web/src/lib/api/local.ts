@@ -462,6 +462,12 @@ export interface ScenePlan {
   updatedAt: string;
 }
 
+export interface SceneDirectionSuggestion {
+  text: string;
+  lookRole: AvatarSetRole;
+  reason: string;
+}
+
 export interface PackCompliance {
   ok: boolean;
   blocked: boolean;
@@ -669,6 +675,30 @@ export async function saveScenePlan(
     { method: "PUT", body: JSON.stringify({ scenes }) },
   );
   return response.scenePlan;
+}
+
+export async function generateSceneDirection(
+  scriptId: string,
+  input: {
+    displayText: string;
+    spokenText?: string;
+    tone?: string;
+    pace?: string;
+    emotion?: string;
+    emphasisWords?: string[];
+    durationSeconds: 10 | 15 | 30 | 45 | 60;
+  },
+): Promise<{ provider: "claude"; promptVersion: string; scenes: SceneDirectionSuggestion[] }> {
+  const response = await requestJson<{
+    ok: boolean;
+    provider: "claude";
+    promptVersion: string;
+    scenes: SceneDirectionSuggestion[];
+  }>(`/api/scripts/${encodeURIComponent(scriptId)}/scene-plan/direct`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return response;
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {

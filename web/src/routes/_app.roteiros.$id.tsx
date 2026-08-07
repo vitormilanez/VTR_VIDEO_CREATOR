@@ -25,6 +25,7 @@ import {
   fetchHeyGenStyles,
   fetchProductionProfile,
   fetchScenePlan,
+  generateSceneDirection,
   naturalizeScript,
   saveAvatarSet,
   saveProductionProfile,
@@ -1114,6 +1115,10 @@ function RoteiroDetalhe() {
                   loading={scenePlanLoading}
                   plan={scenePlan}
                   fallbackText={displayText || narrationText}
+                  displayText={displayText || narrationText}
+                  spokenText={spokenText}
+                  durationSeconds={durationSeconds}
+                  performancePlan={performancePlan}
                   availableRoles={sceneRoles}
                   onSaved={setScenePlan}
                 />
@@ -1902,6 +1907,10 @@ function ScenePlanEditor({
   loading,
   plan,
   fallbackText,
+  displayText,
+  spokenText,
+  durationSeconds,
+  performancePlan,
   availableRoles,
   onSaved,
 }: {
@@ -1909,12 +1918,18 @@ function ScenePlanEditor({
   loading: boolean;
   plan: ScenePlan | null;
   fallbackText: string;
+  displayText: string;
+  spokenText: string;
+  durationSeconds: 10 | 15 | 30 | 45 | 60;
+  performancePlan: { tone: string; pace: string; emotion: string; recommendedVoiceSpeed: number } | null;
   availableRoles: AvatarSetRole[];
   onSaved: (plan: ScenePlan) => void;
 }) {
   const [scenes, setScenes] = useState<EditableScene[]>([]);
   const [saving, setSaving] = useState(false);
+  const [directing, setDirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [directionNotice, setDirectionNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (loading) return;
@@ -1948,6 +1963,36 @@ function ScenePlanEditor({
     ]);
   }
 
+  async function requestDirection() {
+    setDirecting(true);
+    setError(null);
+    setDirectionNotice(null);
+    try {
+      const result = await generateSceneDirection(scriptId, {
+        displayText,
+        spokenText,
+        durationSeconds,
+        tone: performancePlan?.tone,
+        pace: performancePlan?.pace,
+        emotion: performancePlan?.emotion,
+      });
+      setScenes(
+        result.scenes.map((scene, index) => ({
+          id: `scene-${index + 1}`,
+          text: scene.text,
+          lookRole: availableRoles.includes(scene.lookRole) ? scene.lookRole : availableRoles[0] || "primary",
+          estimatedStart: 0,
+          estimatedEnd: 0,
+        })),
+      );
+      setDirectionNotice("Claude sugeriu uma divisão. Revise e salve o plano quando estiver de acordo.");
+    } catch (directionError) {
+      setError(directionError instanceof Error ? directionError.message : "Nao foi possivel gerar direção com Claude.");
+    } finally {
+      setDirecting(false);
+    }
+  }
+
   async function save() {
     if (scenes.some((scene) => !scene.text.trim())) {
       setError("Cada cena precisa ter um texto falado.");
@@ -1979,10 +2024,16 @@ function ScenePlanEditor({
             Cada cena usa uma única posição. A troca acontece somente com corte entre cenas.
           </p>
         </div>
-        <Button type="button" size="sm" variant="outline" onClick={addScene}>
-          <Plus className="h-3.5 w-3.5" /> Adicionar cena
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" size="sm" variant="secondary" onClick={() => void requestDirection()} disabled={loading || directing}>
+            <Sparkles className="h-3.5 w-3.5" /> {directing ? "Claude pensando..." : "Gerar direção com Claude"}
+          </Button>
+          <Button type="button" size="sm" variant="outline" onClick={addScene}>
+            <Plus className="h-3.5 w-3.5" /> Adicionar cena
+          </Button>
+        </div>
       </div>
+      <p className="text-[11px] text-muted-foreground">O botão de direção usa tokens Claude e não salva alterações automaticamente.</p>
       {loading ? (
         <p className="text-xs text-muted-foreground">Carregando Scene Plan...</p>
       ) : (
@@ -2049,6 +2100,7 @@ function ScenePlanEditor({
           ))}
         </div>
       )}
+      {directionNotice ? <p className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-status-info">{directionNotice}</p> : null}
       {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
       <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] text-muted-foreground">A direção automática com Claude será adicionada em um próximo slice.</p>
