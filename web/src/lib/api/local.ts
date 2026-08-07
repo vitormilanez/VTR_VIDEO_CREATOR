@@ -1150,6 +1150,7 @@ export async function naturalizeScript(input: {
   ctaMode?: "auto" | "manual" | "none" | "visual";
   manualCta?: string;
   recentCtas?: string[];
+  generationMode?: "direct" | "video_agent";
 }): Promise<{
   text: string;
   displayText: string;

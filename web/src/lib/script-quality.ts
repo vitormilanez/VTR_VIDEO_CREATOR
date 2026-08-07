@@ -59,6 +59,43 @@ export function narrationQualityIssues(
   return Array.from(new Set(issues));
 }
 
+/** Faixa conservadora: o Video Agent adiciona pausas e edicao visual. */
+export function videoAgentMaximumWordsForDuration(durationSeconds: number): number {
+  if (durationSeconds <= 10) return 21;
+  if (durationSeconds <= 15) return 30;
+  if (durationSeconds <= 30) return 62;
+  if (durationSeconds <= 45) return 84;
+  return 108;
+}
+
+export function videoAgentNarrationQualityIssues(text: string, durationSeconds: number): string[] {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const words = normalized.split(/\s+/).filter(Boolean).length;
+  const maximumWords = videoAgentMaximumWordsForDuration(durationSeconds);
+  const issues: string[] = [];
+  if (words > maximumWords) {
+    issues.push(
+      `Texto longo para o HeyGen Video Agent em ${durationSeconds}s (${words} palavras). Encurte para no máximo ${maximumWords}.`,
+    );
+  }
+  const stopWords = new Set([
+    "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e", "em", "esse", "esta",
+    "este", "é", "o", "os", "na", "nas", "no", "nos", "ou", "para", "por", "que", "se", "sua", "um",
+    "uma", "mais", "menos", "muito", "tambem", "pode", "podem", "ser", "sao", "tem", "têm",
+  ]);
+  const sentences = normalized.toLowerCase().match(/[^.!?…]+[.!?…]*/g) ?? [];
+  const sets = sentences
+    .map((sentence) => new Set((sentence.match(/[a-záàâãéêíóôõúç]{4,}/g) ?? []).filter((word) => !stopWords.has(word))))
+    .filter((words) => words.size >= 4);
+  if (sets.some((current, index) => sets.slice(0, index).some((previous) => {
+    const overlap = [...current].filter((word) => previous.has(word)).length / Math.min(current.size, previous.size);
+    return overlap >= 0.5;
+  }))) {
+    issues.push("A fala repete a mesma informação em mais de uma frase.");
+  }
+  return issues;
+}
+
 /** Remove o encerramento selecionado e recoloca uma única vez no fim. */
 export function normalizeNarrationOutro(text: string, outro = DEFAULT_OUTRO): string {
   const selectedOutro = outro.replace(/\s+/g, " ").trim();

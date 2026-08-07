@@ -68,6 +68,23 @@ def duration_word_limits(duration_seconds: int) -> tuple[int, int]:
     }.get(duration_seconds, (85, 108))
 
 
+def video_agent_word_limits(duration_seconds: int) -> tuple[int, int]:
+    """Faixa conservadora para o Video Agent.
+
+    O Agent adiciona pausas, cortes e interacoes visuais. Por isso a mesma
+    quantidade de palavras usada na geracao direta costuma produzir um video
+    mais longo. Esta faixa deixa espaco para essa edicao sem adicionar nenhuma
+    instrucao extra ao prompt enviado ao HeyGen.
+    """
+    return {
+        10: (16, 21),
+        15: (22, 30),
+        30: (45, 62),
+        45: (68, 84),
+        60: (90, 108),
+    }.get(duration_seconds, (68, 84))
+
+
 def speech_preset(mode: str) -> dict[str, Any]:
     return dict(SPEECH_PRESETS.get(mode, SPEECH_PRESETS["natural"]))
 
@@ -234,8 +251,13 @@ def build_performance_prompt(
     cta_mode: CtaMode,
     manual_cta: str,
     recent_ctas: list[str],
+    video_agent: bool = False,
 ) -> PerformancePrompt:
-    minimum_words, maximum_words = duration_word_limits(duration_seconds)
+    minimum_words, maximum_words = (
+        video_agent_word_limits(duration_seconds)
+        if video_agent
+        else duration_word_limits(duration_seconds)
+    )
     cta_instruction = {
         "auto": "Escolha um CTA natural e especifico para o conteudo, sem repetir historico.",
         "manual": f'Use exatamente este CTA, se houver: "{manual_cta.strip()}".',
@@ -255,6 +277,9 @@ Regras:
 - Nao invente informacoes.
 - Use transicoes naturais e pequenas pausas quando fizer sentido.
 - Considere rigorosamente {duration_seconds}s: {minimum_words} a {maximum_words} palavras.
+- Nao repita a mesma noticia, lista de riscos ou conclusao em frases diferentes.
+- Estruture: gancho e fato principal primeiro; explicacao ou exemplo no meio; um unico alerta clinico curto no fim.
+- O alerta clinico deve ocupar no maximo uma frase curta e nao pode repetir o gancho.
 - Prefira "as chamadas canetas para emagrecimento" quando marca especifica nao for essencial.
 - Evite citar repetidamente Mounjaro, Ozempic ou Wegovy.
 - O displayText nunca deve conter grafia fonetica.

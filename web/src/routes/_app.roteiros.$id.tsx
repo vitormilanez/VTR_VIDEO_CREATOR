@@ -12,6 +12,7 @@ import {
   narrationQualityIssues,
   normalizeNarrationOutro,
   removeNarrationOutro,
+  videoAgentNarrationQualityIssues,
 } from "@/lib/script-quality";
 import { editorialToneLabel, prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
@@ -175,6 +176,7 @@ function RoteiroDetalhe() {
     "natural",
   );
   const [generationMode, setGenerationMode] = useState<"direct" | "video_agent">("direct");
+  const heygenAgentMode = generationMode === "video_agent";
   const [musicTracks, setMusicTracks] = useState<MusicTrack[]>([]);
   const [musicTrackId, setMusicTrackId] = useState<string | null>(null);
   const [musicVolume, setMusicVolume] = useState(0.12);
@@ -219,11 +221,16 @@ function RoteiroDetalhe() {
   );
   const latestJob = existingJobs[0];
   const latestPreview = previewJobs[0];
-  const qualityIssues = useMemo(
-    () =>
-      narrationQualityIssues(displayText, durationSeconds, ctaMode === "manual" ? outroText : ""),
-    [ctaMode, displayText, durationSeconds, outroText],
-  );
+  const qualityIssues = useMemo(() => {
+    const base = narrationQualityIssues(
+      displayText,
+      durationSeconds,
+      ctaMode === "manual" ? outroText : "",
+    );
+    return heygenAgentMode
+      ? [...new Set([...base, ...videoAgentNarrationQualityIssues(displayText, durationSeconds)])]
+      : base;
+  }, [ctaMode, displayText, durationSeconds, heygenAgentMode, outroText]);
   const blockingQualityIssues = useMemo(
     () => qualityIssues.filter((issue) => !issue.startsWith("Texto muito curto")),
     [qualityIssues],
@@ -421,7 +428,6 @@ function RoteiroDetalhe() {
     [catalog?.avatars, selectedAvatarSet],
   );
   const avatarSetReady = Boolean(selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId);
-  const heygenAgentMode = generationMode === "video_agent";
   const productionModeReady =
     heygenAgentMode || avatarMode === "single" || Boolean(avatarMode === "set" && sceneGenerationPlan);
   const requiredVisualCount = scenePlan ? Math.max(0, scenePlan.scenes.length - 1) : 0;
@@ -823,6 +829,7 @@ function RoteiroDetalhe() {
           .map((job) => String(job.productionSettings?.outroText || ""))
           .filter(Boolean)
           .slice(0, 5),
+        generationMode,
       });
       setDisplayText(naturalized.displayText);
       setNarrationText(naturalized.displayText);
@@ -1066,6 +1073,8 @@ function RoteiroDetalhe() {
                       <Sparkles className="mr-1 h-4 w-4" />
                       {naturalizing
                         ? "Ajustando..."
+                        : heygenAgentMode
+                          ? `Otimizar para Video Agent (${durationSeconds}s)`
                         : narrationWords > maximumWordsForDuration(durationSeconds)
                           ? `Encurtar para ${durationSeconds}s com Claude`
                           : "Melhorar com Claude"}
@@ -1119,7 +1128,9 @@ function RoteiroDetalhe() {
                       <div className="flex items-center gap-1.5 font-semibold">
                         <TriangleAlert className="h-3.5 w-3.5" />
                         {blockingQualityIssues.length
-                          ? "Revise antes de enviar ao HeyGen"
+                          ? heygenAgentMode
+                            ? "Ajuste a fala antes de enviar ao Video Agent"
+                            : "Revise antes de enviar ao HeyGen"
                           : "Aviso antes do envio"}
                       </div>
                       {qualityIssues.some((issue) => issue.includes("frase final")) ? (
@@ -1143,6 +1154,11 @@ function RoteiroDetalhe() {
                         </li>
                       ))}
                     </ul>
+                    {heygenAgentMode ? (
+                      <p className="mt-2">
+                        O Video Agent cria pausas e interações; por isso a fala precisa ser mais curta para respeitar a duração escolhida.
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
               </div>

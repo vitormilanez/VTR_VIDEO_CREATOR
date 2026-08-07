@@ -70,6 +70,7 @@ from api.services.script_performance import (
     preview_text,
     speech_speed,
     strip_known_outros,
+    video_agent_word_limits,
 )
 from api.services.video_generation import (
     DIRECT_VIDEO_DURATIONS,
@@ -3429,6 +3430,7 @@ class NaturalizeScriptIn(BaseModel):
     ctaMode: Literal["auto", "manual", "none", "visual"] = "auto"
     manualCta: str = Field(default="", max_length=240)
     recentCtas: list[str] = Field(default_factory=list)
+    generationMode: Literal["direct", "video_agent"] = "direct"
 
 
 _NATURAL_SCRIPT_SCHEMA = PERFORMANCE_SCHEMA
@@ -3441,6 +3443,7 @@ def _natural_script_system(duration_seconds: int, outro: str = MANDATORY_VIDEO_O
         cta_mode="manual",
         manual_cta=outro,
         recent_ctas=[],
+        video_agent=False,
     )
     return prompt.system
 
@@ -3565,6 +3568,8 @@ REGRAS OBRIGATORIAS PARA TODO TOM:
 - Quando houver dado numerico, trate como "estudos sugerem/associam", nunca como verdade absoluta.
 - Respeite a observacaoCompliance da ideia.
 - O texto falado deve ser portugues brasileiro falado, espontaneo, humano, com frases curtas.
+- Diga cada informacao uma unica vez. Nao repita listas de riscos, achados ou o gancho com palavras diferentes.
+- Quando houver artigo/fonte, dedique a maior parte da fala ao fato, contexto e exemplo da noticia. Reserve o cuidado clinico para uma unica frase curta no fim, imediatamente antes do encerramento.
 - Para {duration_seconds} segundos, escreva textoFalado entre {_duration_word_limits(duration_seconds)[0]} e {_duration_word_limits(duration_seconds)[1]} palavras.
 - Nunca devolva um resumo curto: desenvolva hook, contexto, explicacao, virada e encerramento.
 {ending_rule}
@@ -3592,6 +3597,7 @@ def naturalize_script(payload: NaturalizeScriptIn) -> dict:
         cta_mode=payload.ctaMode,
         manual_cta=payload.manualCta or payload.outro,
         recent_ctas=payload.recentCtas,
+        video_agent=payload.generationMode == "video_agent",
     )
     try:
         client = anthropic.Anthropic()
@@ -7296,11 +7302,50 @@ def _narration_quality_issues(
     return list(dict.fromkeys(issues))
 
 
+def _has_repeated_narrative_sentence(text: str) -> bool:
+    """Detecta frases que repetem substancialmente a mesma informacao."""
+    sentences = re.findall(r"[^.!?…]+[.!?…]*", text.lower())
+    stop_words = {
+        "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e", "em", "esse", "esta",
+        "este", "é", "o", "os", "na", "nas", "no", "nos", "ou", "para", "por", "que", "se", "sua", "um",
+        "uma", "mais", "menos", "muito", "tambem", "pode", "podem", "ser", "sao", "tem", "têm",
+    }
+    token_sets: list[set[str]] = []
+    for sentence in sentences:
+        tokens = {
+            token
+            for token in re.findall(r"[a-záàâãéêíóôõúç]{4,}", sentence)
+            if token not in stop_words
+        }
+        if len(tokens) >= 4:
+            token_sets.append(tokens)
+    for index, current in enumerate(token_sets):
+        for previous in token_sets[:index]:
+            overlap = len(current & previous) / min(len(current), len(previous))
+            if overlap >= 0.5:
+                return True
+    return False
+
+
+def _video_agent_narration_quality_issues(text: str, duration_seconds: int) -> list[str]:
+    word_count = len([word for word in re.split(r"\s+", text.strip()) if word])
+    _minimum_words, maximum_words = video_agent_word_limits(duration_seconds)
+    issues: list[str] = []
+    if word_count > maximum_words:
+        issues.append(
+            f"Texto longo para o HeyGen Video Agent em {duration_seconds}s ({word_count} palavras; maximo {maximum_words})"
+        )
+    if _has_repeated_narrative_sentence(text):
+        issues.append("A fala repete a mesma informacao em mais de uma frase")
+    return issues
+
+
 def _validate_final_narration(
     script: dict[str, Any],
     narration_text: str | None,
     duration_seconds: int = 45,
     outro: str = MANDATORY_VIDEO_OUTRO,
+    generation_mode: str = "direct",
 ) -> str:
     """Valida exatamente a fala que sera incorporada ao prompt pago do HeyGen."""
     text = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
@@ -7315,6 +7360,8 @@ def _validate_final_narration(
         for issue in _narration_quality_issues(final_text, duration_seconds, selected_outro)
         if not issue.startswith("Texto muito curto")
     ]
+    if generation_mode == "video_agent":
+        quality_issues.extend(_video_agent_narration_quality_issues(final_text, duration_seconds))
     if quality_issues:
         reasons = "; ".join(quality_issues)
         raise HTTPException(
@@ -7346,6 +7393,7 @@ def _finalize_video_texts(payload: VideoCreateIn, script: dict[str, Any]) -> tup
             source_display,
             payload.durationSeconds,
             payload.outroText,
+            payload.generationMode,
         )
     )
     final_spoken = re.sub(
