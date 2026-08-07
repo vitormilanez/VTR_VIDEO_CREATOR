@@ -23,6 +23,13 @@ VIDEO_FPS = 30
 
 
 @dataclass(frozen=True)
+class TimedOverlay:
+    path: Path
+    start_seconds: float
+    end_seconds: float
+
+
+@dataclass(frozen=True)
 class CompositionScene:
     scene_id: str
     video_path: Path
@@ -32,6 +39,7 @@ class CompositionScene:
     slide_duration_seconds: float = 1.5
     visual_animation: str = "fade"
     overlay_paths: tuple[Path, ...] = ()
+    timed_overlays: tuple[TimedOverlay, ...] = ()
     captions_path: Path | None = None
 
 
@@ -184,6 +192,10 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
             raise ValueError("A duração do apoio visual deve estar entre 0 e 60 segundos.")
     for overlay in scene.overlay_paths:
         _require_file(overlay, f"Overlay da {scene.scene_id}")
+    for overlay in scene.timed_overlays:
+        _require_file(overlay.path, f"Overlay temporizado da {scene.scene_id}")
+        if overlay.start_seconds < 0 or overlay.end_seconds <= overlay.start_seconds:
+            raise ValueError(f"Intervalo inválido no overlay temporizado da {scene.scene_id}.")
     if scene.captions_path:
         _require_file(scene.captions_path, f"Legendas da {scene.scene_id}")
 
@@ -202,6 +214,9 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
     overlay_start_index = 1 + (1 if slide_input_index is not None else 0)
     for overlay in scene.overlay_paths:
         input_args.extend(["-loop", "1", "-i", str(overlay)])
+    timed_overlay_start_index = overlay_start_index + len(scene.overlay_paths)
+    for overlay in scene.timed_overlays:
+        input_args.extend(["-loop", "1", "-i", str(overlay.path)])
     for caption_asset, _start, _end in caption_assets:
         input_args.extend(["-loop", "1", "-i", str(caption_asset)])
     filters = [
@@ -243,8 +258,18 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
         filters.append(f"[{index}:v]format=rgba[{overlay_label}]")
         filters.append(f"[{previous}][{overlay_label}]overlay=0:0:shortest=1[{output_label}]")
         previous = output_label
+    for timed_index, overlay in enumerate(scene.timed_overlays):
+        input_index = timed_overlay_start_index + timed_index
+        overlay_label = f"timedoverlay{timed_index}"
+        output_label = f"timedcomposed{timed_index}"
+        filters.append(f"[{input_index}:v]format=rgba[{overlay_label}]")
+        filters.append(
+            f"[{previous}][{overlay_label}]overlay=0:0:shortest=1:"
+            f"enable='between(t,{overlay.start_seconds:.3f},{overlay.end_seconds:.3f})'[{output_label}]"
+        )
+        previous = output_label
     for cue_index, (_caption_asset, start, end) in enumerate(caption_assets):
-        input_index = overlay_start_index + len(scene.overlay_paths) + cue_index
+        input_index = timed_overlay_start_index + len(scene.timed_overlays) + cue_index
         output_label = f"captioned{cue_index}"
         filters.append(f"[{input_index}:v]format=rgba[caption{cue_index}]")
         filters.append(

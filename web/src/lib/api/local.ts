@@ -1222,6 +1222,137 @@ export function videoDownloadUrl(jobId: string): string {
   return `${BASE}/api/videos/${encodeURIComponent(jobId)}/download`;
 }
 
+export type PostProductionStatus =
+  | "queued"
+  | "transcribing"
+  | "planning"
+  | "preflight"
+  | "rendering_preview"
+  | "preview_ready"
+  | "failed"
+  | "cancelled"
+  | "stale"
+  | "needs_review";
+
+export interface PostProductionJob {
+  id: string;
+  kind: "post_production";
+  videoJobId: string;
+  status: PostProductionStatus;
+  progresso: number;
+  etapa: string;
+  criadoEm: string;
+  atualizadoEm: string;
+  erro?: string;
+  plannerMode?: "cache" | "fallback" | "anthropic";
+}
+
+export interface VisualTimelineEvent {
+  id: string;
+  startWordIndex: number;
+  endWordIndex: number;
+  startMs: number;
+  endMs: number;
+  spokenText: string;
+  interactionType:
+    | "none"
+    | "caption_emphasis"
+    | "kinetic_text"
+    | "progressive_list"
+    | "supporting_visual"
+    | "cta_card";
+  visualText: string;
+  enabled: boolean;
+  reviewStatus: "pending" | "approved" | "rejected";
+  reason: string;
+  confidence: number;
+}
+
+export interface PostProductionArtifacts {
+  transcript: {
+    text: string;
+    language: string;
+    durationMs: number;
+    words: Array<{ index: number; startMs: number; endMs: number; text: string }>;
+  };
+  timeline: {
+    version: string;
+    stale: boolean;
+    events: VisualTimelineEvent[];
+  };
+}
+
+export interface PreflightReport {
+  ok: boolean;
+  checkedAt: string;
+  findings: Array<{
+    code: string;
+    classification: "BLOCKER" | "WARNING" | "INFO";
+    message: string;
+    eventId?: string;
+  }>;
+}
+
+export async function createPostProduction(videoJobId: string): Promise<PostProductionJob> {
+  const response = await postJson<{ job: PostProductionJob }>("/api/post-production", {
+    videoJobId,
+  });
+  return response.job;
+}
+
+export async function fetchPostProduction(jobId: string): Promise<PostProductionJob> {
+  const response = await requestJson<{ job: PostProductionJob }>(
+    `/api/post-production/${encodeURIComponent(jobId)}`,
+    {},
+  );
+  return response.job;
+}
+
+export async function fetchPostProductionArtifacts(
+  jobId: string,
+): Promise<PostProductionArtifacts> {
+  return requestJson<PostProductionArtifacts>(
+    `/api/post-production/${encodeURIComponent(jobId)}/artifacts`,
+    {},
+  );
+}
+
+export async function updatePostProductionEvents(
+  jobId: string,
+  events: Array<Pick<VisualTimelineEvent, "id"> & Partial<Pick<VisualTimelineEvent, "enabled" | "visualText" | "reviewStatus">>>,
+): Promise<{ job: PostProductionJob; timeline: PostProductionArtifacts["timeline"] }> {
+  return requestJson(
+    `/api/post-production/${encodeURIComponent(jobId)}/events`,
+    { method: "PATCH", body: JSON.stringify({ events }) },
+  );
+}
+
+export async function runPostProductionPreflight(
+  jobId: string,
+): Promise<{ ok: boolean; report: PreflightReport; job: PostProductionJob }> {
+  return postJson(`/api/post-production/${encodeURIComponent(jobId)}/preflight`, {});
+}
+
+export async function renderPostProductionPreview(jobId: string): Promise<PostProductionJob> {
+  const response = await postJson<{ job: PostProductionJob }>(
+    `/api/post-production/${encodeURIComponent(jobId)}/render`,
+    {},
+  );
+  return response.job;
+}
+
+export async function replanPostProduction(jobId: string): Promise<PostProductionJob> {
+  const response = await postJson<{ job: PostProductionJob }>(
+    `/api/post-production/${encodeURIComponent(jobId)}/replan`,
+    {},
+  );
+  return response.job;
+}
+
+export function postProductionPreviewUrl(jobId: string, download = false): string {
+  return `${BASE}/api/post-production/${encodeURIComponent(jobId)}/preview${download ? "?download=true" : ""}`;
+}
+
 export interface CutClip {
   id?: string;
   title: string;

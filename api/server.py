@@ -79,6 +79,14 @@ from api.services.video_generation import (
 )
 from api.services.scene_generation import build_scene_generation_result
 from api.services.video_composer import CompositionScene, compose_video
+from api.services.post_production import (
+    analyze_post_production,
+    idempotency_key as post_production_idempotency_key,
+    load_artifacts as load_post_production_artifacts,
+    render_preview as render_post_production_preview,
+    run_preflight as run_post_production_preflight,
+    save_event_updates as save_post_production_event_updates,
+)
 from api.services.pack_context import PACK_CONTEXT_VERSION, build_pack_context
 from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
@@ -96,6 +104,7 @@ HEYGEN_AVATAR_CACHE = ROOT / "data" / "heygen_avatar_cache.json"
 OPERATIONAL_DB = ROOT / "data" / "operations.db"
 CUT_UPLOADS = ROOT / "data" / "cut_uploads"
 CUT_OUTPUTS = ROOT / "data" / "cuts"
+POST_PRODUCTION_OUTPUTS = ROOT / "data" / "post_production"
 PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
 PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
 VIDEO_SLIDE_OUTPUTS = ROOT / "data" / "video_slides"
@@ -4423,6 +4432,241 @@ def video_file(job_id: str) -> FileResponse:
     return _composed_video_file_response(job, download=False)
 
 
+class PostProductionCreateIn(BaseModel):
+    videoJobId: str = Field(min_length=1, max_length=160)
+
+
+class PostProductionEventUpdateIn(BaseModel):
+    id: str = Field(min_length=1, max_length=160)
+    enabled: bool | None = None
+    visualText: str | None = Field(default=None, max_length=100)
+    reviewStatus: Literal["pending", "approved", "rejected"] | None = None
+
+
+class PostProductionEventsIn(BaseModel):
+    events: list[PostProductionEventUpdateIn] = Field(max_length=100)
+
+
+def _launch_post_production_analysis(job_id: str) -> None:
+    worker = threading.Thread(
+        target=analyze_post_production,
+        kwargs={
+            "store": _job_store(),
+            "job_id": job_id,
+            "output_root": POST_PRODUCTION_OUTPUTS,
+            "project_root": ROOT,
+            "cache_get": _ai_cache_get,
+            "cache_put": _ai_cache_put,
+            "record_usage": _record_anthropic_usage,
+        },
+        daemon=True,
+        name=f"post-production-analysis-{job_id}",
+    )
+    worker.start()
+
+
+def _launch_post_production_render(job_id: str) -> None:
+    def render() -> None:
+        try:
+            render_post_production_preview(
+                store=_job_store(),
+                job_id=job_id,
+                output_root=POST_PRODUCTION_OUTPUTS,
+            )
+        except Exception as exc:
+            current = _job_store().get("post_production", job_id)
+            if current and current.get("status") != "cancelled":
+                current.update(
+                    status="failed",
+                    etapa="Falha ao renderizar prévia",
+                    erro=str(exc)[-1200:],
+                    atualizadoEm=_now(),
+                )
+                _job_store().upsert("post_production", current)
+
+    threading.Thread(
+        target=render,
+        daemon=True,
+        name=f"post-production-render-{job_id}",
+    ).start()
+
+
+@app.post("/api/post-production")
+def create_post_production(payload: PostProductionCreateIn) -> dict:
+    video_job = _job_store().get("video", payload.videoJobId)
+    if not video_job or video_job.get("status") != "pronto" or not (
+        video_job.get("videoUrl") or _local_output_path(video_job.get("outputPath"))
+    ):
+        raise HTTPException(status_code=409, detail="A pós-produção exige um vídeo pronto.")
+    POST_PRODUCTION_OUTPUTS.mkdir(parents=True, exist_ok=True)
+    temporary = POST_PRODUCTION_OUTPUTS / f"incoming-{uuid.uuid4().hex}.mp4"
+    try:
+        _copy_or_download_video(video_job, temporary)
+        key = post_production_idempotency_key(temporary)
+        now = _now()
+        job_id = f"post-{uuid.uuid4().hex[:16]}"
+        job = {
+            "id": job_id,
+            "kind": "post_production",
+            "videoJobId": payload.videoJobId,
+            "scriptId": video_job.get("scriptId"),
+            "status": "queued",
+            "progresso": 2,
+            "etapa": "Na fila para análise",
+            "criadoEm": now,
+            "atualizadoEm": now,
+        }
+        reserved, reservation = _job_store().reserve(
+            "post_production",
+            job,
+            idempotency_key=key,
+        )
+        if reservation == "duplicate":
+            if reserved.get("status") in {"failed", "cancelled", "stale"}:
+                existing_source = POST_PRODUCTION_OUTPUTS / str(reserved["id"]) / "source.mp4"
+                if existing_source.is_file():
+                    reserved.update(
+                        status="queued",
+                        progresso=2,
+                        etapa="Reiniciando análise",
+                        erro=None,
+                        atualizadoEm=_now(),
+                    )
+                    _job_store().upsert("post_production", reserved)
+                    _launch_post_production_analysis(str(reserved["id"]))
+            return {"ok": True, "job": reserved, "duplicate": True}
+        directory = POST_PRODUCTION_OUTPUTS / job_id
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary.replace(directory / "source.mp4")
+        _launch_post_production_analysis(job_id)
+        return {"ok": True, "job": job, "duplicate": False}
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@app.get("/api/post-production/{job_id}")
+def get_post_production(job_id: str) -> dict:
+    job = _job_store().get("post_production", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de pós-produção não encontrado.")
+    return {"job": job}
+
+
+@app.get("/api/post-production/{job_id}/artifacts")
+def get_post_production_artifacts(job_id: str) -> dict:
+    if not _job_store().get("post_production", job_id):
+        raise HTTPException(status_code=404, detail="Job de pós-produção não encontrado.")
+    try:
+        transcript, timeline = load_post_production_artifacts(POST_PRODUCTION_OUTPUTS, job_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"transcript": transcript, "timeline": timeline}
+
+
+@app.patch("/api/post-production/{job_id}/events")
+def update_post_production_events(job_id: str, payload: PostProductionEventsIn) -> dict:
+    job = _job_store().get("post_production", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de pós-produção não encontrado.")
+    try:
+        timeline = save_post_production_event_updates(
+            output_root=POST_PRODUCTION_OUTPUTS,
+            job_id=job_id,
+            updates=[event.model_dump(exclude_none=True) for event in payload.events],
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    job.update(status="needs_review", etapa="Alterações salvas; execute o preflight", atualizadoEm=_now())
+    _job_store().upsert("post_production", job)
+    return {"ok": True, "timeline": timeline, "job": job}
+
+
+@app.post("/api/post-production/{job_id}/preflight")
+def preflight_post_production(job_id: str) -> dict:
+    job = _job_store().get("post_production", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de pós-produção não encontrado.")
+    try:
+        report = run_post_production_preflight(output_root=POST_PRODUCTION_OUTPUTS, job_id=job_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    stale = any(
+        finding.get("code") in {"timeline.stale", "video.stale"}
+        for finding in report.get("findings", [])
+    )
+    job.update(
+        status="needs_review" if report["ok"] else ("stale" if stale else "failed"),
+        etapa="Preflight aprovado" if report["ok"] else "Preflight com blockers",
+        atualizadoEm=_now(),
+    )
+    _job_store().upsert("post_production", job)
+    return {"ok": report["ok"], "report": report, "job": job}
+
+
+@app.post("/api/post-production/{job_id}/render")
+def render_post_production(job_id: str) -> dict:
+    job = _job_store().get("post_production", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de pós-produção não encontrado.")
+    if job.get("status") not in {"needs_review", "failed", "preview_ready"}:
+        raise HTTPException(status_code=409, detail="A análise ainda não está pronta para renderização.")
+    report = run_post_production_preflight(output_root=POST_PRODUCTION_OUTPUTS, job_id=job_id)
+    if not report["ok"]:
+        raise HTTPException(status_code=409, detail={"message": "Preflight com blockers.", "report": report})
+    job.update(status="rendering_preview", progresso=84, etapa="Renderização na fila", atualizadoEm=_now())
+    _job_store().upsert("post_production", job)
+    _launch_post_production_render(job_id)
+    return {"ok": True, "job": job}
+
+
+@app.post("/api/post-production/{job_id}/replan")
+def replan_post_production(job_id: str) -> dict:
+    job = _job_store().get("post_production", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de pós-produção não encontrado.")
+    if job.get("status") in {"queued", "transcribing", "planning", "preflight", "rendering_preview"}:
+        raise HTTPException(status_code=409, detail="O job já está em processamento.")
+    source = POST_PRODUCTION_OUTPUTS / job_id / "source.mp4"
+    if not source.is_file():
+        raise HTTPException(status_code=409, detail="O vídeo original do job não está disponível.")
+    job.update(
+        status="queued",
+        progresso=5,
+        etapa="Regenerando plano visual",
+        erro=None,
+        atualizadoEm=_now(),
+    )
+    _job_store().upsert("post_production", job)
+    _launch_post_production_analysis(job_id)
+    return {"ok": True, "job": job}
+
+
+@app.post("/api/post-production/{job_id}/cancel")
+def cancel_post_production(job_id: str) -> dict:
+    job = _job_store().get("post_production", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de pós-produção não encontrado.")
+    if job.get("status") in {"preview_ready", "failed", "cancelled"}:
+        return {"ok": True, "job": job}
+    job.update(status="cancelled", etapa="Processamento cancelado", atualizadoEm=_now())
+    _job_store().upsert("post_production", job)
+    return {"ok": True, "job": job}
+
+
+@app.get("/api/post-production/{job_id}/preview")
+def post_production_preview(job_id: str, download: bool = False) -> FileResponse:
+    job = _job_store().get("post_production", job_id)
+    path = POST_PRODUCTION_OUTPUTS / job_id / "preview.mp4"
+    if not job or job.get("status") != "preview_ready" or not path.is_file():
+        raise HTTPException(status_code=404, detail="Prévia ainda não está disponível.")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"{job_id}-preview.mp4" if download else None,
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
 class CutCreateIn(BaseModel):
     requestId: str = Field(min_length=8, max_length=100)
     videoJobId: str | None = None
@@ -4566,6 +4810,31 @@ def resume_interrupted_cut_projects() -> None:
             youtube_url=youtube_url,
             source_path=source_path,
         )
+
+
+@app.on_event("startup")
+def resume_interrupted_post_production_jobs() -> None:
+    store = _job_store()
+    for job in store.list("post_production"):
+        status = job.get("status")
+        if status not in {"queued", "transcribing", "planning", "preflight", "rendering_preview"}:
+            continue
+        source = POST_PRODUCTION_OUTPUTS / str(job["id"]) / "source.mp4"
+        if not source.is_file():
+            job.update(
+                status="failed",
+                etapa="Não foi possível retomar",
+                erro="O vídeo original do job não está disponível.",
+                atualizadoEm=_now(),
+            )
+            store.upsert("post_production", job)
+            continue
+        job.update(etapa="Retomando processamento", atualizadoEm=_now())
+        store.upsert("post_production", job)
+        if status == "rendering_preview":
+            _launch_post_production_render(str(job["id"]))
+        else:
+            _launch_post_production_analysis(str(job["id"]))
 
 
 @app.post("/api/cuts")

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
+import sys
 from pathlib import Path
 
-from faster_whisper import WhisperModel
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-def clean(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+from api.services.transcript_service import transcribe_video
 
 
 def main() -> None:
@@ -19,48 +19,10 @@ def main() -> None:
     parser.add_argument("--model", default="small")
     args = parser.parse_args()
 
-    model = WhisperModel(args.model, device="auto", compute_type="int8")
-    raw_segments, info = model.transcribe(
-        str(args.video),
-        language="pt",
-        beam_size=5,
-        vad_filter=True,
-        word_timestamps=True,
-    )
-    segments = []
-    for segment in raw_segments:
-        text = clean(segment.text)
-        if not text:
-            continue
-        segments.append(
-            {
-                "start": round(float(segment.start), 3),
-                "end": round(float(segment.end), 3),
-                "text": text,
-                "words": [
-                    {
-                        "start": round(float(word.start), 3),
-                        "end": round(float(word.end), 3),
-                        "text": clean(word.word),
-                    }
-                    for word in (segment.words or [])
-                    if clean(word.word)
-                ],
-            }
-        )
-
+    transcript = transcribe_video(args.video, model_name=args.model)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
-        json.dumps(
-            {
-                "language": getattr(info, "language", "pt"),
-                "duration": float(getattr(info, "duration", 0) or 0),
-                "segments": segments,
-                "text": " ".join(segment["text"] for segment in segments),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(transcript, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 

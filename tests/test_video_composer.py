@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from api import server
-from api.services.video_composer import CompositionScene, compose_video
+from api.services.video_composer import CompositionScene, TimedOverlay, compose_video
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
@@ -168,6 +168,39 @@ class VideoComposerTests(unittest.TestCase):
             )
             duration = float(json.loads(probe.stdout)["format"]["duration"])
             self.assertLess(duration, 1.8)
+
+    def test_timed_overlay_keeps_original_duration_and_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            overlay = root / "overlay.png"
+            output = root / "preview.mp4"
+            self._mock_video(source, "blue")
+            self._mock_image(overlay, "green")
+
+            compose_video(
+                [
+                    CompositionScene(
+                        "post-production",
+                        source,
+                        timed_overlays=(TimedOverlay(overlay, 0.15, 0.5),),
+                    )
+                ],
+                output,
+            )
+
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+                    "-show_entries", "format=duration", "-of", "json", str(output),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            metadata = json.loads(probe.stdout)
+            self.assertEqual({stream["codec_type"] for stream in metadata["streams"]}, {"video", "audio"})
+            self.assertAlmostEqual(float(metadata["format"]["duration"]), 0.7, delta=0.15)
 
     def test_server_composes_ready_scene_jobs_into_one_local_final_job(self) -> None:
         with tempfile.TemporaryDirectory(dir=server.ROOT / "data") as temporary:
