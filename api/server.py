@@ -13,6 +13,8 @@ ou:
 from __future__ import annotations
 
 import base64
+from email import policy
+from email.parser import Parser
 import hashlib
 import ipaddress
 import json
@@ -97,7 +99,21 @@ PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
 PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
 VIDEO_SLIDE_OUTPUTS = ROOT / "data" / "video_slides"
 COMPOSED_VIDEO_OUTPUTS = ROOT / "data" / "composed_videos"
+MUSIC_TRACKS_DIR = ROOT / "data" / "music_tracks"
 MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
+
+# Biblioteca local: arquivos enviados pelo usuário, sem upload ou chamada paga.
+# O compositor usa essas faixas apenas depois de as cenas HeyGen ficarem prontas.
+MUSIC_LIBRARY: tuple[dict[str, Any], ...] = (
+    {"id": "soft-focus", "file": "hitslab-soft-soft-music-333111.mp3", "name": "Soft Focus", "artist": "Hitslab", "mood": "Leve e acolhedora", "durationSeconds": 120.03},
+    {"id": "growth-stage", "file": "jonasblakewood-growth-stage-vocal-322013.mp3", "name": "Growth Stage", "artist": "Jonas Blakewood", "mood": "Inspiradora com vocal", "durationSeconds": 166.03},
+    {"id": "yoga-sunrise", "file": "alex-morgan-yoga-sunrise-flow-stretch-578496.mp3", "name": "Yoga Sunrise", "artist": "Alex Morgan", "mood": "Calma e otimista", "durationSeconds": 174.79},
+    {"id": "calm-water", "file": "alex-morgan-calm-still-water-breathing-578483.mp3", "name": "Calm Still Water", "artist": "Alex Morgan", "mood": "Serena e discreta", "durationSeconds": 122.4},
+    {"id": "cartoon-bouncy", "file": "alex-morgan-cartoon-bouncy-chase-antics-578472.mp3", "name": "Cartoon Bouncy", "artist": "Alex Morgan", "mood": "Leve e divertida", "durationSeconds": 76.58},
+    {"id": "sunny-vlog", "file": "alex-morgan-vlog-sunny-travel-diary-578504.mp3", "name": "Sunny Vlog", "artist": "Alex Morgan", "mood": "Solar e descontraída", "durationSeconds": 192.62},
+    {"id": "khokka-pop", "file": "kontraa-khokka-nepalese-pop-music-579826.mp3", "name": "Khokka Pop", "artist": "Kontraa", "mood": "Pop com energia", "durationSeconds": 224.88},
+    {"id": "too-lost", "file": "kontraa-too-lost-trap-soul-music-579792.mp3", "name": "Too Lost", "artist": "Kontraa", "mood": "Trap soul", "durationSeconds": 157.61},
+)
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0")
 
@@ -145,6 +161,32 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _music_track(track_id: str | None) -> dict[str, Any] | None:
+    normalized = str(track_id or "").strip()
+    return next((track for track in MUSIC_LIBRARY if track["id"] == normalized), None)
+
+
+def _music_track_path(track_id: str | None) -> Path | None:
+    track = _music_track(track_id)
+    if not track:
+        return None
+    path = MUSIC_TRACKS_DIR / str(track["file"])
+    if not path.is_file():
+        raise HTTPException(status_code=503, detail=f"A trilha '{track['name']}' não está disponível localmente.")
+    return path
+
+
+def _music_track_response(track: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": track["id"],
+        "name": track["name"],
+        "artist": track["artist"],
+        "mood": track["mood"],
+        "durationSeconds": track["durationSeconds"],
+        "url": f"/api/music-tracks/{quote(str(track['id']), safe='')}/file",
+    }
+
+
 def _ai_db() -> sqlite3.Connection:
     """Abre o banco operacional usado para cache e medicao de chamadas de IA."""
     conn = sqlite3.connect(OPERATIONAL_DB, timeout=30)
@@ -180,6 +222,8 @@ def _ai_db() -> sqlite3.Connection:
             avatar_set_id TEXT,
             primary_avatar_id TEXT,
             position_count INTEGER NOT NULL DEFAULT 1,
+            music_track_id TEXT,
+            music_volume REAL NOT NULL DEFAULT 0.12,
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS avatar_sets (
@@ -219,6 +263,8 @@ def _ai_db() -> sqlite3.Connection:
         ("avatar_set_id", "TEXT"),
         ("primary_avatar_id", "TEXT"),
         ("position_count", "INTEGER NOT NULL DEFAULT 1"),
+        ("music_track_id", "TEXT"),
+        ("music_volume", "REAL NOT NULL DEFAULT 0.12"),
     ):
         try:
             conn.execute(f"ALTER TABLE production_profiles ADD COLUMN {column} {definition}")
@@ -235,7 +281,8 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
         row = conn.execute(
             """
             SELECT script_id, avatar_id, voice_id, speech_mode, generation_mode,
-                   avatar_mode, avatar_set_id, primary_avatar_id, position_count, updated_at
+                   avatar_mode, avatar_set_id, primary_avatar_id, position_count,
+                   music_track_id, music_volume, updated_at
             FROM production_profiles
             WHERE script_id = ?
             """,
@@ -255,6 +302,8 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
         "avatarSetId": row["avatar_set_id"],
         "primaryAvatarId": row["primary_avatar_id"] or row["avatar_id"],
         "positionCount": int(row["position_count"] or 1),
+        "musicTrackId": row["music_track_id"],
+        "musicVolume": float(row["music_volume"] or 0.12),
         "updatedAt": row["updated_at"],
     }
 
@@ -380,6 +429,12 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(status_code=422, detail="primaryAvatarId precisa pertencer ao Avatar Set.")
     if not primary_avatar_id:
         raise HTTPException(status_code=422, detail="Selecione um avatar principal.")
+    music_track_id = str(profile.get("musicTrackId") or "").strip() or None
+    if music_track_id and not _music_track(music_track_id):
+        raise HTTPException(status_code=422, detail="Trilha de fundo não encontrada na biblioteca local.")
+    music_volume = float(profile.get("musicVolume") or 0.12)
+    if not 0.03 <= music_volume <= 0.25:
+        raise HTTPException(status_code=422, detail="O volume da trilha deve estar entre 3% e 25%.")
     saved = {
         "scriptId": str(profile["scriptId"]),
         "avatarId": primary_avatar_id,
@@ -390,6 +445,8 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "avatarSetId": avatar_set_id,
         "primaryAvatarId": primary_avatar_id,
         "positionCount": 2 if avatar_mode == "set" else 1,
+        "musicTrackId": music_track_id,
+        "musicVolume": music_volume,
         "updatedAt": _now(),
     }
     conn = _ai_db()
@@ -398,8 +455,9 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
             """
             INSERT INTO production_profiles(
                 script_id, avatar_id, voice_id, speech_mode, generation_mode,
-                avatar_mode, avatar_set_id, primary_avatar_id, position_count, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                avatar_mode, avatar_set_id, primary_avatar_id, position_count,
+                music_track_id, music_volume, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(script_id) DO UPDATE SET
                 avatar_id = excluded.avatar_id,
                 voice_id = excluded.voice_id,
@@ -409,6 +467,8 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 avatar_set_id = excluded.avatar_set_id,
                 primary_avatar_id = excluded.primary_avatar_id,
                 position_count = excluded.position_count,
+                music_track_id = excluded.music_track_id,
+                music_volume = excluded.music_volume,
                 updated_at = excluded.updated_at
             """,
             (
@@ -421,6 +481,8 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 saved["avatarSetId"],
                 saved["primaryAvatarId"],
                 saved["positionCount"],
+                saved["musicTrackId"],
+                saved["musicVolume"],
                 saved["updatedAt"],
             ),
         )
@@ -525,11 +587,61 @@ def _visual_support_required(scene_index: int, scene_count: int) -> bool:
     return scene_index < _required_visual_support_count(scene_count)
 
 
+def _compact_words(value: str, *, max_words: int, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words]).rstrip(" .,:;") + "…"
+    if len(text) > max_chars:
+        text = text[: max_chars - 1].rstrip(" .,:;") + "…"
+    return text
+
+
+def _semantic_visual_label(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lower = text.casefold()
+    if "caloria" in lower:
+        return "Calorias vazias"
+    if "déficit" in lower or "deficit" in lower:
+        return "Déficit menor"
+    if "controle" in lower or "aliment" in lower:
+        return "Menos controle"
+    if "prioriza" in lower and "álcool" in lower:
+        return "Álcool primeiro"
+    if "gordura" in lower and ("queimar" in lower or "queima" in lower):
+        return "Gordura depois"
+    if "desativa" in lower and "não" in lower:
+        return "Não desativa"
+    if "interfere" in lower:
+        return "Interfere no processo"
+    if "médico" in lower or "medico" in lower:
+        return "Converse com médico"
+    return _compact_words(text, max_words=3, max_chars=24)
+
+
+def _visual_body_points(value: str) -> list[str]:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return []
+    raw_points = re.split(r"\s*[•·;]\s*|\s+\d+[.)]\s+", text)
+    points = [_semantic_visual_label(point.strip(" -–—:.")) for point in raw_points]
+    return [point for point in points if point][:3]
+
+
+def _compact_visual_body(value: str) -> str:
+    points = _visual_body_points(value)
+    if len(points) >= 2:
+        return " • ".join(points)
+    return _compact_words(value, max_words=8, max_chars=76)
+
+
 def _fallback_visual_from_scene(scene: dict[str, Any], index: int) -> dict[str, str]:
     text = re.sub(r"\s+", " ", str(scene.get("text") or "")).strip()
     first_sentence = re.split(r"(?<=[.!?])\s+", text)[0] if text else ""
-    headline = first_sentence[:72].strip(" .,:;") or f"Apoio visual {index + 1}"
-    body = text[len(first_sentence):].strip()[:180] if first_sentence and len(text) > len(first_sentence) else ""
+    headline = _compact_words(first_sentence, max_words=6, max_chars=54) or f"Apoio visual {index + 1}"
+    body = _compact_visual_body(text[len(first_sentence):].strip() if first_sentence and len(text) > len(first_sentence) else "")
     return {
         "type": "full_slide",
         "layout": "big_statement",
@@ -553,8 +665,8 @@ def _normalize_video_visual(
     layout = str(visual.get("layout") or "")
     if layout not in VIDEO_VISUAL_LAYOUTS:
         layout = ""
-    headline = re.sub(r"\s+", " ", str(visual.get("headline") or "")).strip()[:180]
-    body = re.sub(r"\s+", " ", str(visual.get("body") or "")).strip()[:500]
+    headline = _compact_words(str(visual.get("headline") or ""), max_words=7, max_chars=58)
+    body = _compact_visual_body(str(visual.get("body") or ""))
     purpose = re.sub(r"\s+", " ", str(visual.get("purpose") or "")).strip()[:300]
     try:
         start_ratio = float(visual.get("startRatio", 0.65))
@@ -588,6 +700,7 @@ def _normalize_video_visual(
         layout = ""
         headline = ""
         body = ""
+        purpose = ""
         start_ratio = 0.0
         duration_seconds = 0.0
         motion_preset = "none"
@@ -647,6 +760,43 @@ def _video_slide_output_dir(script_id: str) -> Path:
     safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", script_id).strip("-") or "script"
     digest = hashlib.sha256(script_id.encode("utf-8")).hexdigest()[:12]
     return VIDEO_SLIDE_OUTPUTS / f"{safe_id}-{digest}"
+
+
+def _normalize_visual_plan_for_render(script_id: str, visual_plan: dict[str, Any]) -> dict[str, Any]:
+    """Garante N cenas = N-1 apoios antes de desenhar previews locais."""
+    scene_plan = _scene_plan(script_id)
+    if not scene_plan or not scene_plan.get("scenes"):
+        return visual_plan
+    submitted: dict[str, dict[str, Any]] = {}
+    for item in visual_plan.get("scenes") or []:
+        if not isinstance(item, dict):
+            continue
+        scene_id = str(item.get("sceneId") or "")
+        visual = item.get("visual") if isinstance(item.get("visual"), dict) else {}
+        submitted[scene_id] = visual
+    scene_count = len(scene_plan["scenes"])
+    visual_scenes: list[dict[str, Any]] = []
+    for index, scene in enumerate(scene_plan["scenes"]):
+        visual_scenes.append(
+            {
+                "sceneId": scene["id"],
+                "visual": _normalize_video_visual(
+                    submitted.get(str(scene["id"]), {}),
+                    scene=scene,
+                    index=index,
+                    scene_count=scene_count,
+                    strict_required=True,
+                ),
+            }
+        )
+    return {
+        **visual_plan,
+        "scriptId": script_id,
+        "designSystemVersion": str(
+            visual_plan.get("designSystemVersion") or VIDEO_VISUAL_DESIGN_SYSTEM_VERSION
+        ),
+        "scenes": visual_scenes,
+    }
 
 
 def _get_video_slide_render(script_id: str) -> dict[str, Any] | None:
@@ -841,6 +991,11 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
             raise HTTPException(status_code=409, detail="Salve o Visual Plan antes de compor o vídeo final.")
         return None
     visual_plan = visual_plan or {"scenes": []}
+    production_profile = _production_profile(script_id) or {}
+    music_track_id = str(production_profile.get("musicTrackId") or "").strip() or None
+    music_track = _music_track(music_track_id)
+    music_volume = float(production_profile.get("musicVolume") or 0.12)
+    music_path = _music_track_path(music_track_id) if music_track else None
     required_supports = _required_visual_support_count(scene_count)
     visual_by_scene = {
         str(item.get("sceneId")): item.get("visual")
@@ -857,6 +1012,8 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
                 "sources": source_ids,
                 "visualPlanUpdatedAt": visual_plan.get("updatedAt"),
                 "requiredSupportSlides": required_supports,
+                "musicTrackId": music_track_id,
+                "musicVolume": music_volume if music_track_id else None,
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -934,7 +1091,12 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
                     visual_animation=str(visual.get("motionPreset") or "fade") if isinstance(visual, dict) else "fade",
                 )
             )
-        manifest = compose_video(composition_scenes, output_path)
+        manifest = compose_video(
+            composition_scenes,
+            output_path,
+            background_music_path=music_path,
+            background_music_volume=music_volume,
+        )
         final_duration = _probe_video_duration(output_path)
         job.update(
             {
@@ -944,6 +1106,7 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
                 "atualizadoEm": _now(),
                 "duracaoSegundos": round(final_duration or total_duration, 2),
                 "composition": manifest,
+                "backgroundMusic": _music_track_response(music_track) | {"volume": music_volume} if music_track else None,
             }
         )
     except Exception as exc:
@@ -2508,6 +2671,8 @@ class ProductionProfileIn(BaseModel):
     avatarMode: Literal["single", "set"] = "single"
     avatarSetId: str | None = Field(default=None, max_length=160)
     primaryAvatarId: str | None = Field(default=None, max_length=160)
+    musicTrackId: str | None = Field(default=None, max_length=80)
+    musicVolume: float = Field(default=0.12, ge=0.03, le=0.25)
 
 
 class AvatarLookIn(BaseModel):
@@ -2575,7 +2740,7 @@ class VisualPlanIn(BaseModel):
 
 
 SCENE_DIRECTOR_PROMPT_VERSION = "2026-08-07-v1-scene-director"
-VISUAL_DIRECTOR_PROMPT_VERSION = "2026-08-07-v2-visual-director"
+VISUAL_DIRECTOR_PROMPT_VERSION = "2026-08-07-v3-visual-director"
 _SCENE_DIRECTOR_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -2677,6 +2842,21 @@ def get_script_production_profile(script_id: str) -> dict:
     return {"ok": True, "profile": _production_profile(script_id)}
 
 
+@app.get("/api/music-tracks")
+def list_music_tracks() -> dict:
+    """Lista faixas locais disponíveis para a mixagem final, sem custo externo."""
+    return {"ok": True, "tracks": [_music_track_response(track) for track in MUSIC_LIBRARY if (MUSIC_TRACKS_DIR / track["file"]).is_file()]}
+
+
+@app.get("/api/music-tracks/{track_id}/file")
+def music_track_file(track_id: str) -> FileResponse:
+    track = _music_track(track_id)
+    path = _music_track_path(track_id)
+    if not track or not path:
+        raise HTTPException(status_code=404, detail="Trilha não encontrada.")
+    return FileResponse(path, media_type="audio/mpeg", filename=str(track["file"]))
+
+
 @app.put("/api/scripts/{script_id}/production-profile")
 def save_script_production_profile(script_id: str, payload: ProductionProfileIn) -> dict:
     """Persiste avatar/voz/modo associados ao roteiro sem tocar no Sheets."""
@@ -2691,6 +2871,8 @@ def save_script_production_profile(script_id: str, payload: ProductionProfileIn)
             "avatarMode": payload.avatarMode,
             "avatarSetId": payload.avatarSetId,
             "primaryAvatarId": payload.primaryAvatarId,
+            "musicTrackId": payload.musicTrackId,
+            "musicVolume": payload.musicVolume,
         }
     )
     return {"ok": True, "profile": profile}
@@ -3051,6 +3233,7 @@ def render_script_video_slides(script_id: str) -> dict:
     if not visual_plan or not visual_plan.get("scenes"):
         raise HTTPException(status_code=409, detail="Salve a direção visual antes de renderizar os previews.")
     try:
+        visual_plan = _save_visual_plan(script_id, _normalize_visual_plan_for_render(script_id, visual_plan))
         rendered = render_video_slides(_video_slide_output_dir(script_id), visual_plan)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Não foi possível renderizar os previews locais: {exc}") from exc
@@ -3061,13 +3244,14 @@ def render_script_video_slides(script_id: str) -> dict:
 @app.get("/api/scripts/{script_id}/video-slides/{filename}")
 def get_video_slide_file(script_id: str, filename: str) -> FileResponse:
     _find_script(script_id)
-    if Path(filename).name != filename or not filename.endswith(".png"):
+    suffix = Path(filename).suffix.lower()
+    if Path(filename).name != filename or suffix not in {".png", ".svg"}:
         raise HTTPException(status_code=404, detail="Preview não encontrado.")
     path = (_video_slide_output_dir(script_id) / filename).resolve()
     root = _video_slide_output_dir(script_id).resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail="Preview não encontrado.")
-    return FileResponse(path, media_type="image/png")
+    return FileResponse(path, media_type="image/svg+xml" if suffix == ".svg" else "image/png")
 
 
 @app.post("/api/scripts/{script_id}/compose-final-video")
@@ -3105,9 +3289,13 @@ def direct_visual_plan(script_id: str, payload: VisualDirectorIn) -> dict:
             "O apoio aparece durante o áudio do avatar; a troca de avatar/look acontece somente no corte para a próxima cena."
         ),
         "rules": [
-            "headline de 3 a 8 palavras quando houver headline",
+            "apoio de vídeo, não slide explicativo: uma ideia visual por apoio",
+            "headline de 2 a 6 palavras quando houver headline",
+            "body opcional; se usar, no máximo 3 labels curtos separados por •",
+            "cada label do body deve ter no máximo 3 palavras",
             "linguagem simples e complementar à fala",
             "não transcrever o roteiro",
+            "não criar rodapé, disclaimer, texto técnico ou resumo longo",
             "não gerar HTML, CSS ou JavaScript",
             "startRatio sempre entre 0.15 e 0.70 para apoios obrigatórios",
             "durationSeconds entre 1.0 e 5.0",
@@ -3164,7 +3352,11 @@ Regras obrigatórias:
 - motionPreset deve ser um dos presets permitidos.
 - Quando usar visual, escolha somente tipos e layouts permitidos no DESIGN_SYSTEM.
 - O visual deve complementar, não repetir ou transcrever, a fala.
-- Headline ideal: 3–8 palavras. Evite parágrafos.
+- O visual deve parecer apoio de edição em vídeo: objetivo, escaneável e mais visual que textual.
+- Headline ideal: 2–6 palavras. Nunca use parágrafo.
+- Body é opcional. Se necessário, use no máximo 3 labels curtos separados por " • ".
+- Cada label do body deve ter no máximo 3 palavras.
+- Evite frases explicativas completas no body; prefira palavras-chave visuais.
 - Não crie afirmações médicas mais fortes que o roteiro.
 - Não gere HTML, CSS, JavaScript ou avatarId.
 - Retorne somente JSON no schema solicitado.
@@ -3944,19 +4136,19 @@ def _create_video_job(
         job["productionSettings"]["generationMode"] = generation_mode
         job["productionSettings"]["voiceSpeed"] = speech_speed(payload.speechMode)
         _job_store().upsert("video", job)
+        # No modo Video Agent, o conteúdo enviado é somente a fala final já
+        # aprovada/ajustada. Não levamos Scene Plan, Visual Plan, slides ou
+        # instruções visuais locais: a direção e a edição ficam com o HeyGen.
+        agent_text = final_display_text.strip()
+        if not agent_text:
+            raise HTTPException(status_code=400, detail="A fala final não pode estar vazia para o Video Agent.")
+        job["productionSettings"]["agentInput"] = "approved_text_only"
+        _job_store().upsert("video", job)
         args = [
             "video-agent",
             "create",
             "--prompt",
-            _video_prompt(
-                script,
-                duration_seconds=payload.durationSeconds,
-                speech_mode=payload.speechMode,
-                captions=payload.captions,
-                optimize_pronunciation=payload.optimizePronunciation,
-                narration_text=final_display_text,
-                outro_text=payload.outroText,
-            ),
+            agent_text,
             "--avatar-id",
             avatar_id,
             "--voice-id",
@@ -3964,8 +4156,6 @@ def _create_video_job(
             "--orientation",
             payload.orientation,
         ]
-        if payload.styleId:
-            args.extend(["--style-id", payload.styleId])
         response = _run_heygen_json(command, args, timeout=60)
         session_id = _find_value(response, "session_id", "sessionId")
         video_id = _find_value(response, "video_id", "videoId", "id")
@@ -4950,7 +5140,11 @@ class TrendSummaryIn(BaseModel):
 
 
 class ArticleIdeasIn(BaseModel):
-    article: str = Field(min_length=120, max_length=50000)
+    # O texto pode vir do campo de colagem ou ser obtido a partir de uma URL,
+    # DOI ou PMID informados no modal de importação.
+    # Arquivos MHTML podem ser maiores que um texto colado. O conteúdo é
+    # reduzido para texto editorial antes de seguir para a análise.
+    article: str = Field(default="", max_length=8_000_000)
     sourceUrl: str | None = Field(default=None, max_length=1000)
     quantity: int = Field(default=5, ge=1, le=6)
     familia: Literal["medicamento", "comportamento", "metabolismo", "obesidade", "educativo"] = "medicamento"
@@ -5443,6 +5637,12 @@ Regras obrigatorias:
 - Cada ideia deve ser pronta para virar roteiro educativo.
 - No campo "angulo" de cada ideia, inclua um briefing completo para o avatar: tese central, dado principal, contexto da população, limite do estudo, virada narrativa e cuidado médico final.
 - O avatar precisa conseguir falar o vídeo só com titulo, hook, angulo, publicoDor, cta e observacaoCompliance.
+- Priorize a notícia: use cerca de 80% da ideia para o fato central, exemplos concretos e o motivo de ele importar para quem assiste.
+- Para temas de risco/efeito adverso, dê exemplos específicos que estejam no artigo e separe o que é comum do que merece atenção. Evite uma lista longa e não invente sintomas.
+- O alerta clínico entra somente no fechamento, em uma frase curta de segurança; ele não pode dominar hook, título ou explicação.
+- Busque potencial de atenção sem sensacionalismo: comece por contraste, surpresa, dúvida real ou consequência prática verificável na fonte.
+- Use exclusivamente o artigo recebido nesta chamada. Antes de escrever, identifique o tema no título ou no primeiro parágrafo; cada título e hook deve repetir termos ou conclusões verificáveis dessa fonte.
+- Se a fonte não mencionar GLP-1, medicamentos, câncer ou outro assunto clínico, não introduza esses assuntos nas ideias.
 - Responda somente no JSON solicitado."""
 
 
@@ -5458,6 +5658,41 @@ def _article_compact_text(text: str, limit: int = 24000) -> str:
 def _article_source_text(text: str) -> str:
     """Remove pedacos da UI quando o usuario cola o modal inteiro por acidente."""
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    # Arquivos .mhtml carregam HTML e imagens em MIME/quoted-printable. Ao
+    # colar seu conteúdo, extraímos somente o texto legível da página antes de
+    # analisar; assim o Claude não recebe cabeçalhos técnicos ou páginas antigas.
+    if "MIME-Version:" in cleaned and "Content-Type:" in cleaned:
+        try:
+            message = Parser(policy=policy.default).parsestr(cleaned)
+            html_parts: list[str] = []
+            text_parts: list[str] = []
+            for part in message.walk():
+                if part.is_multipart():
+                    continue
+                content_type = part.get_content_type()
+                if content_type not in {"text/html", "text/plain"}:
+                    continue
+                content = part.get_content()
+                if not isinstance(content, str):
+                    continue
+                if content_type == "text/html":
+                    html_parts.append(content)
+                else:
+                    text_parts.append(content)
+            if html_parts:
+                parser = _ArticleTextParser()
+                parser.feed(max(html_parts, key=len))
+                extracted = parser.text()
+                if len(extracted) >= 120:
+                    cleaned = extracted
+            elif text_parts:
+                extracted = max(text_parts, key=len).strip()
+                if len(extracted) >= 120:
+                    cleaned = extracted
+        except Exception:
+            # Se o arquivo estiver incompleto, o fluxo abaixo ainda tenta
+            # aproveitar o texto colado sem impedir a importação.
+            pass
     cut_markers = [
         "\nLink, DOI ou PubMed",
         "\nO que a IA entendeu",
@@ -5603,12 +5838,191 @@ def _article_skin_ideas(payload: ArticleIdeasIn, compliance: str) -> list[dict[s
     ][: payload.quantity]
 
 
+def _article_generic_ideas(payload: ArticleIdeasIn, text: str, compliance: str) -> dict[str, Any]:
+    """Fallback determinístico estritamente ancorado no texto importado.
+
+    Não reutiliza temas clínicos de artigos anteriores quando Claude não está
+    disponível. Isso é especialmente importante para textos educativos ou
+    links que não tratam de GLP-1.
+    """
+    clean_lines = [
+        re.sub(r"^(?:#{1,6}\s+|[>*-]\s+|\d+[.)]\s+)", "", line).strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+    heading = next((line for line in clean_lines if len(line) >= 8), "Conteúdo importado")
+    body_lines = [line for line in clean_lines if line != heading and len(line) >= 30]
+    source_sentence = next(
+        (
+            sentence.strip()
+            for line in body_lines
+            for sentence in re.split(r"(?<=[.!?])\s+", line)
+            if len(sentence.strip()) >= 35
+        ),
+        heading,
+    )
+    subject = re.sub(r"\s+", " ", heading).strip(" .:;—-")[:90]
+    source_sentence = re.sub(r"\s+", " ", source_sentence).strip()[:260]
+    secondary = next((line for line in body_lines if line != source_sentence), source_sentence)[:220]
+    common_angle = (
+        "Contexto para o avatar: use somente os pontos apresentados na fonte. "
+        f"Trecho-base: {source_sentence} "
+        "Explique em linguagem simples, sem transformar a orientação geral em promessa ou prescrição individual."
+    )
+    analysis = {
+        "tituloArtigo": subject,
+        "achadoPrincipal": source_sentence,
+        "tipoEstudo": "Conteúdo importado para educação",
+        "populacao": "Público descrito na fonte importada.",
+        "amostra": "Não informada no texto importado.",
+        "seguimento": "Não informado no texto importado.",
+        "numerosChave": _extract_article_numbers(text) or ["A fonte não trouxe números-chave verificáveis."],
+        "limitacoes": [
+            "O texto importado pode ser educativo, editorial ou um resumo; não o trate como evidência clínica conclusiva.",
+            "Recomendações de saúde precisam respeitar contexto e avaliação individual.",
+        ],
+        "podeFalar": [
+            "O artigo destaca: " + source_sentence,
+            "Hábitos consistentes podem ser apresentados como orientação geral, sem prometer resultado.",
+        ],
+        "naoPodeFalar": [
+            "Esta dica garante emagrecimento.",
+            "Todo mundo deve seguir a mesma estratégia.",
+        ],
+    }
+    ideas = [
+        _article_idea(
+            payload,
+            subject,
+            source_sentence,
+            f"{common_angle} Estruture a fala a partir do ponto central do artigo e finalize convidando a pessoa a adaptar o cuidado à própria rotina.",
+            "Pessoa que busca entender o tema do artigo sem fórmulas milagrosas.",
+            compliance,
+            "Salve para revisar este ponto com calma.",
+        ),
+        _article_idea(
+            payload,
+            f"{subject}: por onde começar",
+            f"O artigo começa com uma ideia simples: {source_sentence}",
+            f"{common_angle} Mostre um primeiro passo realista citado na fonte: {secondary}",
+            "Pessoa que quer transformar informação em um primeiro passo possível.",
+            compliance,
+            "Compartilhe com quem precisa de um começo mais realista.",
+        ),
+        _article_idea(
+            payload,
+            "O que não dá para concluir só com uma dica",
+            f"Uma boa orientação não precisa virar regra para todo mundo. O artigo fala de: {subject}.",
+            f"{common_angle} Diferencie informação geral de decisão individual e evite tom de cobrança.",
+            "Pessoa cansada de promessas rápidas ou regras universais de saúde.",
+            compliance,
+            "Salve para lembrar: contexto também faz parte do cuidado.",
+        ),
+    ][: payload.quantity]
+    return {"analysis": analysis, "ideas": ideas}
+
+
+def _article_adverse_effect_ideas(
+    payload: ArticleIdeasIn,
+    text: str,
+    compliance: str,
+) -> dict[str, Any]:
+    """Ideias curtas e factuais para notícias sobre efeitos adversos de GLP-1.
+
+    A notícia e os exemplos da fonte ocupam a maior parte da narrativa. A
+    orientação clínica fica restrita ao fechamento, sem tomar o lugar do fato.
+    """
+    lowered = text.lower()
+    examples: list[str] = []
+    for label, pattern in [
+        # Alguns MHTML antigos chegam com acentos substituídos por caracteres
+        # de reparação; a forma flexível preserva o fato sem inventar nada.
+        ("náusea", r"n(?:[aá]|[^\s]{1,4}usea)"),
+        ("diarreia", r"diarreia"),
+        ("prisão de ventre", r"pris[aã]o de ventre|constipa"),
+        ("hipoglicemia", r"hipoglicemia"),
+        ("pancreatite", r"pancreatite"),
+        ("problemas na vesícula", r"ves[ií]cula"),
+    ]:
+        if re.search(pattern, lowered) and label not in examples:
+            examples.append(label)
+    common = [item for item in examples if item in {"náusea", "diarreia", "prisão de ventre"}]
+    attention = [item for item in examples if item not in common]
+    common_text = ", ".join(common[:3]) or "os efeitos mais citados pela matéria"
+    attention_text = ", ".join(attention[:3]) or "sinais que merecem atenção"
+    source_lines = [line.strip() for line in text.splitlines() if len(line.strip()) >= 35]
+    source_fact = next(
+        (line for line in source_lines if any(item in line.lower() for item in examples)),
+        "A matéria separa desconfortos frequentes de sinais que não devem ser ignorados.",
+    )
+    source_fact = re.sub(r"\s+", " ", source_fact)[:320]
+    subject = "Efeitos colaterais do Mounjaro" if "mounjaro" in lowered else "Efeitos colaterais das canetas para emagrecer"
+    context = (
+        "Contexto para o avatar: abra pela notícia, não pelo aviso médico. "
+        f"Explique que a fonte cita {common_text} entre os efeitos mais conhecidos e traz {attention_text} como exemplos que mudam a conversa. "
+        "Use exemplos concretos da matéria, em ritmo de notícia, e deixe o cuidado clínico apenas na última frase."
+    )
+    analysis = {
+        "tituloArtigo": subject,
+        "achadoPrincipal": source_fact,
+        "tipoEstudo": "Artigo de saúde importado",
+        "populacao": "Leitores e pacientes descritos na fonte importada.",
+        "amostra": "Não aplicável ao artigo informativo importado.",
+        "seguimento": "Não aplicável ao artigo informativo importado.",
+        "numerosChave": _extract_article_numbers(text) or ["A fonte foi usada como notícia explicativa, sem número central destacado."],
+        "limitacoes": [
+            "O artigo informativo não substitui bula, avaliação de sintomas ou orientação individual.",
+            "Os exemplos precisam ser apresentados como riscos possíveis, nunca como diagnóstico ou certeza para todos.",
+        ],
+        "podeFalar": [
+            f"A fonte cita {common_text} como efeitos que costumam aparecer na conversa sobre o medicamento.",
+            f"A matéria também chama atenção para {attention_text}, sem transformar isso em pânico.",
+        ],
+        "naoPodeFalar": [
+            "Todo usuário terá um efeito grave.",
+            "Interrompa ou comece medicamento por conta própria.",
+        ],
+    }
+    closing = "Se aparecer um sintoma forte, persistente ou diferente do esperado, procure orientação médica."
+    ideas = [
+        _article_idea(
+            payload,
+            "O efeito do Mounjaro que vai além da náusea",
+            f"Náusea é o que todo mundo comenta. Mas a matéria mostra que {attention_text} também entram na conversa sobre Mounjaro.",
+            f"{context} Estrutura da fala: 1) contraste a náusea com os outros riscos citados; 2) dê exemplos em linguagem simples; 3) explique por que a lista não é motivo para pânico, mas para informação. Feche somente com: {closing}",
+            "Pessoa que conhece o remédio pelas redes sociais e quer entender riscos sem alarmismo.",
+            compliance,
+            "Salve para reconhecer o que vale conversar no acompanhamento.",
+        ),
+        _article_idea(
+            payload,
+            "Nem todo efeito colateral tem o mesmo peso",
+            f"A matéria fala de {common_text}; mas também cita {attention_text}. E essa diferença importa.",
+            f"{context} Estrutura da fala: mostre a diferença entre desconforto comum e sinal de atenção sem ensinar diagnóstico. Use a notícia como guia e reserve uma única frase final: {closing}",
+            "Pessoa que ouviu relatos soltos e não sabe como interpretar o que é frequente e o que pede atenção.",
+            compliance,
+            "Envie para quem só ouviu falar da náusea.",
+        ),
+        _article_idea(
+            payload,
+            "O que a notícia sobre Mounjaro deixa claro",
+            f"Não é só sobre emagrecer: a fonte relembra efeitos como {common_text} e riscos como {attention_text}.",
+            f"{context} Estrutura da fala: mantenha o foco nos fatos do artigo, com exemplos curtos e diretos. Encerramento em uma linha: {closing}",
+            "Pessoa avaliando o tema a partir de manchetes e relatos nas redes sociais.",
+            compliance,
+            "Compartilhe para a conversa sair do boato e ir para informação.",
+        ),
+    ][: payload.quantity]
+    return {"analysis": analysis, "ideas": ideas}
+
+
 def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
     text = _article_source_text(payload.article)
     lowered = text.lower()
     glp = bool(re.search(r"glp|semaglutide|semaglutida|tirzepatide|tirzepatida|mounjaro|ozempic", lowered))
     cancer = bool(re.search(r"cancer|câncer|tumou?r|oncolog|malignan|neoplasm", lowered))
     skin = bool(re.search(r"pele|flacidez|col[aá]geno|rosto|dermatolog|cut[aâ]ne|cicatriz|hidradenite|psor[ií]ase|queda de cabelo", lowered))
+    adverse_effects = bool(re.search(r"efeitos? colaterais|adverse|hipoglicemia|pancreatite|ves[ií]cula|n[aá]usea", lowered))
     observational = bool(re.search(r"cohort|observational|retrospective|target trial emulation|trinetx", lowered))
     numbers = _extract_article_numbers(text)
     sample = next(
@@ -5651,6 +6065,11 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
         if glp and skin
         else "Nao extrapolar o artigo; separar achado, limite e orientacao individual."
     )
+    # Em páginas longas, itens de navegação podem conter a palavra "pele".
+    # Quando a matéria é claramente sobre efeitos adversos, esse assunto deve
+    # prevalecer sobre um falso sinal de conteúdo dermatológico.
+    if glp and adverse_effects and not cancer:
+        return _article_adverse_effect_ideas(payload, text, compliance)
     if glp and skin and not cancer:
         analysis = {
             "tituloArtigo": "Tirzepatida, emagrecimento e pele",
@@ -5677,6 +6096,8 @@ def _manual_article_analysis(payload: ArticleIdeasIn) -> dict[str, Any]:
             ],
         }
         return {"analysis": analysis, "ideas": _article_skin_ideas(payload, compliance)}
+    if not (glp and cancer):
+        return _article_generic_ideas(payload, text, compliance)
     follow_up_context = (
         f"com {follow_up.lower()}"
         if follow_up != "Seguimento descrito no artigo."
@@ -5959,6 +6380,9 @@ class _ArticleTextParser(HTMLParser):
         if not self._ignored and self._capture and data.strip():
             self.parts.append(data.strip())
 
+    def text(self) -> str:
+        return re.sub(r"\s+", " ", " ".join(self.parts)).strip()
+
 
 def _validate_public_article_url(raw_url: str) -> str:
     parsed = urlparse(raw_url.strip())
@@ -5975,12 +6399,29 @@ def _validate_public_article_url(raw_url: str) -> str:
     return raw_url.strip()
 
 
+def _normalize_article_source_url(raw_source: str | None) -> str | None:
+    """Aceita URL, DOI ou PMID e devolve uma URL pública para leitura."""
+    source = (raw_source or "").strip()
+    if not source:
+        return None
+    source = re.sub(r"^pmid\s*:\s*", "", source, flags=re.I)
+    if re.fullmatch(r"\d{6,10}", source):
+        return f"https://pubmed.ncbi.nlm.nih.gov/{source}/"
+    source = re.sub(r"^doi\s*:\s*", "", source, flags=re.I)
+    if re.fullmatch(r"10\.\d{4,9}/\S+", source, flags=re.I):
+        return f"https://doi.org/{source}"
+    return source
+
+
 def _fetch_article_context(source_url: str | None) -> str:
     """Baixa somente texto útil da matéria, com limites de rede e de tokens."""
     if not source_url:
         return ""
     try:
-        url = _validate_public_article_url(resolve_google_news_url(source_url))
+        normalized_source = _normalize_article_source_url(source_url)
+        if not normalized_source:
+            return ""
+        url = _validate_public_article_url(resolve_google_news_url(normalized_source))
         response = requests.get(
             url,
             headers={"User-Agent": "Mozilla/5.0 (compatible; VTRVideoCreator/1.0)"},
@@ -6467,12 +6908,21 @@ def generate_capture_hooks(payload: CaptureHooksIn) -> dict:
 def analyze_article_for_ideas(payload: ArticleIdeasIn) -> dict:
     """Analisa artigo cientifico e devolve contexto + ideias prontas para roteiro."""
     source_article = _article_source_text(payload.article)
-    clean_payload = payload.model_copy(update={"article": source_article or payload.article})
+    if len(source_article) < 120:
+        source_article = _fetch_article_context(payload.sourceUrl)
+    if len(source_article) < 120:
+        raise HTTPException(
+            status_code=422,
+            detail="Não foi possível ler texto suficiente desse link. Cole o abstract ou o texto do artigo para continuar.",
+        )
+    clean_payload = payload.model_copy(update={"article": source_article})
     if not os.getenv("ANTHROPIC_API_KEY"):
         result = _manual_article_analysis(clean_payload)
         return {"ok": True, "provider": "fallback", **result}
 
-    cache_payload = clean_payload.model_dump()
+    # Versão entra na chave para impedir que respostas antigas (inclusive o
+    # fallback histórico de GLP-1/câncer) reapareçam para uma fonte diferente.
+    cache_payload = {"analyzerVersion": "source-grounded-v2", **clean_payload.model_dump()}
     cached = _ai_cache_get("articles.analyze", cache_payload)
     if cached:
         return cached
@@ -7040,6 +7490,9 @@ COMPOSICAO:
 - Sequencia: gancho -> tensao -> explicacao/evidencia -> ponto central -> aplicacao/autoridade -> CTA.
 - photoId deve vir apenas da biblioteca enviada no pedido.
 - Layout e texto devem obedecer aos limites descritos no pedido.
+- Use do_dont somente para uma comparação prática real: cada item deve ter, à esquerda, algo a evitar e, à direita, a alternativa preferível. Nunca use esse layout para cronologia, mecanismos ou listas de consequências.
+- Para mecanismo, sequência ou três consequências, use three_points.
+- Em myth_fact, item1 precisa conter o mito específico do roteiro e item2 o fato correspondente. Nunca deixe o sistema inventar um mito genérico.
 - Voce nao gera HTML, CSS ou imagens."""
 
 
@@ -7423,6 +7876,10 @@ def generate_pack(payload: PackIn) -> dict:
 def get_pack(script_id: str) -> dict:
     script = _find_script(script_id)
     pack = _get_visual_pack(script_id)
+    # Packs gerados antes das regras semânticas atuais continuam abrindo no
+    # editor já corrigidos, sem uma nova chamada ao Claude.
+    if pack:
+        pack = _normalize_pack_design(pack)
     profile = _production_profile(script_id)
     current_identity_key = None
     if profile:
@@ -7658,7 +8115,9 @@ def export_pack(payload: PackExportIn) -> dict:
     folder = PACKS_DIR / f"{data}_{_slug(payload.titulo)}"
     img_root = folder / "1-imagens"
     txt_root = folder / "2-textos"
-    pack = payload.pack
+    # Reaplica os reparos determinísticos antes de qualquer PNG ou texto ser
+    # exportado; assim um Pack antigo não volta a sair com montagem inválida.
+    pack = PackBody.model_validate(repair_pack_copy(payload.pack.model_dump()))
     pack_dump = pack.model_dump()
     carousel_rows = [normalize_slide(slide, index) for index, slide in enumerate(pack_dump.get("carousel") or pack_dump.get("slides") or [])]
     is_institute_pack = pack.schemaVersion == PACK_SCHEMA_VERSION

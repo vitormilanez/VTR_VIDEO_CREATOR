@@ -23,6 +23,7 @@ import { useStore } from "@/lib/store";
 import { splitWeekly, type WeeklyView } from "@/lib/weekly-archive";
 import {
   analyzeArticle,
+  appendIdea,
   expandIdeas,
   saveScript,
   setSheetStatus,
@@ -104,6 +105,27 @@ const familias: ThemeFamily[] = [
   "educativo",
 ];
 
+type ImportedArticleFile = {
+  name: string;
+  content: string;
+  size: number;
+};
+
+function ideaCreatedAt(idea: Idea) {
+  const timestamp = new Date(idea.criadoEm).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function formatIdeaCreatedAt(value: string) {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "sem data";
+  const differenceMinutes = Math.round((Date.now() - timestamp) / 60_000);
+  if (differenceMinutes <= 1) return "agora";
+  if (differenceMinutes < 60) return `há ${differenceMinutes} min`;
+  if (differenceMinutes < 24 * 60) return `hoje às ${new Date(timestamp).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
+  return new Date(timestamp).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
 function IdeiasLayout() {
   return <Outlet />;
 }
@@ -133,6 +155,7 @@ export function IdeiasPage() {
   const [articleOpen, setArticleOpen] = useState(false);
   const [articleText, setArticleText] = useState("");
   const [articleUrl, setArticleUrl] = useState("");
+  const [articleFile, setArticleFile] = useState<ImportedArticleFile | null>(null);
   const [articleFamilia, setArticleFamilia] = useState<ThemeFamily>("medicamento");
   const [articlePrioridade, setArticlePrioridade] = useState<Idea["prioridade"]>("alta");
   const [articleResult, setArticleResult] = useState<ArticleIdeasResult | null>(null);
@@ -163,9 +186,7 @@ export function IdeiasPage() {
   });
 
   // Ideia mais recente sempre no topo.
-  const ordered = [...filtered].sort(
-    (a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime(),
-  );
+  const ordered = [...filtered].sort((a, b) => ideaCreatedAt(b) - ideaCreatedAt(a));
 
   const counts: Record<IdeaStatus, number> = { novo: 0, em_analise: 0, aprovado: 0, descartado: 0 };
   weeklyIdeas.forEach((i) => (counts[i.status] += 1));
@@ -316,9 +337,10 @@ export function IdeiasPage() {
   }
 
   async function analisarArtigo() {
-    const article = articleText.trim();
-    if (article.length < 120) {
-      toast.error("Cole um trecho maior do artigo para a análise fazer sentido.");
+    const article = (articleFile?.content || articleText).trim();
+    const sourceUrl = articleUrl.trim();
+    if (article.length < 120 && !sourceUrl) {
+      toast.error("Cole um trecho do artigo ou informe um link, DOI ou PMID.");
       return;
     }
     setArticleResult(null);
@@ -326,13 +348,22 @@ export function IdeiasPage() {
     try {
       const result = await analyzeArticle({
         article,
-        sourceUrl: articleUrl.trim() || null,
+        sourceUrl: sourceUrl || null,
         quantity: 5,
         familia: articleFamilia,
         prioridade: articlePrioridade,
       });
-      setArticleResult(result);
-      toast.success("Artigo analisado. Revise os limites antes de criar roteiro.");
+      const recommended = result.ideas[0];
+      if (!recommended) throw new Error("A análise não retornou uma ideia utilizável.");
+      // O clique principal precisa alimentar a esteira imediatamente. Guardamos
+      // somente a ideia recomendada; os demais ângulos continuam opcionais no modal.
+      const savedIdea = await appendIdea(recommended);
+      addIdea(savedIdea);
+      setArticleResult({
+        ...result,
+        ideas: [savedIdea, ...result.ideas.slice(1)],
+      });
+      toast.success("Ideia principal criada e enviada para a lista. Ela aparece no topo.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel analisar o artigo.");
     } finally {
@@ -351,8 +382,9 @@ export function IdeiasPage() {
       toast.error(`Ideia ainda precisa de contexto (${quality.score}/100): ${quality.issues[0]}`);
       return;
     }
+    const alreadySaved = ideas.some((existing) => existing.id === idea.id);
     abrirEscolhaDeTom(idea, {
-      persistIdea: true,
+      persistIdea: !alreadySaved,
       analysis: articleOpen ? articleResult?.analysis : null,
     });
   }
@@ -387,6 +419,11 @@ export function IdeiasPage() {
               }}
               sourceUrl={articleUrl}
               onSourceUrlChange={setArticleUrl}
+              file={articleFile}
+              onFileChange={(file) => {
+                setArticleFile(file);
+                if (articleResult) setArticleResult(null);
+              }}
               familia={articleFamilia}
               onFamiliaChange={setArticleFamilia}
               prioridade={articlePrioridade}
@@ -399,6 +436,7 @@ export function IdeiasPage() {
               onClear={() => {
                 setArticleText("");
                 setArticleUrl("");
+                setArticleFile(null);
                 setArticleResult(null);
               }}
             />
@@ -577,6 +615,9 @@ export function IdeiasPage() {
                             Mais recente
                           </Badge>
                         ) : null}
+                        <span className="text-[10px] text-muted-foreground">
+                          Gerada {formatIdeaCreatedAt(i.criadoEm)}
+                        </span>
                         {usedScript ? (
                           <Badge
                             variant="outline"
@@ -791,6 +832,8 @@ function ArticleImportDialog({
   onArticleChange,
   sourceUrl,
   onSourceUrlChange,
+  file,
+  onFileChange,
   familia,
   onFamiliaChange,
   prioridade,
@@ -806,6 +849,8 @@ function ArticleImportDialog({
   onArticleChange: (value: string) => void;
   sourceUrl: string;
   onSourceUrlChange: (value: string) => void;
+  file: ImportedArticleFile | null;
+  onFileChange: (file: ImportedArticleFile | null) => void;
   familia: ThemeFamily;
   onFamiliaChange: (value: ThemeFamily) => void;
   prioridade: Idea["prioridade"];
@@ -837,17 +882,60 @@ function ArticleImportDialog({
             maxLength={50000}
             value={article}
             onChange={(event) => onArticleChange(event.target.value)}
-            placeholder="Cole aqui o abstract, highlights, discussão ou o texto completo do artigo..."
+            placeholder="Opcional: cole aqui o abstract, highlights, discussão ou o texto completo do artigo..."
           />
+        </div>
+
+        <div className="grid gap-2">
+          <Label htmlFor="article-file">Ou envie um arquivo do artigo</Label>
+          <Input
+            id="article-file"
+            type="file"
+            accept=".mhtml,.mht,.html,.htm,.txt,.md,text/html,text/plain"
+            onChange={(event) => {
+              const selected = event.target.files?.[0];
+              if (!selected) return;
+              if (selected.size > 8_000_000) {
+                toast.error("O arquivo deve ter no máximo 8 MB.");
+                event.currentTarget.value = "";
+                return;
+              }
+              const reader = new FileReader();
+              reader.onload = () => {
+                const content = typeof reader.result === "string" ? reader.result : "";
+                if (!content.trim()) {
+                  toast.error("Não foi possível ler texto nesse arquivo.");
+                  return;
+                }
+                onFileChange({ name: selected.name, content, size: selected.size });
+              };
+              reader.onerror = () => toast.error("Não foi possível ler o arquivo selecionado.");
+              reader.readAsText(selected);
+            }}
+          />
+          {file ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-sm">
+              <span>
+                Arquivo pronto: <strong>{file.name}</strong> ({Math.ceil(file.size / 1024)} KB)
+              </span>
+              <Button size="sm" variant="ghost" onClick={() => onFileChange(null)}>
+                Remover arquivo
+              </Button>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Aceita MHTML, HTML, TXT ou Markdown. O app extrai o texto da página antes de analisar.
+            </p>
+          )}
         </div>
 
         <div className="grid gap-3 md:grid-cols-[1.3fr_0.8fr_0.8fr]">
           <div className="grid gap-2">
-            <Label>Link, DOI ou PubMed</Label>
+            <Label>Link, DOI ou PMID</Label>
             <Input
               value={sourceUrl}
               onChange={(event) => onSourceUrlChange(event.target.value)}
-              placeholder="https://doi.org/... ou PMID..."
+              placeholder="Cole o link, DOI (10.xxxx/...) ou PMID"
             />
           </div>
           <div className="grid gap-2">
@@ -886,16 +974,24 @@ function ArticleImportDialog({
           </div>
         </div>
 
+        <p className="-mt-1 text-xs text-muted-foreground">
+          Envie um link ou arquivo: a IA usa essa fonte, traduz o achado para linguagem simples e
+          sugere ideias de vídeo sem misturar conteúdos antigos.
+        </p>
+
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <Button onClick={onAnalyze} disabled={isAnalyzing || article.trim().length < 120}>
+          <Button
+            onClick={onAnalyze}
+            disabled={isAnalyzing || (!file && article.trim().length < 120 && !sourceUrl.trim())}
+          >
             {isAnalyzing ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             ) : (
               <FileText className="mr-2 h-4 w-4" />
             )}
-            Analisar artigo
+            Ler e criar ideias
           </Button>
-          {(article || sourceUrl || result) && (
+          {(article || sourceUrl || file || result) && (
             <Button size="sm" variant="ghost" onClick={onClear}>
               Limpar artigo
             </Button>
@@ -946,11 +1042,11 @@ function ArticleImportDialog({
 
             <div>
               <h3 className="font-display text-sm font-semibold">
-                Escolha uma ideia para criar roteiro
+                Ideia principal adicionada à lista
               </h3>
               <p className="text-xs text-muted-foreground">
-                A primeira foi priorizada como ponto de partida. As outras mantêm ângulos
-                alternativos.
+                Ela aparece no topo das Ideias. Você pode criar o roteiro agora ou comparar os
+                ângulos alternativos abaixo.
               </p>
             </div>
             {result.ideas.map((idea, index) => (
@@ -958,6 +1054,7 @@ function ArticleImportDialog({
                 key={idea.id}
                 idea={idea}
                 recommended={index === 0}
+                saved={index === 0}
                 isSaving={savingIdeaId === idea.id}
                 disabled={Boolean(savingIdeaId)}
                 onCreateScript={() => onCreateScript(idea)}
@@ -1020,12 +1117,14 @@ function ArticleList({
 function IdeaSuggestionCard({
   idea,
   recommended = false,
+  saved = false,
   isSaving,
   disabled,
   onCreateScript,
 }: {
   idea: Idea;
   recommended?: boolean;
+  saved?: boolean;
   isSaving: boolean;
   disabled: boolean;
   onCreateScript: () => void;
@@ -1042,6 +1141,11 @@ function IdeaSuggestionCard({
             <div className="font-semibold leading-6">{idea.titulo}</div>
             {recommended ? (
               <Badge className="bg-status-info text-status-info-foreground">Recomendada</Badge>
+            ) : null}
+            {saved ? (
+              <Badge variant="outline" className="border-status-success/40 bg-status-success/5 text-status-success-foreground">
+                Salva na lista
+              </Badge>
             ) : null}
             <IdeaQualityBadge idea={idea} />
           </div>

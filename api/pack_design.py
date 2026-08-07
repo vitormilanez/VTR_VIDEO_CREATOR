@@ -227,14 +227,54 @@ def normalize_slide(slide: dict[str, Any], index: int = 0) -> dict[str, Any]:
 
 
 def _fit_copy(value: Any, maximum: int) -> str:
-    """Encurta copy de forma deterministica sem deixar pontuacao solta."""
+    """Encurta copy sem terminar no início de uma nova frase."""
     text = _text(value)
     if len(text) <= maximum:
         return text
     clipped = text[:maximum].rstrip()
+    # Quando já existe uma frase completa dentro do limite, ela preserva o
+    # sentido melhor do que um corte por palavra como "... funcionando. O".
+    sentence_ends = [match.end() for match in re.finditer(r"[.!?](?=\s|$)", clipped)]
+    if sentence_ends:
+        complete = clipped[: sentence_ends[-1]].strip()
+        if complete:
+            return complete
     if " " in clipped:
         clipped = clipped.rsplit(" ", 1)[0].rstrip()
     return clipped.rstrip(" ,;:-–—") or text[:maximum].rstrip()
+
+
+_GENERIC_MYTH_FALLBACKS = {
+    "uma indicação não serve para todos.",
+    "uma indicacao nao serve para todos.",
+}
+
+
+def _has_item_content(value: Any) -> bool:
+    return isinstance(value, dict) and bool(_text(value.get("title")) or _text(value.get("text")))
+
+
+def _repair_layout_semantics(slide: dict[str, Any]) -> None:
+    """Evita usar componentes de comparação para uma lista explicativa."""
+    fields = slide["fields"]
+    layout_id = slide["layoutId"]
+
+    # O componente Evite/Prefira renderiza títulos de um lado e ações do outro.
+    # Três etapas como "o que faz / e depois / resultado" são uma sequência,
+    # não uma comparação, e devem renderizar como três pontos.
+    if layout_id == "do_dont" and _has_item_content(fields.get("item3")):
+        slide["layoutId"] = "three_points"
+        slide["layout"] = "three_points"
+        if slide.get("variant") not in {"dark", "light"}:
+            slide["variant"] = "dark"
+
+    if slide["layoutId"] != "myth_fact":
+        return
+    item1 = fields.get("item1") if isinstance(fields.get("item1"), dict) else {}
+    item1_text = _text(item1.get("text"))
+    headline = _text(fields.get("headline"))
+    if headline and _text(item1_text).lower() in _GENERIC_MYTH_FALLBACKS:
+        fields["item1"] = {"title": "Mito", "text": headline}
 
 
 def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[str, Any]) -> None:
@@ -242,7 +282,7 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
     item_limits = spec.get("item_max", {})
     if layout_id == "myth_fact":
         fallback_items = {
-            "item1": {"title": "Mito", "text": "Uma indicação não serve para todos."},
+            "item1": {"title": "Mito", "text": fields.get("headline") or "Nem toda afirmação vale para todos."},
             "item2": {
                 "title": "Fato",
                 "text": fields.get("body") or "Cada indicação precisa de avaliação individual.",
@@ -293,6 +333,7 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
             slides.append(raw_slide)
             continue
         slide = normalize_slide(raw_slide, index)
+        _repair_layout_semantics(slide)
         spec = LAYOUT_SPECS[slide["layoutId"]]
         fields = slide["fields"]
         _repair_required_items(fields, slide["layoutId"], spec)
@@ -307,6 +348,21 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
         headline = _text(fields.get("headline"))
         if len(headline.split()) > 11:
             fields["headline"] = " ".join(headline.split()[:11])
+        if slide["layoutId"] == "myth_fact":
+            body = _text(fields.get("body"))
+            fact_item = fields.get("item2") if isinstance(fields.get("item2"), dict) else {}
+            fact = _text(fact_item.get("text"))
+            fact_limit = int(spec.get("item_max", {}).get("text", 42))
+            # Corrige Packs já salvos por uma versão anterior que havia cortado
+            # o fato no começo da frase seguinte (por exemplo, terminando em "O").
+            if body and fact and body.lower().startswith(fact.lower()):
+                improved_fact = _fit_copy(body, fact_limit)
+                if improved_fact.endswith((".", "!", "?")):
+                    fact_item["text"] = improved_fact
+                    fields["item2"] = fact_item
+                    fact = improved_fact
+            if fact and body.lower().startswith(fact.lower()):
+                fields["body"] = body[len(fact):].lstrip(" .:;–—")
         slides.append(slide)
 
     repaired["slides"] = slides

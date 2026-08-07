@@ -86,6 +86,89 @@ def _run(args: list[str], *, timeout: int = 600) -> None:
         raise RuntimeError(detail[-1600:])
 
 
+def _probe_duration(path: Path) -> float:
+    """Retorna a duração de um arquivo de mídia sem alterar o original."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("FFprobe não encontrado no ambiente local.")
+    process = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(process.stderr.strip() or "Não foi possível ler a duração do vídeo.")
+    try:
+        return max(0.0, float(process.stdout.strip()))
+    except ValueError as exc:
+        raise RuntimeError("Duração inválida retornada pelo FFprobe.") from exc
+
+
+def _mix_background_music(
+    video_path: Path,
+    music_path: Path,
+    output_path: Path,
+    *,
+    volume: float,
+    ffmpeg: str,
+) -> float:
+    """Mistura música baixa no MP4 final, preservando integralmente a voz.
+
+    A trilha é loopada e limitada à duração da narrativa. Ela não substitui
+    nem desloca o áudio original das cenas; fica apenas como uma camada de fundo.
+    """
+    _require_file(music_path, "Trilha de fundo")
+    duration = _probe_duration(video_path)
+    if duration <= 0:
+        raise RuntimeError("O vídeo final não possui duração válida para receber trilha.")
+    fade_out_start = max(0.0, duration - 1.2)
+    _run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(video_path),
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(music_path),
+            "-filter_complex",
+            (
+                f"[1:a]atrim=duration={duration:.3f},"
+                f"afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out_start:.3f}:d=1.2,"
+                f"volume={volume:.3f}[music];"
+                "[0:a][music]amix=inputs=2:duration=first:normalize=0[audio]"
+            ),
+            "-map",
+            "0:v:0",
+            "-map",
+            "[audio]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            str(output_path),
+        ]
+    )
+    return duration
+
+
 def _require_file(path: Path, label: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"{label} não encontrado: {path}")
@@ -250,6 +333,8 @@ def compose_video(
     scenes: Iterable[CompositionScene],
     output_path: Path,
     *,
+    background_music_path: Path | None = None,
+    background_music_volume: float = 0.12,
     ffmpeg_binary: str | None = None,
 ) -> dict[str, Any]:
     """Compõe cenas em ordem e retorna um manifesto de cortes secos."""
@@ -263,6 +348,8 @@ def compose_video(
         raise ValueError("output_path inválido.")
     if output_path.suffix.lower() != ".mp4":
         raise ValueError("A saída do compositor deve ser um arquivo .mp4.")
+    if not 0.03 <= background_music_volume <= 0.25:
+        raise ValueError("O volume da trilha deve estar entre 0.03 e 0.25.")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     seen_ids: set[str] = set()
@@ -306,6 +393,7 @@ def compose_video(
             "\n".join(f"file {shlex.quote(str(path))}" for path in segments) + "\n",
             encoding="utf-8",
         )
+        concatenated = workdir / "concatenated.mp4" if background_music_path else output_path
         _run(
             [
                 ffmpeg,
@@ -320,9 +408,18 @@ def compose_video(
                 "copy",
                 "-movflags",
                 "+faststart",
-                str(output_path),
+                str(concatenated),
             ]
         )
+        final_duration: float | None = None
+        if background_music_path:
+            final_duration = _mix_background_music(
+                concatenated,
+                background_music_path,
+                output_path,
+                volume=background_music_volume,
+                ffmpeg=ffmpeg,
+            )
     return {
         "outputPath": str(output_path),
         "width": VIDEO_WIDTH,
@@ -332,4 +429,13 @@ def compose_video(
         "segmentCount": len(manifest),
         "cutPolicy": "hard_cut",
         "segments": manifest,
+        "backgroundMusic": (
+            {
+                "enabled": True,
+                "volume": round(background_music_volume, 3),
+                "durationSeconds": round(final_duration or 0, 2),
+            }
+            if background_music_path
+            else {"enabled": False}
+        ),
     }

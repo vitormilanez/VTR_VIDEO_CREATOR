@@ -431,7 +431,18 @@ export interface ProductionProfile {
   avatarSetId?: string | null;
   primaryAvatarId?: string | null;
   positionCount?: 1 | 2;
+  musicTrackId?: string | null;
+  musicVolume?: number;
   updatedAt?: string;
+}
+
+export interface MusicTrack {
+  id: string;
+  name: string;
+  artist: string;
+  mood: string;
+  durationSeconds: number;
+  url: string;
 }
 
 export type AvatarSetRole = "primary" | "front" | "close" | "three_quarter" | "standing" | "wide";
@@ -718,6 +729,13 @@ export async function saveProductionProfile(
     { method: "PUT", body: JSON.stringify(profile) },
   );
   return response.profile;
+}
+
+export async function fetchMusicTracks(): Promise<MusicTrack[]> {
+  const response = await requestJson<{ ok: boolean; tracks: MusicTrack[] }>("/api/music-tracks", {
+    method: "GET",
+  });
+  return response.tracks;
 }
 
 export async function fetchAvatarSets(): Promise<AvatarSet[]> {

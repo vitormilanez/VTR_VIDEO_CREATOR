@@ -279,6 +279,14 @@ function VideoCostPanel({
   balance: number | null;
   claudeProvider?: AiCosts["providers"][number];
 }) {
+  const claudeInputTokens = claudeProvider?.inputTokens ?? 0;
+  const claudeOutputTokens = claudeProvider?.outputTokens ?? 0;
+  const claudeCacheReadTokens = claudeProvider?.cacheReadTokens ?? 0;
+  const claudeCacheWriteTokens = claudeProvider?.cacheWriteTokens ?? 0;
+  const claudeTotalTokens =
+    claudeInputTokens + claudeOutputTokens + claudeCacheReadTokens + claudeCacheWriteTokens;
+  const formatTokens = (value: number) => value.toLocaleString("pt-BR");
+
   return (
     <div className="rounded-lg border bg-card p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
@@ -311,41 +319,52 @@ function VideoCostPanel({
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <WalletCards className="h-4 w-4 text-status-info" />
-            <span className="text-xs font-medium">Gasto rastreado</span>
+            <span className="text-xs font-medium">HeyGen — créditos de vídeo</span>
           </div>
           <span className="font-display text-lg font-semibold tabular-nums">
             {formatCurrency(trackedSpend, currency)}
           </span>
         </div>
         <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
-          <span>Custo médio: {formatCurrency(averageCost, currency)}</span>
+          <span>Custo médio por vídeo: {formatCurrency(averageCost, currency)}</span>
           <span className="text-right">
             Saldo: {balance == null ? "indisponível" : formatCurrency(balance, currency)}
           </span>
         </div>
       </div>
 
-      <div className="mt-3 rounded-md border bg-muted/30 p-3">
+      <div className="mt-3 rounded-md border border-status-info/25 bg-status-info/5 p-3">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-xs font-medium">Claude</p>
+            <p className="text-xs font-medium">Claude — tokens usados</p>
             <p className="text-[11px] text-muted-foreground">
               {claudeProvider?.status === "conectado"
                 ? "Uso registrado pela API"
                 : "API não conectada"}
             </p>
           </div>
-          <span className="font-display text-lg font-semibold tabular-nums">
-            {formatCurrency(claudeProvider?.trackedSpend ?? 0, claudeProvider?.currency || "USD")}
-          </span>
+          <div className="text-right">
+            <span className="block font-display text-lg font-semibold tabular-nums">
+              {formatTokens(claudeTotalTokens)}
+            </span>
+            <span className="text-[10px] text-muted-foreground">tokens no total</span>
+          </div>
         </div>
-        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
-          <span>Chamadas: {claudeProvider?.calls ?? 0}</span>
-          <span className="text-right">
-            Tokens:{" "}
-            {(
-              (claudeProvider?.inputTokens ?? 0) + (claudeProvider?.outputTokens ?? 0)
-            ).toLocaleString("pt-BR")}
+        <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
+          <span>Entrada: {formatTokens(claudeInputTokens)}</span>
+          <span>Saída: {formatTokens(claudeOutputTokens)}</span>
+          <span className="text-right">Chamadas: {claudeProvider?.calls ?? 0}</span>
+        </div>
+        {(claudeCacheReadTokens > 0 || claudeCacheWriteTokens > 0) ? (
+          <div className="mt-1 grid grid-cols-2 gap-2 text-[10px] text-muted-foreground">
+            <span>Cache lido: {formatTokens(claudeCacheReadTokens)}</span>
+            <span className="text-right">Cache criado: {formatTokens(claudeCacheWriteTokens)}</span>
+          </div>
+        ) : null}
+        <div className="mt-2 flex items-center justify-between gap-2 border-t border-status-info/15 pt-2 text-[11px] text-muted-foreground">
+          <span>Custo estimado</span>
+          <span className="font-medium tabular-nums text-foreground">
+            {formatCurrency(claudeProvider?.trackedSpend ?? 0, claudeProvider?.currency || "USD")}
           </span>
         </div>
         <p className="mt-2 text-[10px] leading-4 text-muted-foreground">

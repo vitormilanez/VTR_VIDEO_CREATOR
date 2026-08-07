@@ -18,10 +18,11 @@ import { useStore } from "@/lib/store";
 import {
   createHeyGenPreview,
   createHeyGenVideo,
+  composeFinalVideo,
   deleteAvatarSet,
   fetchAvatarSets,
   fetchHeyGenCatalog,
-  fetchHeyGenStyles,
+  fetchMusicTracks,
   fetchProductionProfile,
   fetchSceneGenerationPlan,
   fetchScenePlan,
@@ -41,7 +42,7 @@ import {
   type AvatarSetLook,
   type AvatarSetRole,
   type HeyGenCatalog,
-  type HeyGenStyle,
+  type MusicTrack,
   type ScenePlan,
   type SceneGenerationResult,
   type VideoVisualLayout,
@@ -94,6 +95,7 @@ import {
   Trash2,
   TriangleAlert,
   UserRound,
+  Volume2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -140,12 +142,12 @@ function RoteiroDetalhe() {
 
   const [draft, setDraft] = useState<Script | undefined>(script);
   const [sending, setSending] = useState(false);
+  const [mixingMusic, setMixingMusic] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<HeyGenCatalog | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
-  const [styles, setStyles] = useState<HeyGenStyle[]>([]);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [avatarId, setAvatarId] = useState("");
   const [voiceId, setVoiceId] = useState("");
@@ -173,10 +175,12 @@ function RoteiroDetalhe() {
     "natural",
   );
   const [generationMode, setGenerationMode] = useState<"direct" | "video_agent">("direct");
+  const [musicTracks, setMusicTracks] = useState<MusicTrack[]>([]);
+  const [musicTrackId, setMusicTrackId] = useState<string | null>(null);
+  const [musicVolume, setMusicVolume] = useState(0.12);
   const [ctaMode, setCtaMode] = useState<"auto" | "manual" | "none" | "visual">("auto");
   const [captions, setCaptions] = useState(true);
   const [optimizePronunciation, setOptimizePronunciation] = useState(true);
-  const [styleId, setStyleId] = useState("");
   const [outroText, setOutroText] = useState(initialOutro);
   const [narrationText, setNarrationText] = useState(() =>
     script ? buildNarrationText(script, initialOutro) : "",
@@ -254,6 +258,8 @@ function RoteiroDetalhe() {
     setAvatarMode("single");
     setAvatarSetId(null);
     setPrimaryAvatarId("");
+    setMusicTrackId(null);
+    setMusicVolume(0.12);
     lastSavedProfileKey.current = "";
     fetchProductionProfile(id)
       .then((profile) => {
@@ -266,6 +272,8 @@ function RoteiroDetalhe() {
           setPrimaryAvatarId(profile.primaryAvatarId || profile.avatarId);
           setSpeechMode(profile.speechMode);
           setGenerationMode(profile.generationMode);
+          setMusicTrackId(profile.musicTrackId || null);
+          setMusicVolume(profile.musicVolume || 0.12);
           lastSavedProfileKey.current = [
             profile.avatarId,
             profile.voiceId,
@@ -274,6 +282,8 @@ function RoteiroDetalhe() {
             profile.avatarMode || "single",
             profile.avatarSetId || "",
             profile.primaryAvatarId || profile.avatarId,
+            profile.musicTrackId || "",
+            profile.musicVolume || 0.12,
           ].join("|");
         }
       })
@@ -324,6 +334,9 @@ function RoteiroDetalhe() {
       .then((sets) => setAvatarSets(sets))
       .catch(() => toast.error("Nao consegui carregar os Avatar Sets salvos."))
       .finally(() => setAvatarSetsLoading(false));
+    fetchMusicTracks()
+      .then((tracks) => setMusicTracks(tracks))
+      .catch(() => toast.error("Nao consegui carregar a biblioteca de trilhas locais."));
     setScenePlanLoading(true);
     fetchScenePlan(id)
       .then((plan) => setScenePlan(plan))
@@ -339,20 +352,14 @@ function RoteiroDetalhe() {
       .then((render) => setVideoSlideRender(render))
       .catch(() => toast.error("Nao consegui carregar os previews visuais deste roteiro."))
       .finally(() => setVideoSlideRenderLoading(false));
-    fetchHeyGenStyles("cinematic")
-      .then((data) => setStyles(data.styles))
-      .catch(() => setStyles([]));
-
     try {
       const saved = localStorage.getItem("ai-video-creator-studio-defaults");
       if (saved) {
         const defaults = JSON.parse(saved) as {
           orientation?: "portrait" | "landscape";
-          styleId?: string | null;
           captions?: boolean;
         };
         if (defaults.orientation) setOrientation(defaults.orientation);
-        if (defaults.styleId) setStyleId(defaults.styleId);
         if (typeof defaults.captions === "boolean") setCaptions(defaults.captions);
       }
     } catch {
@@ -392,6 +399,10 @@ function RoteiroDetalhe() {
       (selectedAvatar ? `Voz de ${selectedAvatar.name}` : "Voz do avatar"),
     [catalog?.voices, selectedAvatar, voiceId],
   );
+  const selectedMusicTrack = useMemo(
+    () => musicTracks.find((track) => track.id === musicTrackId) || null,
+    [musicTrackId, musicTracks],
+  );
   const selectedAvatarSet = useMemo(
     () => avatarSets.find((avatarSet) => avatarSet.id === avatarSetId) || null,
     [avatarSetId, avatarSets],
@@ -410,13 +421,16 @@ function RoteiroDetalhe() {
     [catalog?.avatars, selectedAvatarSet],
   );
   const avatarSetReady = Boolean(selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId);
-  const productionModeReady = avatarMode === "single" || Boolean(avatarMode === "set" && sceneGenerationPlan);
+  const heygenAgentMode = generationMode === "video_agent";
+  const productionModeReady =
+    heygenAgentMode || avatarMode === "single" || Boolean(avatarMode === "set" && sceneGenerationPlan);
   const requiredVisualCount = scenePlan ? Math.max(0, scenePlan.scenes.length - 1) : 0;
   const visualProductionReady =
+    heygenAgentMode ||
     avatarMode === "single" ||
     requiredVisualCount === 0 ||
     Boolean(visualPlan && (videoSlideRender?.renderedCount ?? 0) >= requiredVisualCount);
-  const selectedAvatarReady = avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
+  const selectedAvatarReady = heygenAgentMode || avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
   const sceneRoles = useMemo<AvatarSetRole[]>(
     () =>
       selectedAvatarSet?.looks.map((look) => look.role) || ["primary"],
@@ -464,6 +478,8 @@ function RoteiroDetalhe() {
       avatarMode,
       avatarSetId || "",
       primaryAvatarId,
+      musicTrackId || "",
+      musicVolume,
     ].join("|");
     if (key === lastSavedProfileKey.current) return;
     const timeout = window.setTimeout(() => {
@@ -475,6 +491,8 @@ function RoteiroDetalhe() {
         avatarMode,
         avatarSetId: avatarMode === "set" ? avatarSetId : null,
         primaryAvatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
+        musicTrackId,
+        musicVolume,
       })
         .then((profile) => {
           lastSavedProfileKey.current = [
@@ -485,12 +503,14 @@ function RoteiroDetalhe() {
             profile.avatarMode || "single",
             profile.avatarSetId || "",
             profile.primaryAvatarId || profile.avatarId,
+            profile.musicTrackId || "",
+            profile.musicVolume || 0.12,
           ].join("|");
         })
         .catch(() => toast.error("Nao consegui salvar o perfil de producao."));
     }, 500);
     return () => window.clearTimeout(timeout);
-  }, [avatarId, avatarMode, avatarSetId, avatarSetReady, generationMode, id, primaryAvatarId, profileLoaded, speechMode, voiceId]);
+  }, [avatarId, avatarMode, avatarSetId, avatarSetReady, generationMode, id, musicTrackId, musicVolume, primaryAvatarId, profileLoaded, speechMode, voiceId]);
 
   async function handleAvatarSetSaved(saved: AvatarSet) {
     setAvatarSets((current) => {
@@ -576,12 +596,12 @@ function RoteiroDetalhe() {
             ? "Carregando perfil de producao do roteiro."
             : avatarMode === "set" && !selectedAvatarSet
               ? "Selecione um Avatar Set."
-              : avatarMode === "set" && !avatarSetReady
+              : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
                 ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
-                : avatarMode === "set" && !productionModeReady
-                  ? "Salve o Scene Plan antes de gerar o vídeo com duas posições."
-                  : avatarMode === "set" && !visualProductionReady
-                    ? `Gere e renderize ${requiredVisualCount} apoio(s) visual(is) antes de enviar.`
+                : !heygenAgentMode && avatarMode === "set" && !productionModeReady
+                  ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
+                  : !heygenAgentMode && avatarMode === "set" && !visualProductionReady
+                    ? `Clique em "Fazer tudo com Claude" para gerar e renderizar ${requiredVisualCount} slide(s) de transição.`
                   : !avatarId
                     ? "Selecione um avatar pronto."
               : !voiceId
@@ -601,10 +621,10 @@ function RoteiroDetalhe() {
       detail: dirty ? "Salve as alterações antes de enviar." : "Sem alterações pendentes.",
     },
     {
-      label: avatarMode === "set" ? "Avatar Set" : "Avatar",
+      label: !heygenAgentMode && avatarMode === "set" ? "Avatar Set" : "Avatar",
       ready: selectedAvatarReady,
       detail:
-        avatarMode === "set"
+        !heygenAgentMode && avatarMode === "set"
           ? selectedAvatarSet
             ? `${selectedSetLooks.length} look(s) carregado(s).`
             : "Escolha um conjunto de looks."
@@ -619,23 +639,27 @@ function RoteiroDetalhe() {
     },
     {
       label: "Cenas",
-      ready: avatarMode === "single" || Boolean(scenePlan && scenePlan.scenes.length >= 1),
+      ready: heygenAgentMode || avatarMode === "single" || Boolean(scenePlan && scenePlan.scenes.length >= 1),
       detail:
-        avatarMode === "single"
+        heygenAgentMode
+          ? "O HeyGen Video Agent decide a estrutura visual e os cortes."
+          : avatarMode === "single"
           ? "Look único não precisa de plano de cenas."
           : scenePlan
             ? `${scenePlan.scenes.length} cena(s) salvas.`
-            : "Salve o plano de cenas.",
+            : 'Clique em "Fazer tudo com Claude".',
     },
     {
       label: "Slide de transição",
-      ready: avatarMode === "single" || requiredVisualCount === 0 || visualProductionReady,
+      ready: heygenAgentMode || avatarMode === "single" || requiredVisualCount === 0 || visualProductionReady,
       detail:
-        avatarMode === "single" || requiredVisualCount === 0
+        heygenAgentMode
+          ? "O HeyGen cria os visuais dentro do próprio vídeo."
+          : avatarMode === "single" || requiredVisualCount === 0
           ? "Não obrigatório para este formato."
           : visualProductionReady
             ? `${requiredVisualCount} apoio(s) renderizado(s).`
-            : `Gere e renderize ${requiredVisualCount} apoio(s).`,
+            : `Falta gerar/renderizar ${requiredVisualCount} slide(s) com Claude.`,
     },
     {
       label: "Compliance da fala",
@@ -646,7 +670,7 @@ function RoteiroDetalhe() {
 
   async function enviarProducao(forceNewVersion = false) {
     if (!draft || !script) return;
-    if (avatarMode === "set" && !sceneGenerationPlan) {
+    if (avatarMode === "set" && generationMode !== "video_agent" && !sceneGenerationPlan) {
       toast.error("Salve o Scene Plan antes de gerar o vídeo por cenas.");
       return;
     }
@@ -667,7 +691,7 @@ function RoteiroDetalhe() {
         setDraft(saved);
         scriptToSend = saved;
       }
-      if (avatarMode === "set") {
+      if (avatarMode === "set" && generationMode !== "video_agent") {
         const sceneResult = await submitSceneGeneration(scriptToSend.id, {
           orientation,
           durationSeconds,
@@ -692,7 +716,6 @@ function RoteiroDetalhe() {
         ctaMode,
         captions,
         optimizePronunciation,
-        styleId: styleId || undefined,
         forceNewVersion,
         narrationText: displayText,
         displayText,
@@ -710,6 +733,34 @@ function RoteiroDetalhe() {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel enviar ao HeyGen.");
     } finally {
       setSending(false);
+    }
+  }
+
+  async function aplicarTrilhaNoVideoFinal() {
+    if (!musicTrackId || !avatarId || !voiceId) return;
+    setMixingMusic(true);
+    try {
+      // Garante que um clique logo após escolher a faixa já use essa escolha,
+      // sem depender do autosave com debounce da tela.
+      await saveProductionProfile(id, {
+        avatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
+        voiceId,
+        speechMode,
+        generationMode,
+        avatarMode,
+        avatarSetId: avatarMode === "set" ? avatarSetId : null,
+        primaryAvatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
+        musicTrackId,
+        musicVolume,
+      });
+      const job = await composeFinalVideo(id);
+      addVideoJob(job);
+      toast.success("Trilha mixada localmente no vídeo final. A fala foi preservada.");
+      navigate({ to: "/producao/$id", params: { id: job.id } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Ainda não foi possível mixar a trilha no vídeo final.");
+    } finally {
+      setMixingMusic(false);
     }
   }
 
@@ -740,10 +791,14 @@ function RoteiroDetalhe() {
         emotion: performancePlan?.emotion,
       });
       setVisualPlan(result.visualPlan);
+      const rendered = await renderVideoSlides(id);
+      setVideoSlideRender(rendered);
+      const normalizedPlan = await fetchVisualPlan(id);
+      if (normalizedPlan) setVisualPlan(normalizedPlan);
       toast.success(
         savedPlan.scenes.length > 2
-          ? "Slides de transição gerados pelo Claude."
-          : "Slide de transição gerado pelo Claude.",
+          ? "Slides de transição gerados e renderizados."
+          : "Slide de transição gerado e renderizado.",
       );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar slide de transição.");
@@ -850,6 +905,11 @@ function RoteiroDetalhe() {
                   <Film className="mr-1 h-4 w-4" /> Ver vídeo
                 </Link>
               </Button>
+              {avatarMode === "set" && musicTrackId ? (
+                <Button size="sm" variant="secondary" disabled={mixingMusic} onClick={() => void aplicarTrilhaNoVideoFinal()}>
+                  <Volume2 className="mr-1 h-4 w-4" /> {mixingMusic ? "Mixando trilha..." : "Aplicar trilha"}
+                </Button>
+              ) : null}
               <ConfirmAction
                 title="Refazer este vídeo?"
                 description={
@@ -1261,6 +1321,56 @@ function RoteiroDetalhe() {
                 ) : null}
               </div>
               <div className="space-y-2">
+                <div>
+                  <Label className="text-xs">Quem monta o vídeo?</Label>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Escolha se o app conduz as cenas ou se o próprio HeyGen cria a edição visual.
+                  </p>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  <button
+                    type="button"
+                    aria-pressed={generationMode === "direct"}
+                    onClick={() => setGenerationMode("direct")}
+                    className={cn(
+                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
+                      generationMode === "direct" && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                    )}
+                  >
+                    <span className="flex items-center gap-2 text-xs font-semibold">
+                      <Film className="h-4 w-4 text-primary" /> Produção guiada pelo app
+                    </span>
+                    <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                      Usa cenas, trocas de look e slides de transição definidos aqui.
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={generationMode === "video_agent"}
+                    onClick={() => setGenerationMode("video_agent")}
+                    className={cn(
+                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
+                      generationMode === "video_agent" && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                    )}
+                  >
+                    <span className="flex items-center gap-2 text-xs font-semibold">
+                      <Sparkles className="h-4 w-4 text-primary" /> HeyGen Video Agent
+                    </span>
+                    <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                      O HeyGen decide os cortes, interações e visuais do vídeo a partir do roteiro.
+                    </span>
+                  </button>
+                </div>
+                {heygenAgentMode ? (
+                  <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                    <span className="font-semibold text-foreground">Modo autônomo do HeyGen.</span>{" "}
+                    Enviamos somente a fala aprovada, avatar, voz, duração e formato. Não é necessário
+                    criar Scene Plan, slides ou render local; a montagem e os elementos visuais são
+                    produzidos pelo HeyGen e consomem créditos dele.
+                  </div>
+                ) : null}
+              </div>
+              <div className="space-y-2">
                 <Label className="text-xs">Duração</Label>
                 <div className="flex flex-wrap gap-2">
                   {([10, 15, 30, 45, 60] as const).map((seconds) => (
@@ -1281,7 +1391,9 @@ function RoteiroDetalhe() {
                 <p className="text-[11px] leading-4 text-muted-foreground">
                   {durationSeconds <= 15
                     ? "A duração final acompanha a fala, sem silêncio para completar o tempo."
-                    : "O Video Agent organiza o ritmo e as cenas dentro deste tempo aproximado."}
+                    : heygenAgentMode
+                      ? "O HeyGen Video Agent organiza ritmo, cortes e visuais dentro deste tempo aproximado."
+                      : "O app distribui a fala e as cenas dentro deste tempo aproximado."}
                 </p>
                 {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
               </div>
@@ -1336,24 +1448,51 @@ function RoteiroDetalhe() {
                           </SelectContent>
                         </Select>
                       </Field>
-                      {generationMode === "video_agent" ? (
-                        <Field label="Direção visual HeyGen">
-                          <Select value={styleId || "clean"} onValueChange={(value) => setStyleId(value === "clean" ? "" : value)}>
-                            <SelectTrigger><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="clean">Clean - visual clínico</SelectItem>
-                              {styles
-                                .filter((style) => orientation === "portrait" ? style.aspect_ratio === "9:16" : style.aspect_ratio === "16:9")
-                                .map((style) => (
-                                  <SelectItem key={style.style_id} value={style.style_id}>
-                                    Cinematic - {style.name}
-                                  </SelectItem>
-                                ))}
-                            </SelectContent>
-                          </Select>
-                        </Field>
-                      ) : null}
+                      <Field label="Trilha de fundo">
+                        <Select value={musicTrackId || "none"} onValueChange={(value) => setMusicTrackId(value === "none" ? null : value)}>
+                          <SelectTrigger><SelectValue placeholder="Sem trilha" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">Sem trilha</SelectItem>
+                            {musicTracks.map((track) => (
+                              <SelectItem key={track.id} value={track.id}>
+                                {track.name} · {track.mood}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </Field>
                     </div>
+                    {selectedMusicTrack ? (
+                      <div className="mt-3 rounded-md border bg-muted/20 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 text-sm">
+                            <Volume2 className="h-4 w-4 text-primary" />
+                            <span className="font-medium">{selectedMusicTrack.name}</span>
+                            <span className="text-muted-foreground">{selectedMusicTrack.artist} · {selectedMusicTrack.mood}</span>
+                          </div>
+                          <span className="text-xs text-muted-foreground">A trilha entra baixa e não substitui a voz.</span>
+                        </div>
+                        <div className="mt-2 grid gap-2 md:grid-cols-[1fr_auto] md:items-center">
+                          <audio controls preload="none" className="h-9 w-full" src={selectedMusicTrack.url}>
+                            Seu navegador não suporta a prévia de áudio.
+                          </audio>
+                          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                            Volume {Math.round(musicVolume * 100)}%
+                            <input
+                              type="range"
+                              min="3"
+                              max="25"
+                              value={Math.round(musicVolume * 100)}
+                              onChange={(event) => setMusicVolume(Number(event.target.value) / 100)}
+                              className="w-24 accent-primary"
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ) : null}
+                    <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+                      A música só é mixada localmente no MP4 final composto; não cria chamada Claude nem HeyGen.
+                    </p>
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
                       <FriendlySwitch icon={<Captions className="h-4 w-4" />} label="Legendas automáticas" description="Texto em português acompanhando a fala" checked={captions} onCheckedChange={setCaptions} />
                       <FriendlySwitch icon={<Sparkles className="h-4 w-4" />} label="Melhorar pronúncia" description="Ajusta siglas, remédios e números para a voz" checked={optimizePronunciation} onCheckedChange={setOptimizePronunciation} />
@@ -1404,9 +1543,33 @@ function RoteiroDetalhe() {
             id="roteiro-direcao"
             className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
           >
-            <SectionHeading index={3} title="Direção" description="Prepare cenas, looks e apoios visuais sem expor o contrato técnico por padrão." />
+            <SectionHeading
+              index={3}
+              title="Direção"
+              description={
+                heygenAgentMode
+                  ? "O HeyGen vai criar a direção visual dentro do vídeo, sem etapas manuais de cenas ou slides."
+                  : "Depois de escolher duração e avatar, deixe o Claude organizar cenas, cortes de look e slide de transição."
+              }
+            />
             <div className="mt-4">
-              <ScenePlanEditor
+              {heygenAgentMode ? (
+                <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4">
+                  <div className="flex items-start gap-2">
+                    <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                    <div>
+                      <h3 className="text-sm font-semibold">Direção entregue ao HeyGen Video Agent</h3>
+                      <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                        Nenhuma cena, slide de transição ou preview local precisa ser montado aqui. Ao
+                        enviar, o HeyGen recebe a fala aprovada e cria a edição, os cortes e os apoios
+                        visuais dentro do vídeo final.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <ScenePlanEditor
                 scriptId={id}
                 loading={scenePlanLoading}
                 plan={scenePlan}
@@ -1420,7 +1583,7 @@ function RoteiroDetalhe() {
                 onSaved={setScenePlan}
                 onGenerateTransitionSlides={gerarSlidesTransicao}
               />
-              <VisualPlanDirector
+                  <VisualPlanDirector
                 scriptId={id}
                 scenePlan={scenePlan}
                 visualPlan={visualPlan}
@@ -1434,7 +1597,7 @@ function RoteiroDetalhe() {
                 videoSlideRenderLoading={videoSlideRenderLoading}
                 onRendered={setVideoSlideRender}
               />
-              <Accordion type="single" collapsible className="mt-3">
+                  <Accordion type="single" collapsible className="mt-3">
                 <AccordionItem value="scene-generation-details">
                   <AccordionTrigger>Detalhes técnicos da geração por cena</AccordionTrigger>
                   <AccordionContent>
@@ -1446,7 +1609,9 @@ function RoteiroDetalhe() {
                     />
                   </AccordionContent>
                 </AccordionItem>
-              </Accordion>
+                  </Accordion>
+                </>
+              )}
             </div>
           </div>
 
@@ -2247,6 +2412,16 @@ function coerceToTwoSceneDraft(
   ];
 }
 
+function scenePlanToEditableScenes(plan: ScenePlan, roles: AvatarSetRole[]): EditableScene[] {
+  return plan.scenes.map((scene, index) => ({
+    id: scene.id,
+    text: scene.text,
+    lookRole: resolveSceneRole(scene.lookRole, index, roles),
+    estimatedStart: scene.estimatedStart,
+    estimatedEnd: scene.estimatedEnd,
+  }));
+}
+
 function ScenePlanEditor({
   scriptId,
   loading,
@@ -2283,13 +2458,7 @@ function ScenePlanEditor({
   useEffect(() => {
     if (loading) return;
     setScenes(
-      plan?.scenes.map((scene, index) => ({
-        id: scene.id,
-        text: scene.text,
-        lookRole: resolveSceneRole(scene.lookRole, index, availableRoles),
-        estimatedStart: scene.estimatedStart,
-        estimatedEnd: scene.estimatedEnd,
-      })) || defaultSceneDraft(fallbackText, availableRoles),
+      plan ? scenePlanToEditableScenes(plan, availableRoles) : defaultSceneDraft(fallbackText, availableRoles),
     );
     setError(null);
   }, [availableRoles, loading, plan?.updatedAt]);
@@ -2355,18 +2524,18 @@ function ScenePlanEditor({
     }
   }
 
-  function validateScenes() {
-    if (scenes.some((scene) => !scene.text.trim())) {
+  function validateScenes(targetScenes = scenes) {
+    if (targetScenes.some((scene) => !scene.text.trim())) {
       return "Cada cena precisa ter um texto falado.";
     }
-    if (availableRoles.length >= 2 && new Set(scenes.map((scene) => scene.lookRole)).size < 2) {
+    if (availableRoles.length >= 2 && new Set(targetScenes.map((scene) => scene.lookRole)).size < 2) {
       return "Use pelo menos duas posições diferentes quando o Avatar Set estiver ativo.";
     }
     return null;
   }
 
-  async function persistScenes(showToast = true) {
-    const validationError = validateScenes();
+  async function persistScenes(showToast = true, targetScenes = scenes) {
+    const validationError = validateScenes(targetScenes);
     if (validationError) {
       setError(validationError);
       return null;
@@ -2374,8 +2543,9 @@ function ScenePlanEditor({
     setSaving(true);
     setError(null);
     try {
-      const saved = await saveScenePlan(scriptId, scenes);
+      const saved = await saveScenePlan(scriptId, targetScenes);
       onSaved(saved);
+      setScenes(scenePlanToEditableScenes(saved, availableRoles));
       if (showToast) toast.success("Scene Plan salvo.");
       return saved;
     } catch (saveError) {
@@ -2408,18 +2578,65 @@ function ScenePlanEditor({
     }
   }
 
+  async function organizeEverythingWithClaude() {
+    setDirecting(true);
+    setError(null);
+    setDirectionNotice(null);
+    try {
+      const result = await generateSceneDirection(scriptId, {
+        displayText,
+        spokenText,
+        durationSeconds,
+        tone: performancePlan?.tone,
+        pace: performancePlan?.pace,
+        emotion: performancePlan?.emotion,
+      });
+      const nextScenes =
+        availableRoles.length >= 2
+          ? coerceToTwoSceneDraft(result.scenes, availableRoles, displayText || fallbackText)
+          : result.scenes.map((scene, index) => ({
+              id: `scene-${index + 1}`,
+              text: scene.text,
+              lookRole: resolveSceneRole(scene.lookRole, index, availableRoles),
+              estimatedStart: 0,
+              estimatedEnd: 0,
+            }));
+      const saved = await persistScenes(false, nextScenes);
+      if (!saved) return;
+      if (onGenerateTransitionSlides && saved.scenes.length > 1) {
+        await onGenerateTransitionSlides(saved);
+      }
+      setDirectionNotice(
+        saved.scenes.length > 1
+          ? "Claude organizou as cenas, salvou o plano e preparou o slide de transição."
+          : "Claude organizou e salvou o plano de cenas.",
+      );
+    } catch (directionError) {
+      setError(directionError instanceof Error ? directionError.message : "Nao foi possivel organizar com Claude.");
+    } finally {
+      setDirecting(false);
+    }
+  }
+
   return (
     <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h4 className="text-xs font-semibold">Plano de cenas</h4>
+          <h4 className="text-xs font-semibold">Claude organiza o vídeo</h4>
           <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-            Cada cena usa uma única posição. A troca acontece somente com corte entre cenas.
+            Você escolhe duração e avatar. O Claude divide a fala, alterna os looks e cria o slide entre as cenas.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button type="button" size="sm" variant="secondary" onClick={() => void requestDirection()} disabled={loading || directing}>
-            <Sparkles className="h-3.5 w-3.5" /> {directing ? "Claude pensando..." : "Gerar 2 cenas com Claude"}
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            onClick={() => void organizeEverythingWithClaude()}
+            disabled={loading || directing || transitionSlideGenerating}
+          >
+            <Sparkles className="h-3.5 w-3.5" />{" "}
+            {directing || transitionSlideGenerating ? "Claude organizando..." : "Fazer tudo com Claude"}
           </Button>
           {scenes.length !== 2 && availableRoles.length >= 2 ? (
             <Button type="button" size="sm" variant="outline" onClick={useTwoScenes}>
@@ -2431,7 +2648,10 @@ function ScenePlanEditor({
           </Button>
         </div>
       </div>
-      <p className="text-[11px] text-muted-foreground">O botão de direção usa tokens Claude e não salva alterações automaticamente.</p>
+      <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+        <span className="font-semibold text-foreground">Fluxo automático:</span> 2 cenas com posições diferentes,
+        1 slide de transição renderizado e checklist final antes de enviar ao HeyGen.
+      </div>
       {loading ? (
         <p className="text-xs text-muted-foreground">Carregando Scene Plan...</p>
       ) : (
@@ -2503,7 +2723,7 @@ function ScenePlanEditor({
                       Transição Cena {index + 1} → Cena {index + 2}
                     </div>
                     <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-                      Crie um slide visual para entrar durante a fala antes do próximo look.
+                      O Claude cria este slide para aparecer durante a fala, antes do próximo look entrar.
                     </p>
                   </div>
                   <Button
@@ -2525,9 +2745,11 @@ function ScenePlanEditor({
       {directionNotice ? <p className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-status-info">{directionNotice}</p> : null}
       {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[11px] text-muted-foreground">A direção automática com Claude será adicionada em um próximo slice.</p>
-        <Button type="button" size="sm" onClick={() => void save()} disabled={loading || saving || scenes.length === 0}>
-          {saving ? "Salvando..." : "Salvar plano de cenas"}
+        <p className="text-[11px] text-muted-foreground">
+          Use o salvamento manual só se você editou alguma cena depois do Claude.
+        </p>
+        <Button type="button" size="sm" variant="outline" onClick={() => void save()} disabled={loading || saving || scenes.length === 0}>
+          {saving ? "Salvando..." : "Salvar ajuste manual"}
         </Button>
       </div>
     </div>
