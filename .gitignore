@@ -22,6 +22,9 @@ data/operations.db-shm
 data/operations.db-wal
 data/cut_uploads/
 data/cuts/
+data/local_video_kit_uploads/
+data/local_video_kits/
+data/video_slides/
 *.log
 *.jsonl
 *.mp4
@@ -38,6 +41,9 @@ tmp/
 
 # Exports gerados pelo botao "Salvar local" (regeneraveis)
 content/packs/
+
+# Biblioteca local de vídeos produzidos (arquivos finais e artefatos de renderização)
+content/videos/
 
 # Previews de avatar baixados automaticamente pelo catalogo HeyGen (cache local)
 data/pack_assets/avatars/

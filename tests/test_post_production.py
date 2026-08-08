@@ -87,10 +87,39 @@ class PostProductionContractTests(unittest.TestCase):
                     }
                 ],
             )
-        self.assertEqual(transcript["normalizationVersion"], "ptbr-medical-v1")
+        self.assertEqual(transcript["normalizationVersion"], "ptbr-medical-v2")
         self.assertIn("Mounjaro", transcript["text"])
         self.assertIn("sintomas incomuns", transcript["text"])
         self.assertEqual([word["text"] for word in transcript["words"]][-2:], ["sintomas", "incomuns"])
+
+    def test_normalizes_product_and_glp_one_terms_used_in_captions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            video = root / "source.mp4"
+            video.write_bytes(b"product-normalization")
+            transcript = normalize_transcript(
+                video_path=video,
+                language="pt",
+                duration_seconds=2,
+                model_version="fixture-v1",
+                raw_segments=[
+                    {
+                        "start": 0,
+                        "end": 2,
+                        "text": "A IPERA lança o SEMAV. Uma SEMA aglutida para GLP1.",
+                        "words": [
+                            {"start": 0, "end": 0.2, "text": "A"},
+                            {"start": 0.2, "end": 0.5, "text": "IPERA"},
+                            {"start": 0.5, "end": 0.8, "text": "lança"},
+                            {"start": 0.8, "end": 1.0, "text": "SEMAV"},
+                            {"start": 1.0, "end": 1.2, "text": "GLP1"},
+                        ],
+                    }
+                ],
+            )
+        self.assertIn("Hypera lança o Semavy", transcript["text"])
+        self.assertIn("semaglutida", transcript["text"])
+        self.assertIn("GLP-1", transcript["text"])
 
     def test_plan_keeps_context_and_expands_short_event_to_readable_duration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -153,8 +182,33 @@ class PostProductionContractTests(unittest.TestCase):
         cues = caption_cues(transcript)
         self.assertGreaterEqual(len(cues), 2)
         self.assertTrue(all(end - start <= 2800 for start, end, _text in cues))
-        self.assertTrue(all(len(text.split()) <= 7 for _start, _end, text in cues))
+        self.assertTrue(all(len(text.split()) <= 10 for _start, _end, text in cues))
         self.assertTrue(all(len(text.splitlines()) <= 2 for _start, _end, text in cues))
+
+    def test_caption_cues_normalize_product_names_and_avoid_dangling_endings(self) -> None:
+        transcript = {
+            "words": [
+                {"startMs": 0, "endMs": 300, "text": "A"},
+                {"startMs": 300, "endMs": 600, "text": "IPERA"},
+                {"startMs": 600, "endMs": 900, "text": "lança"},
+                {"startMs": 900, "endMs": 1200, "text": "o"},
+                {"startMs": 1200, "endMs": 1500, "text": "SEMAV"},
+                {"startMs": 1500, "endMs": 1800, "text": "para"},
+                {"startMs": 1800, "endMs": 2100, "text": "todo"},
+                {"startMs": 2100, "endMs": 2400, "text": "mundo."},
+            ]
+        }
+        cues = caption_cues(transcript)
+        rendered = " ".join(text.replace("\n", " ") for _start, _end, text in cues)
+        self.assertIn("Hypera", rendered)
+        self.assertIn("Semavy", rendered)
+        dangling = {" todo", " para", " não", " que"}
+        self.assertFalse(
+            any(
+                text.replace("\n", " ").rstrip().casefold().endswith(tuple(dangling))
+                for _start, _end, text in cues
+            )
+        )
 
     def test_planner_uses_indices_and_backend_derives_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

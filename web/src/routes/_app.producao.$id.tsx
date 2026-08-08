@@ -10,6 +10,7 @@ import { useStore } from "@/lib/store";
 import {
   appendCalendarPost,
   createPostProduction,
+  fetchLatestPostProduction,
   fetchPostProduction,
   fetchPostProductionArtifacts,
   postProductionPreviewUrl,
@@ -62,6 +63,7 @@ import {
 } from "lucide-react";
 import type { Canal, Script, VideoJobStatus } from "@/lib/mock-data";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_app/producao/$id")({
   head: ({ params }) => ({
@@ -95,6 +97,10 @@ function VideoDetalhe() {
   const [postArtifacts, setPostArtifacts] = useState<PostProductionArtifacts | null>(null);
   const [preflightReport, setPreflightReport] = useState<PreflightReport | null>(null);
   const [postBusy, setPostBusy] = useState(false);
+  const [autoRefreshing, setAutoRefreshing] = useState(false);
+  const trackedJobId = job?.id;
+  const trackedJobProvider = job?.provider;
+  const trackedJobStatus = job?.status;
 
   useEffect(() => {
     if (!script) return;
@@ -105,10 +111,25 @@ function VideoDetalhe() {
 
   useEffect(() => {
     const savedId = window.localStorage.getItem(`post-production:${id}`);
-    if (!savedId) return;
-    void fetchPostProduction(savedId)
-      .then(setPostJob)
-      .catch(() => window.localStorage.removeItem(`post-production:${id}`));
+    let cancelled = false;
+    const recover = async () => {
+      let recovered: PostProductionJob | null = null;
+      if (savedId) {
+        try {
+          recovered = await fetchPostProduction(savedId);
+        } catch {
+          window.localStorage.removeItem(`post-production:${id}`);
+        }
+      }
+      if (!recovered) recovered = await fetchLatestPostProduction(id);
+      if (cancelled || !recovered) return;
+      window.localStorage.setItem(`post-production:${id}`, recovered.id);
+      setPostJob(recovered);
+    };
+    void recover().catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
 
   useEffect(() => {
@@ -136,17 +157,72 @@ function VideoDetalhe() {
     return () => window.clearInterval(timer);
   }, [postJob?.id, postJob?.status]);
 
-  async function startPostProduction() {
+  useEffect(() => {
+    const active =
+      trackedJobProvider === "heygen" &&
+      (trackedJobStatus === "fila" || trackedJobStatus === "processando");
+    if (!trackedJobId || !active) {
+      setAutoRefreshing(false);
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | undefined;
+    setAutoRefreshing(true);
+
+    const poll = async () => {
+      try {
+        const result = await refreshHeyGenVideo(trackedJobId);
+        if (cancelled) return;
+        updateVideoJob(trackedJobId, result.job);
+        if (result.composedJob) addVideoJob(result.composedJob);
+        if (result.job.status === "pronto") {
+          setAutoRefreshing(false);
+          toast.success(
+            result.composedJob
+              ? "Vídeo final composto pronto."
+              : "Nova versão pronta e salva em content/videos.",
+          );
+          return;
+        }
+        if (result.job.status === "erro") {
+          setAutoRefreshing(false);
+          toast.error(result.job.erro || "A produção falhou no HeyGen.");
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), 5000);
+      } catch (error) {
+        if (cancelled) return;
+        console.warn("[video-status] atualização automática falhou", {
+          jobId: trackedJobId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        timer = window.setTimeout(() => void poll(), 8000);
+      }
+    };
+
+    timer = window.setTimeout(() => void poll(), 1200);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [addVideoJob, trackedJobId, trackedJobProvider, trackedJobStatus, updateVideoJob]);
+
+  async function applyElegantPostProduction() {
+    if (postJob?.status === "preview_ready") {
+      document.getElementById("post-production")?.scrollIntoView({ behavior: "smooth" });
+      return;
+    }
     setPostBusy(true);
     try {
-      const created = await createPostProduction(job!.id);
+      const created = await createPostProduction(job!.id, true);
       window.localStorage.setItem(`post-production:${job!.id}`, created.id);
       setPostJob(created);
       setPostArtifacts(null);
       setPreflightReport(null);
-      toast.success("Pós-produção iniciada sem alterar o vídeo original.");
+      toast.success("Edição elegante iniciada. A prévia será renderizada automaticamente.");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Não foi possível iniciar a edição.");
+      toast.error(error instanceof Error ? error.message : "Não foi possível aplicar a edição.");
     } finally {
       setPostBusy(false);
     }
@@ -187,6 +263,9 @@ function VideoDetalhe() {
     criadoEm: job.criadoEm,
     atualizadoEm: job.atualizadoEm,
   });
+  const postApplying = Boolean(
+    postJob && ["queued", "transcribing", "planning", "preflight", "rendering_preview"].includes(postJob.status),
+  );
 
   return (
     <AppShell
@@ -202,7 +281,7 @@ function VideoDetalhe() {
             <Button
               size="sm"
               variant="secondary"
-              disabled={job.provider === "local"}
+              disabled={job.provider === "local" || autoRefreshing}
               onClick={async () => {
                 try {
                   const result = await refreshHeyGenVideo(job.id);
@@ -218,7 +297,8 @@ function VideoDetalhe() {
                 }
               }}
             >
-              <RefreshCcw className="mr-1 h-4 w-4" /> Atualizar status
+              <RefreshCcw className={cn("mr-1 h-4 w-4", autoRefreshing && "animate-spin")} />
+              {autoRefreshing ? "Acompanhando..." : "Atualizar status"}
             </Button>
           </WithTooltip>
           {script ? (
@@ -237,13 +317,21 @@ function VideoDetalhe() {
             </Button>
           ) : null}
           {job.status === "pronto" && job.videoUrl ? (
-            <Button size="sm" onClick={() => void startPostProduction()} disabled={postBusy}>
-              {postBusy ? (
+            <Button
+              size="sm"
+              onClick={() => void applyElegantPostProduction()}
+              disabled={postBusy || postApplying}
+            >
+              {postBusy || postApplying ? (
                 <Loader2 className="mr-1 h-4 w-4 animate-spin" />
               ) : (
                 <Sparkles className="mr-1 h-4 w-4" />
               )}
-              Editar automaticamente
+              {postJob?.status === "preview_ready"
+                ? "Ver edição elegante"
+                : postApplying
+                  ? "Aplicando edição..."
+                  : "Aplicar edição elegante"}
             </Button>
           ) : null}
           <Dialog open={publishOpen} onOpenChange={setPublishOpen}>
@@ -461,11 +549,13 @@ function VideoDetalhe() {
                     {job.isComposed ? "Baixar MP4 final" : "Baixar MP4"}
                   </a>
                 </Button>
-                {!job.isComposed ? <Button size="sm" variant="ghost" asChild>
-                  <a href={job.videoUrl} target="_blank" rel="noreferrer">
-                    Abrir no HeyGen <ExternalLink className="ml-1 h-3.5 w-3.5" />
-                  </a>
-                </Button> : null}
+                {!job.isComposed && job.remoteVideoUrl ? (
+                  <Button size="sm" variant="ghost" asChild>
+                    <a href={job.remoteVideoUrl} target="_blank" rel="noreferrer">
+                      Abrir no HeyGen <ExternalLink className="ml-1 h-3.5 w-3.5" />
+                    </a>
+                  </Button>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -713,7 +803,7 @@ function PostProductionPanel({
   }
 
   return (
-    <section className="rounded-xl border border-status-info/30 bg-card p-4 shadow-sm">
+    <section id="post-production" className="rounded-xl border border-status-info/30 bg-card p-4 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="font-display text-sm font-semibold">Pós-produção inteligente</h3>
@@ -769,8 +859,8 @@ function PostProductionPanel({
                     <SelectItem value="none">Sem intervenção</SelectItem>
                   </SelectContent>
                 </Select>
-                <Input
-                  className="mt-2"
+                <Textarea
+                  className="mt-2 min-h-20 resize-y whitespace-pre-wrap"
                   maxLength={100}
                   value={event.visualText}
                   disabled={!event.enabled}

@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from api import cut_service, server
 from api.job_store import JobStore
@@ -78,6 +78,50 @@ class FakeRadarClient:
 
 
 class StableIdTests(unittest.TestCase):
+    def test_auto_render_post_production_continues_after_analysis(self) -> None:
+        import threading
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            job_id = "post-auto-render"
+            store.upsert(
+                "post_production",
+                {
+                    "id": job_id,
+                    "kind": "post_production",
+                    "videoJobId": "video-ready",
+                    "status": "queued",
+                    "progresso": 2,
+                    "etapa": "Na fila",
+                    "autoRender": True,
+                    "criadoEm": "2026-08-07T00:00:00+00:00",
+                    "atualizadoEm": "2026-08-07T00:00:00+00:00",
+                },
+            )
+            rendered = threading.Event()
+
+            def finish_analysis(**_kwargs: object) -> None:
+                current = store.get("post_production", job_id)
+                assert current is not None
+                current.update(status="needs_review", progresso=80, etapa="Plano pronto")
+                store.upsert("post_production", current)
+
+            with (
+                patch.object(server, "_job_store", return_value=store),
+                patch.object(server, "analyze_post_production", side_effect=finish_analysis),
+                patch.object(
+                    server,
+                    "_launch_post_production_render",
+                    side_effect=lambda _job_id: rendered.set(),
+                ),
+            ):
+                server._launch_post_production_analysis(job_id)
+                self.assertTrue(rendered.wait(2), "A renderização automática não foi iniciada.")
+
+            updated = store.get("post_production", job_id)
+            self.assertEqual(updated["status"], "rendering_preview")
+            self.assertEqual(updated["etapa"], "Aplicando edição elegante")
+
     def test_claude_array_schemas_do_not_use_unsupported_size_keywords(self) -> None:
         def assert_compatible(value: object) -> None:
             if isinstance(value, dict):
@@ -657,6 +701,99 @@ class StableIdTests(unittest.TestCase):
         )
         self.assertEqual(run.call_args_list[1].kwargs["payload"], {})
 
+    def test_photo_avatar_skips_unrequired_consent_and_preserves_look_id(self) -> None:
+        media = server.AvatarMediaIn(
+            name="avatar.png",
+            mimeType="image/png",
+            data=base64.b64encode(b"image-content").decode("ascii"),
+        )
+        response = {
+            "data": {
+                "avatar_group": {
+                    "id": "group-photo",
+                    "name": "Avatar por foto",
+                    "status": "completed",
+                    "consent_status": None,
+                },
+                "avatar_item": {
+                    "id": "look-photo",
+                    "group_id": "group-photo",
+                    "avatar_type": "photo_avatar",
+                    "status": "completed",
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            with (
+                patch.object(server, "_heygen_cli", return_value="heygen"),
+                patch.object(server, "_run_heygen_json", return_value=response) as run,
+                patch.object(server, "_job_store", return_value=store),
+            ):
+                result = server.create_heygen_avatar(
+                    server.AvatarCreateIn(
+                        name="Avatar por foto",
+                        creationType="photo",
+                        media=[media],
+                        consentAccepted=True,
+                    )
+                )
+
+            stored = store.get("avatar", result["job"]["id"])
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(result["job"]["groupId"], "group-photo")
+        self.assertEqual(result["job"]["avatarId"], "look-photo")
+        self.assertEqual(result["job"]["status"], "completed")
+        self.assertIsNone(result["job"]["consentUrl"])
+        self.assertEqual(stored["avatarId"], "look-photo")
+
+    def test_consent_failure_returns_created_avatar_instead_of_502(self) -> None:
+        media = server.AvatarMediaIn(
+            name="avatar.mp4",
+            mimeType="video/mp4",
+            data=base64.b64encode(b"video-content").decode("ascii"),
+        )
+        responses = [
+            {
+                "data": {
+                    "avatar_group": {
+                        "id": "group-created",
+                        "status": "pending_consent",
+                        "consent_status": "pending",
+                    },
+                    "avatar_item": {
+                        "id": "look-created",
+                        "group_id": "group-created",
+                        "avatar_type": "digital_twin",
+                    },
+                }
+            },
+            server.HTTPException(status_code=502, detail="Consent unavailable"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            with (
+                patch.object(server, "_heygen_cli", return_value="heygen"),
+                patch.object(server, "_run_heygen_json", side_effect=responses),
+                patch.object(server, "_job_store", return_value=store),
+            ):
+                result = server.create_heygen_avatar(
+                    server.AvatarCreateIn(
+                        name="Avatar parcialmente configurado",
+                        creationType="digital_twin",
+                        media=[media],
+                        consentAccepted=True,
+                    )
+                )
+
+            stored = store.get("avatar", result["job"]["id"])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["job"]["groupId"], "group-created")
+        self.assertIn("foi criado", result["job"]["setupWarning"])
+        self.assertEqual(stored["groupId"], "group-created")
+
     def test_existing_video_requires_explicit_new_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             jobs_file = Path(temporary) / "video_jobs.json"
@@ -697,6 +834,42 @@ class StableIdTests(unittest.TestCase):
             finally:
                 server.VIDEO_JOBS = original_jobs
                 server.OPERATIONAL_DB = original_database
+
+    def test_completed_heygen_video_is_archived_under_content_videos(self) -> None:
+        with tempfile.TemporaryDirectory(dir=server.ROOT / "data") as temporary:
+            root = Path(temporary)
+            original_outputs = server.PRODUCED_VIDEO_OUTPUTS
+            server.PRODUCED_VIDEO_OUTPUTS = root / "content" / "videos" / "produzidos"
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            response.iter_content.return_value = [b"video-", b"content"]
+            response.__enter__.return_value = response
+            response.__exit__.return_value = False
+            job = {
+                "id": "v-ready",
+                "scriptId": "s-ready",
+                "status": "pronto",
+                "videoUrl": "https://files2.heygen.ai/video/v-ready.mp4",
+            }
+            try:
+                with (
+                    patch.object(server, "_find_script", return_value={"titulo": "Vídeo pronto"}),
+                    patch.object(server.requests, "get", return_value=response) as get,
+                ):
+                    archived = server._archive_completed_video(job)
+            finally:
+                server.PRODUCED_VIDEO_OUTPUTS = original_outputs
+
+            output = server.ROOT / archived["outputPath"]
+            self.assertEqual(output.read_bytes(), b"video-content")
+            self.assertIn("content/videos/produzidos", archived["outputPath"])
+            self.assertEqual(archived["remoteVideoUrl"], job["remoteVideoUrl"])
+            self.assertEqual(archived["videoUrl"], "/api/videos/v-ready/file")
+            get.assert_called_once_with(
+                "https://files2.heygen.ai/video/v-ready.mp4",
+                stream=True,
+                timeout=(15, 300),
+            )
 
     def test_mappers_prefer_persisted_ids(self) -> None:
         scripts = server.map_scripts([{"ID": "s-permanente", "Título": "Teste"}])

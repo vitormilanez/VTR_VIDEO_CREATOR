@@ -12,6 +12,7 @@ from api.services.post_production_overlays import render_overlay
 from api.services.transcript_service import (
     TRANSCRIPT_SCHEMA_VERSION,
     TRANSCRIPT_NORMALIZATION_VERSION,
+    normalize_ptbr_medical_text,
     transcribe_video_to_file,
     video_fingerprint,
 )
@@ -22,9 +23,13 @@ from api.services.visual_timeline import materialize_timeline, preflight_timelin
 
 DESIGN_VERSION = "post-production-design-v2"
 RENDER_CONFIG_VERSION = "vertical-1080x1920-v2"
-MAX_CAPTION_WORDS = 7
-MAX_CAPTION_CHARS = 44
+MAX_CAPTION_WORDS = 10
+MAX_CAPTION_CHARS = 64
 MAX_CAPTION_MS = 2800
+_CAPTION_DANGLING_ENDS = {
+    "a", "as", "com", "da", "de", "do", "e", "em", "não", "no", "o", "os",
+    "para", "por", "que", "se", "sem", "seu", "sua", "todo", "toda", "um", "uma",
+}
 
 
 class PostProductionCancelled(RuntimeError):
@@ -240,6 +245,7 @@ def caption_cues(transcript: dict[str, Any]) -> list[tuple[int, int, str]]:
         if not current:
             return
         text = " ".join(str(word.get("text") or "").strip() for word in current).strip()
+        text = normalize_ptbr_medical_text(text)
         if text:
             cues.append(
                 (
@@ -263,7 +269,15 @@ def caption_cues(transcript: dict[str, Any]) -> list[tuple[int, int, str]]:
                 or len(candidate) > MAX_CAPTION_CHARS
                 or duration > MAX_CAPTION_MS
             ):
+                carry: list[dict[str, Any]] = []
+                while len(current) > 2:
+                    last_key = str(current[-1].get("text") or "").strip(".,:;!? ").casefold()
+                    if last_key not in _CAPTION_DANGLING_ENDS:
+                        break
+                    carry.insert(0, current.pop())
                 flush()
+                if carry:
+                    current.extend(carry)
         current.append(word)
         if len(current) >= 3 and word_text.endswith((".", "?", "!")):
             flush()

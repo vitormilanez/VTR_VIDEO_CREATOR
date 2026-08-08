@@ -18,6 +18,7 @@ from email.parser import Parser
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -32,7 +33,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote, quote_plus, urlparse
+from urllib.parse import quote, quote_plus, unquote, urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -91,6 +92,8 @@ from api.services.post_production import (
     run_preflight as run_post_production_preflight,
     save_event_updates as save_post_production_event_updates,
 )
+from api.services.transcript_service import normalize_ptbr_medical_text
+from api.services.local_video_kit import render_local_kit_video
 from api.services.pack_context import PACK_CONTEXT_VERSION, build_pack_context
 from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
@@ -107,14 +110,20 @@ APP_SETTINGS = ROOT / "data" / "app_settings.json"
 HEYGEN_AVATAR_CACHE = ROOT / "data" / "heygen_avatar_cache.json"
 OPERATIONAL_DB = ROOT / "data" / "operations.db"
 CUT_UPLOADS = ROOT / "data" / "cut_uploads"
-CUT_OUTPUTS = ROOT / "data" / "cuts"
-POST_PRODUCTION_OUTPUTS = ROOT / "data" / "post_production"
+LOCAL_VIDEO_KIT_UPLOADS = ROOT / "data" / "local_video_kit_uploads"
+LOCAL_VIDEO_KIT_JOBS = ROOT / "data" / "local_video_kits"
+CONTENT_VIDEOS = ROOT / "content" / "videos"
+LOCAL_VIDEO_KIT_OUTPUTS = CONTENT_VIDEOS / "video feito"
+PRODUCED_VIDEO_OUTPUTS = CONTENT_VIDEOS / "produzidos"
+CUT_OUTPUTS = CONTENT_VIDEOS / "cortes"
+POST_PRODUCTION_OUTPUTS = CONTENT_VIDEOS / "pos-producao"
 PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
 PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
 VIDEO_SLIDE_OUTPUTS = ROOT / "data" / "video_slides"
-COMPOSED_VIDEO_OUTPUTS = ROOT / "data" / "composed_videos"
+COMPOSED_VIDEO_OUTPUTS = PRODUCED_VIDEO_OUTPUTS / "composicoes"
 MUSIC_TRACKS_DIR = ROOT / "data" / "music_tracks"
 MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
+LOGGER = logging.getLogger("uvicorn.error")
 
 # Biblioteca local: arquivos enviados pelo usuário, sem upload ou chamada paga.
 # O compositor usa essas faixas apenas depois de as cenas HeyGen ficarem prontas.
@@ -942,7 +951,7 @@ def _copy_or_download_video(job: dict[str, Any], destination: Path) -> Path:
     if local_path:
         shutil.copyfile(local_path, destination)
         return destination
-    video_url = str(job.get("videoUrl") or "")
+    video_url = str(job.get("remoteVideoUrl") or job.get("videoUrl") or "")
     parsed = urlparse(video_url)
     hostname = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not (hostname == "heygen.ai" or hostname.endswith(".heygen.ai")):
@@ -957,6 +966,65 @@ def _copy_or_download_video(job: dict[str, Any], destination: Path) -> Path:
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail="Não foi possível baixar uma cena pronta.") from exc
     return destination
+
+
+def _video_archive_destination(job: dict[str, Any]) -> Path:
+    try:
+        script = _find_script(str(job.get("scriptId") or ""))
+        title = str(script.get("titulo") or "video-produzido")
+    except HTTPException:
+        title = "video-produzido"
+    safe_title = re.sub(r"[^a-zA-Z0-9_-]+", "-", _norm(title)).strip("-")
+    safe_job_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(job.get("id") or "video")).strip("-")
+    return PRODUCED_VIDEO_OUTPUTS / f"{safe_title or 'video-produzido'}--{safe_job_id or 'video'}.mp4"
+
+
+def _archive_completed_video(job: dict[str, Any]) -> dict[str, Any]:
+    """Materializa o MP4 final em content/videos sem transformar falha de cópia em falha HeyGen."""
+    if job.get("status") != "pronto" or job.get("isScene"):
+        return job
+
+    local_url = f"/api/videos/{quote(str(job.get('id') or ''), safe='')}/file"
+    existing = _local_output_path(job.get("outputPath"))
+    current_url = str(job.get("videoUrl") or "")
+    if existing:
+        if current_url.startswith("https://"):
+            job["remoteVideoUrl"] = current_url
+        job["localVideoUrl"] = local_url
+        job["videoUrl"] = local_url
+        job.pop("archiveWarning", None)
+        return job
+
+    remote_url = str(job.get("remoteVideoUrl") or current_url)
+    parsed = urlparse(remote_url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (
+        hostname == "heygen.ai" or hostname.endswith(".heygen.ai")
+    ):
+        return job
+
+    destination = _video_archive_destination(job)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".part")
+    try:
+        with requests.get(remote_url, stream=True, timeout=(15, 300)) as response:
+            response.raise_for_status()
+            with temporary.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+        temporary.replace(destination)
+        job["outputPath"] = str(destination.relative_to(ROOT))
+        job["remoteVideoUrl"] = remote_url
+        job["localVideoUrl"] = local_url
+        job["videoUrl"] = local_url
+        job.pop("archiveWarning", None)
+        LOGGER.info("Completed video archived locally: job_id=%s path=%s", job.get("id"), destination)
+    except (OSError, requests.RequestException) as exc:
+        temporary.unlink(missing_ok=True)
+        job["archiveWarning"] = "O vídeo está pronto, mas ainda não foi salvo em content/videos."
+        LOGGER.warning("Completed video archive failed: job_id=%s detail=%s", job.get("id"), exc)
+    return job
 
 
 def _scene_jobs_ready(script_id: str, scene_plan: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -2485,6 +2553,53 @@ def _voice_from_video(media: AvatarMediaIn) -> dict[str, str]:
     }
 
 
+def _avatar_creation_metadata(response: dict[str, Any]) -> dict[str, Any]:
+    """Extrai grupo e visual sem confundir os dois IDs da resposta v3."""
+    data = response.get("data")
+    data = data if isinstance(data, dict) else {}
+    group = data.get("avatar_group")
+    group = group if isinstance(group, dict) else {}
+    item = data.get("avatar_item")
+    item = item if isinstance(item, dict) else {}
+
+    # Respostas antigas/fixtures retornam os campos diretamente em data.
+    group_id = group.get("id") or data.get("group_id") or item.get("group_id")
+    avatar_id = item.get("id") or (data.get("id") if not group else None)
+    status = group.get("status") or item.get("status") or data.get("status")
+    consent_status = group.get("consent_status") or data.get("consent_status")
+    voice_id = (
+        item.get("default_voice_id")
+        or group.get("default_voice_id")
+        or data.get("default_voice_id")
+    )
+    return {
+        "groupId": str(group_id) if group_id else None,
+        "avatarId": str(avatar_id) if avatar_id else None,
+        "status": str(status) if status else None,
+        "consentStatus": str(consent_status) if consent_status else None,
+        "voiceId": str(voice_id) if voice_id else None,
+        "previewImageUrl": item.get("preview_image_url") or group.get("preview_image_url"),
+        "previewVideoUrl": item.get("preview_video_url") or group.get("preview_video_url"),
+    }
+
+
+def _avatar_requires_consent(
+    creation_type: str,
+    *,
+    status: str | None,
+    consent_status: str | None,
+) -> bool:
+    normalized_status = str(status or "").lower()
+    normalized_consent = str(consent_status or "").lower()
+    if normalized_consent in {"approved", "completed", "not_required", "not-required"}:
+        return False
+    if normalized_consent:
+        return True
+    # A resposta v3 informa consent_status=None quando não há consentimento oficial.
+    # Digital twins antigos nem sempre trazem esse campo, então mantemos o fallback.
+    return normalized_status == "pending_consent" or creation_type == "digital_twin"
+
+
 @app.post("/api/heygen/avatars")
 def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
     """Cria avatar e voz somente apos consentimento explicito na interface."""
@@ -2545,54 +2660,117 @@ def create_heygen_avatar(payload: AvatarCreateIn) -> dict:
         payload=avatar_request,
         timeout=180,
     )
-    group_id = _find_value(avatar_response, "group_id")
-    avatar_id = _find_value(avatar_response, "id")
+    metadata = _avatar_creation_metadata(avatar_response)
+    group_id = metadata["groupId"]
+    avatar_id = metadata["avatarId"]
     if not group_id:
         raise HTTPException(status_code=502, detail="HeyGen nao retornou a identidade do avatar.")
 
-    voice_id = _find_value(avatar_response, "default_voice_id")
-    if payload.cloneVoice and payload.voiceSource == "video" and not voice_id:
-        avatar_details = _run_heygen_json(
-            command,
-            ["avatar", "get", str(group_id)],
-            timeout=45,
-        )
-        voice_id = _find_value(avatar_details, "default_voice_id")
-
-    if voice_audio:
-        voice_response = _run_heygen_json(
-            command,
-            ["voice", "clone", "create"],
-            payload={
-                "voice_name": f"{name} - voz",
-                "language": "pt",
-                "remove_background_noise": True,
-                "audio": voice_audio,
-            },
-            timeout=180,
-        )
-        voice_id = _find_value(voice_response, "voice_clone_id")
-
-    consent_response = _run_heygen_json(
-        command,
-        ["avatar", "consent", "create", str(group_id)],
-        payload={},
-        timeout=45,
+    requires_consent = _avatar_requires_consent(
+        payload.creationType,
+        status=metadata["status"],
+        consent_status=metadata["consentStatus"],
     )
-    consent_url = _find_value(consent_response, "url", "consent_url", "consentUrl")
     now = _now()
     job = {
         "id": f"a-{uuid.uuid4().hex[:12]}",
         "name": name,
         "creationType": payload.creationType,
-        "status": "pending_consent",
+        "status": metadata["status"]
+        or ("pending_consent" if requires_consent else "processing"),
         "groupId": group_id,
         "avatarId": avatar_id,
-        "voiceId": voice_id,
-        "consentUrl": consent_url,
+        "voiceId": metadata["voiceId"],
+        "consentStatus": metadata["consentStatus"],
+        "consentUrl": None,
+        "previewImageUrl": metadata["previewImageUrl"],
+        "previewVideoUrl": metadata["previewVideoUrl"],
         "createdAt": now,
         "updatedAt": now,
     }
+    # A criação remota já consumiu a solicitação. Grave imediatamente para que
+    # qualquer falha posterior não leve o usuário a criar um avatar duplicado.
+    _job_store().upsert("avatar", job)
+    LOGGER.info(
+        "HeyGen avatar created: group_id=%s avatar_id=%s type=%s status=%s consent=%s",
+        group_id,
+        avatar_id,
+        payload.creationType,
+        job["status"],
+        metadata["consentStatus"],
+    )
+
+    setup_warnings: list[str] = []
+    voice_id = metadata["voiceId"]
+    if payload.cloneVoice and payload.voiceSource == "video" and not voice_id:
+        try:
+            avatar_details = _run_heygen_json(
+                command,
+                ["avatar", "get", str(group_id)],
+                timeout=45,
+            )
+            voice_id = _find_value(avatar_details, "default_voice_id")
+        except HTTPException as exc:
+            setup_warnings.append(
+                "O avatar foi criado, mas a voz nativa ainda não pôde ser confirmada."
+            )
+            LOGGER.warning(
+                "HeyGen avatar native voice lookup failed after creation: group_id=%s detail=%s",
+                group_id,
+                exc.detail,
+            )
+
+    if voice_audio:
+        try:
+            voice_response = _run_heygen_json(
+                command,
+                ["voice", "clone", "create"],
+                payload={
+                    "voice_name": f"{name} - voz",
+                    "language": "pt",
+                    "remove_background_noise": True,
+                    "audio": voice_audio,
+                },
+                timeout=180,
+            )
+            voice_id = _find_value(voice_response, "voice_clone_id")
+        except HTTPException as exc:
+            setup_warnings.append("O avatar foi criado, mas a clonagem da voz precisa ser refeita.")
+            LOGGER.warning(
+                "HeyGen voice clone failed after avatar creation: group_id=%s detail=%s",
+                group_id,
+                exc.detail,
+            )
+
+    if requires_consent:
+        try:
+            consent_response = _run_heygen_json(
+                command,
+                ["avatar", "consent", "create", str(group_id)],
+                payload={},
+                timeout=45,
+            )
+            job["consentUrl"] = _find_value(
+                consent_response,
+                "url",
+                "consent_url",
+                "consentUrl",
+            )
+            job["status"] = "pending_consent"
+        except HTTPException as exc:
+            setup_warnings.append(
+                "O avatar foi criado, mas o link de consentimento ainda não pôde ser aberto."
+            )
+            LOGGER.warning(
+                "HeyGen consent setup failed after avatar creation: group_id=%s detail=%s",
+                group_id,
+                exc.detail,
+            )
+
+    job["voiceId"] = voice_id
+    if setup_warnings:
+        job["setupWarning"] = " ".join(setup_warnings)
+    job["updatedAt"] = _now()
     _job_store().upsert("avatar", job)
     return {"ok": True, "job": job}
 
@@ -4014,6 +4192,12 @@ def ai_costs() -> dict:
 @app.post("/api/videos")
 def create_video(payload: VideoCreateIn) -> dict:
     """Cria um job real no HeyGen somente apos o clique de enviar para producao."""
+    LOGGER.info(
+        "Video creation requested: script_id=%s mode=%s force_new_version=%s",
+        payload.scriptId,
+        payload.generationMode,
+        payload.forceNewVersion,
+    )
     now = _now()
     cinematic_prompt = (
         _clean_cinematic_prompt(payload.cinematicPrompt)
@@ -4085,6 +4269,12 @@ def create_video(payload: VideoCreateIn) -> dict:
         idempotency_key=idempotency_key,
         force_new_version=payload.forceNewVersion,
     )
+    LOGGER.info(
+        "Video job reservation: script_id=%s job_id=%s result=%s",
+        payload.scriptId,
+        job.get("id"),
+        reservation,
+    )
     if reservation == "duplicate":
         if job.get("submissionState") in {"reserved", "submitting"}:
             raise HTTPException(
@@ -4109,7 +4299,19 @@ def create_video(payload: VideoCreateIn) -> dict:
             ),
         )
     try:
-        return _create_video_job(payload, reserved_job, script=script, final_texts=(final_display_text, final_spoken_text))
+        result = _create_video_job(
+            payload,
+            reserved_job,
+            script=script,
+            final_texts=(final_display_text, final_spoken_text),
+        )
+        LOGGER.info(
+            "Video submitted: script_id=%s job_id=%s remote_video_id=%s",
+            payload.scriptId,
+            result["job"].get("id"),
+            result["job"].get("remoteVideoId"),
+        )
+        return result
     except HTTPException as exc:
         current = _job_store().get("video", reserved_job["id"]) or reserved_job
         current["status"] = "erro"
@@ -4428,11 +4630,26 @@ def refresh_video(job_id: str) -> dict:
             timeout=45,
         )
     status, progress = _job_status(response)
+    LOGGER.info(
+        "Video status refreshed: job_id=%s status=%s progress=%s",
+        job_id,
+        status,
+        progress,
+    )
     job["status"] = status
     job["progresso"] = progress
     job["atualizadoEm"] = _now()
     job["remoteVideoId"] = _find_value(response, "video_id", "videoId") or job.get("remoteVideoId")
-    job["videoUrl"] = _find_value(response, "video_url", "videoUrl", "video_page_url", "videoPageUrl") or job.get("videoUrl")
+    refreshed_video_url = _find_value(
+        response,
+        "video_url",
+        "videoUrl",
+        "video_page_url",
+        "videoPageUrl",
+    )
+    if refreshed_video_url:
+        job["videoUrl"] = refreshed_video_url
+        job["remoteVideoUrl"] = refreshed_video_url
     job["thumbnailUrl"] = _find_value(response, "thumbnail_url", "thumbnailUrl") or job.get("thumbnailUrl")
     caption_srt = _find_value(response, "caption_srt", "captionSrt", "srt")
     if isinstance(caption_srt, str) and caption_srt.strip():
@@ -4471,6 +4688,7 @@ def refresh_video(job_id: str) -> dict:
             or "HeyGen nao concluiu o video."
         )
     job["submissionState"] = "completed" if status == "pronto" else "processing"
+    _archive_completed_video(job)
     _job_store().upsert("video", job)
     composed_job = None
     if job.get("isScene") and job.get("status") == "pronto":
@@ -4487,9 +4705,9 @@ def download_video(job_id: str):
     job = _job_store().get("video", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Video nao encontrado.")
-    if job.get("isComposed"):
+    if _local_output_path(job.get("outputPath")):
         return _composed_video_file_response(job, download=True)
-    video_url = str(job.get("videoUrl") or "")
+    video_url = str(job.get("remoteVideoUrl") or job.get("videoUrl") or "")
     parsed = urlparse(video_url)
     hostname = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not (
@@ -4526,13 +4744,14 @@ def download_video(job_id: str):
 @app.get("/api/videos/{job_id}/file")
 def video_file(job_id: str) -> FileResponse:
     job = _job_store().get("video", job_id)
-    if not job or not job.get("isComposed"):
+    if not job or not _local_output_path(job.get("outputPath")):
         raise HTTPException(status_code=404, detail="Vídeo local não encontrado.")
     return _composed_video_file_response(job, download=False)
 
 
 class PostProductionCreateIn(BaseModel):
     videoJobId: str = Field(min_length=1, max_length=160)
+    autoRender: bool = False
 
 
 class PostProductionEventUpdateIn(BaseModel):
@@ -4550,17 +4769,31 @@ class PostProductionEventsIn(BaseModel):
 
 
 def _launch_post_production_analysis(job_id: str) -> None:
+    def analyze() -> None:
+        store = _job_store()
+        analyze_post_production(
+            store=store,
+            job_id=job_id,
+            output_root=POST_PRODUCTION_OUTPUTS,
+            project_root=ROOT,
+            cache_get=_ai_cache_get,
+            cache_put=_ai_cache_put,
+            record_usage=_record_anthropic_usage,
+        )
+        current = store.get("post_production", job_id)
+        if not current or not current.get("autoRender") or current.get("status") != "needs_review":
+            return
+        current.update(
+            status="rendering_preview",
+            progresso=84,
+            etapa="Aplicando edição elegante",
+            atualizadoEm=_now(),
+        )
+        store.upsert("post_production", current)
+        _launch_post_production_render(job_id)
+
     worker = threading.Thread(
-        target=analyze_post_production,
-        kwargs={
-            "store": _job_store(),
-            "job_id": job_id,
-            "output_root": POST_PRODUCTION_OUTPUTS,
-            "project_root": ROOT,
-            "cache_get": _ai_cache_get,
-            "cache_put": _ai_cache_put,
-            "record_usage": _record_anthropic_usage,
-        },
+        target=analyze,
         daemon=True,
         name=f"post-production-analysis-{job_id}",
     )
@@ -4615,6 +4848,7 @@ def create_post_production(payload: PostProductionCreateIn) -> dict:
             "status": "queued",
             "progresso": 2,
             "etapa": "Na fila para análise",
+            "autoRender": payload.autoRender,
             "criadoEm": now,
             "atualizadoEm": now,
         }
@@ -4624,6 +4858,10 @@ def create_post_production(payload: PostProductionCreateIn) -> dict:
             idempotency_key=key,
         )
         if reservation == "duplicate":
+            if payload.autoRender and not reserved.get("autoRender"):
+                reserved["autoRender"] = True
+                reserved["atualizadoEm"] = _now()
+                _job_store().upsert("post_production", reserved)
             if reserved.get("status") in {"failed", "cancelled", "stale"}:
                 existing_source = POST_PRODUCTION_OUTPUTS / str(reserved["id"]) / "source.mp4"
                 if existing_source.is_file():
@@ -4636,6 +4874,20 @@ def create_post_production(payload: PostProductionCreateIn) -> dict:
                     )
                     _job_store().upsert("post_production", reserved)
                     _launch_post_production_analysis(str(reserved["id"]))
+            elif payload.autoRender and reserved.get("status") == "needs_review":
+                report = run_post_production_preflight(
+                    output_root=POST_PRODUCTION_OUTPUTS,
+                    job_id=str(reserved["id"]),
+                )
+                if report["ok"]:
+                    reserved.update(
+                        status="rendering_preview",
+                        progresso=84,
+                        etapa="Aplicando edição elegante",
+                        atualizadoEm=_now(),
+                    )
+                    _job_store().upsert("post_production", reserved)
+                    _launch_post_production_render(str(reserved["id"]))
             return {"ok": True, "job": reserved, "duplicate": True}
         directory = POST_PRODUCTION_OUTPUTS / job_id
         directory.mkdir(parents=True, exist_ok=True)
@@ -4654,6 +4906,20 @@ def get_post_production(job_id: str) -> dict:
     return {"job": job}
 
 
+@app.get("/api/videos/{video_job_id}/post-production")
+def get_latest_video_post_production(video_job_id: str) -> dict:
+    """Recupera a edição mais recente sem iniciar uma nova análise."""
+    job = next(
+        (
+            candidate
+            for candidate in _job_store().list("post_production")
+            if candidate.get("videoJobId") == video_job_id
+        ),
+        None,
+    )
+    return {"job": job}
+
+
 @app.get("/api/post-production/{job_id}/artifacts")
 def get_post_production_artifacts(job_id: str) -> dict:
     if not _job_store().get("post_production", job_id):
@@ -4662,6 +4928,11 @@ def get_post_production_artifacts(job_id: str) -> dict:
         transcript, timeline = load_post_production_artifacts(POST_PRODUCTION_OUTPUTS, job_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    transcript["text"] = normalize_ptbr_medical_text(str(transcript.get("text") or ""))
+    for segment in transcript.get("segments", []):
+        segment["text"] = normalize_ptbr_medical_text(str(segment.get("text") or ""))
+    for event in timeline.get("events", []):
+        event["spokenText"] = normalize_ptbr_medical_text(str(event.get("spokenText") or ""))
     return {"transcript": transcript, "timeline": timeline}
 
 
@@ -4765,6 +5036,233 @@ def post_production_preview(job_id: str, download: bool = False) -> FileResponse
         path,
         media_type="video/mp4",
         filename=f"{job_id}-preview.mp4" if download else None,
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
+class LocalVideoKitCreateIn(BaseModel):
+    uploadId: str = Field(min_length=8, max_length=100)
+    sourceName: str = Field(default="video-local.mp4", min_length=1, max_length=300)
+    name: str = Field(default="Dr. Guilherme Martins", min_length=1, max_length=80)
+    role: str = Field(default="Médico", min_length=1, max_length=90)
+    title: str = Field(default="Saúde e desempenho", min_length=1, max_length=120)
+    subtitle: str = Field(
+        default="Informação clara, direto ao ponto.",
+        min_length=1,
+        max_length=150,
+    )
+    sectionNumber: str = Field(default="Ponto 01", min_length=1, max_length=30)
+    sectionTitle: str = Field(default="O que realmente ajuda", min_length=1, max_length=100)
+    cta: str = Field(default="Quer mais dicas?", min_length=1, max_length=90)
+    site: str = Field(default="@drguilhermemartins", min_length=1, max_length=80)
+    accent: str = Field(default="#c8e05a", pattern=r"^#[0-9a-fA-F]{6}$")
+    sectionStartSeconds: float | None = Field(default=None, ge=3, le=7200)
+    includeOpening: bool = True
+    includeLowerThird: bool = True
+    includeSection: bool = True
+    includeOutro: bool = True
+
+
+def _local_video_kit_job_path(job_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "", job_id)
+    return LOCAL_VIDEO_KIT_JOBS / safe_id / "job.json"
+
+
+def _save_local_video_kit_job(job: dict[str, Any]) -> dict[str, Any]:
+    path = _local_video_kit_job_path(str(job["id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+    return job
+
+
+def _get_local_video_kit_job(job_id: str) -> dict[str, Any] | None:
+    path = _local_video_kit_job_path(job_id)
+    if not path.is_file():
+        return None
+    try:
+        job = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return job if isinstance(job, dict) else None
+
+
+def _list_local_video_kit_jobs() -> list[dict[str, Any]]:
+    if not LOCAL_VIDEO_KIT_JOBS.is_dir():
+        return []
+    jobs = [
+        job
+        for path in LOCAL_VIDEO_KIT_JOBS.glob("*/job.json")
+        if (job := _get_local_video_kit_job(path.parent.name))
+    ]
+    return sorted(
+        jobs,
+        key=lambda item: str(item.get("atualizadoEm") or item.get("criadoEm") or ""),
+        reverse=True,
+    )
+
+
+@app.post("/api/local-video-kit/uploads")
+async def upload_local_video_kit_source(request: Request) -> dict:
+    """Recebe o MP4 direto no disco, sem HeyGen e sem carregar tudo na memória."""
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("video/"):
+        raise HTTPException(status_code=415, detail="Selecione um arquivo de vídeo.")
+    declared_size = int(request.headers.get("content-length") or 0)
+    max_bytes = 2 * 1024 * 1024 * 1024
+    if declared_size > max_bytes:
+        raise HTTPException(status_code=413, detail="O vídeo deve ter no máximo 2 GB.")
+    upload_id = f"kit-upload-{uuid.uuid4().hex[:16]}"
+    LOCAL_VIDEO_KIT_UPLOADS.mkdir(parents=True, exist_ok=True)
+    destination = LOCAL_VIDEO_KIT_UPLOADS / f"{upload_id}.mp4"
+    temporary = destination.with_suffix(".part")
+    written = 0
+    try:
+        with temporary.open("wb") as output:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(status_code=413, detail="O vídeo deve ter no máximo 2 GB.")
+                output.write(chunk)
+        if written == 0:
+            raise HTTPException(status_code=400, detail="O arquivo enviado está vazio.")
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    filename = unquote(request.headers.get("x-filename") or "video-local.mp4")
+    return {"ok": True, "uploadId": upload_id, "filename": filename, "size": written}
+
+
+def _launch_local_video_kit(job_id: str) -> None:
+    def render() -> None:
+        job = _get_local_video_kit_job(job_id)
+        if not job:
+            return
+
+        def update(progress: int, stage: str) -> None:
+            current = _get_local_video_kit_job(job_id) or job
+            current.update(
+                status="processando" if progress < 100 else "pronto",
+                progresso=progress,
+                etapa=stage,
+                atualizadoEm=_now(),
+            )
+            _save_local_video_kit_job(current)
+
+        try:
+            source = ROOT / str(job["sourcePath"])
+            output = ROOT / str(job["outputPath"])
+            manifest = render_local_kit_video(
+                source,
+                output,
+                _local_video_kit_job_path(job_id).parent,
+                dict(job["config"]),
+                project_root=ROOT,
+                on_progress=update,
+            )
+            current = _get_local_video_kit_job(job_id) or job
+            current.update(
+                status="pronto",
+                progresso=100,
+                etapa="Vídeo pronto",
+                duracaoSegundos=manifest["outputDuration"],
+                coverPath=str(Path(manifest["coverPath"]).relative_to(ROOT)),
+                manifest=manifest,
+                atualizadoEm=_now(),
+            )
+            current.pop("erro", None)
+            _save_local_video_kit_job(current)
+        except Exception as exc:
+            current = _get_local_video_kit_job(job_id) or job
+            current.update(
+                status="erro",
+                progresso=0,
+                etapa="Falha na edição local",
+                erro=str(exc)[-1800:],
+                atualizadoEm=_now(),
+            )
+            _save_local_video_kit_job(current)
+
+    threading.Thread(target=render, daemon=True, name=f"local-video-kit-{job_id}").start()
+
+
+@app.post("/api/local-video-kit")
+def create_local_video_kit(payload: LocalVideoKitCreateIn) -> dict:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise HTTPException(status_code=503, detail="FFmpeg não está instalado.")
+    source = LOCAL_VIDEO_KIT_UPLOADS / f"{payload.uploadId}.mp4"
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="O vídeo enviado não foi encontrado.")
+    job_id = f"kit-{uuid.uuid4().hex[:16]}"
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", _norm(Path(payload.sourceName).stem)).strip("-")
+    output = LOCAL_VIDEO_KIT_OUTPUTS / f"{safe_name or 'video-local'}--kit-grafico--{job_id}.mp4"
+    now = _now()
+    job = {
+        "id": job_id,
+        "status": "fila",
+        "progresso": 2,
+        "etapa": "Preparando edição local",
+        "sourceName": payload.sourceName,
+        "sourcePath": str(source.relative_to(ROOT)),
+        "outputPath": str(output.relative_to(ROOT)),
+        "config": payload.model_dump(exclude={"uploadId", "sourceName"}),
+        "externalCreditsUsed": False,
+        "criadoEm": now,
+        "atualizadoEm": now,
+    }
+    _save_local_video_kit_job(job)
+    _launch_local_video_kit(job_id)
+    return {"ok": True, "job": job}
+
+
+@app.get("/api/local-video-kit")
+def list_local_video_kit_jobs() -> dict:
+    return {"jobs": _list_local_video_kit_jobs()}
+
+
+@app.get("/api/local-video-kit/{job_id}")
+def get_local_video_kit(job_id: str) -> dict:
+    job = _get_local_video_kit_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Edição local não encontrada.")
+    return {"job": job}
+
+
+@app.get("/api/local-video-kit/{job_id}/source")
+def local_video_kit_source(job_id: str) -> FileResponse:
+    job = _get_local_video_kit_job(job_id)
+    path = _local_output_path((job or {}).get("sourcePath"))
+    if not job or not path:
+        raise HTTPException(status_code=404, detail="Vídeo original não encontrado.")
+    return FileResponse(path, media_type="video/mp4", content_disposition_type="inline")
+
+
+@app.get("/api/local-video-kit/{job_id}/result")
+def local_video_kit_result(job_id: str, download: bool = False) -> FileResponse:
+    job = _get_local_video_kit_job(job_id)
+    path = _local_output_path((job or {}).get("outputPath"))
+    if not job or job.get("status") != "pronto" or not path:
+        raise HTTPException(status_code=404, detail="Vídeo editado ainda não está disponível.")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=path.name if download else None,
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
+@app.get("/api/local-video-kit/{job_id}/cover")
+def local_video_kit_cover(job_id: str, download: bool = False) -> FileResponse:
+    job = _get_local_video_kit_job(job_id)
+    path = _local_output_path((job or {}).get("coverPath"))
+    if not job or job.get("status") != "pronto" or not path:
+        raise HTTPException(status_code=404, detail="Capa ainda não está disponível.")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        filename=f"{job_id}-capa.png" if download else None,
         content_disposition_type="attachment" if download else "inline",
     )
 
@@ -4877,8 +5375,11 @@ def _cut_project_sources(
             raise RuntimeError("O video enviado nao esta mais disponivel.")
     elif project.get("videoJobId"):
         video_job = store.get("video", str(project["videoJobId"]))
-        source_url = str((video_job or {}).get("videoUrl") or "")
-        if not source_url:
+        source_path = _local_output_path((video_job or {}).get("outputPath"))
+        source_url = str(
+            (video_job or {}).get("remoteVideoUrl") or (video_job or {}).get("videoUrl") or ""
+        )
+        if not source_path and not source_url:
             raise RuntimeError("O video produzido nao esta mais disponivel.")
     elif not youtube_url:
         raise RuntimeError("A origem deste projeto nao esta disponivel.")
@@ -4968,13 +5469,15 @@ def create_cut_project(payload: CutCreateIn) -> dict:
         video_job = _job_store().get("video", payload.videoJobId)
         if not video_job or video_job.get("status") != "pronto":
             raise HTTPException(status_code=409, detail="O video produzido ainda nao esta pronto.")
-        source_url = str(video_job.get("videoUrl") or "")
-        parsed = urlparse(source_url)
-        hostname = (parsed.hostname or "").lower()
-        if parsed.scheme != "https" or not (
-            hostname == "heygen.ai" or hostname.endswith(".heygen.ai")
-        ):
-            raise HTTPException(status_code=409, detail="O arquivo do HeyGen nao esta disponivel.")
+        source_path = _local_output_path(video_job.get("outputPath"))
+        source_url = str(video_job.get("remoteVideoUrl") or video_job.get("videoUrl") or "")
+        if not source_path:
+            parsed = urlparse(source_url)
+            hostname = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or not (
+                hostname == "heygen.ai" or hostname.endswith(".heygen.ai")
+            ):
+                raise HTTPException(status_code=409, detail="O arquivo do HeyGen nao esta disponivel.")
         try:
             source_name = _find_script(str(video_job.get("scriptId") or "")).get(
                 "titulo", "Video produzido"

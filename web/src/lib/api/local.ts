@@ -1043,6 +1043,8 @@ export interface AvatarJob {
   voiceId?: string | null;
   voiceStatus?: string | null;
   consentUrl?: string | null;
+  consentStatus?: string | null;
+  setupWarning?: string | null;
   previewImageUrl?: string | null;
   previewVideoUrl?: string | null;
   createdAt: string;
@@ -1323,9 +1325,13 @@ export interface PreflightReport {
   }>;
 }
 
-export async function createPostProduction(videoJobId: string): Promise<PostProductionJob> {
+export async function createPostProduction(
+  videoJobId: string,
+  autoRender = false,
+): Promise<PostProductionJob> {
   const response = await postJson<{ job: PostProductionJob }>("/api/post-production", {
     videoJobId,
+    autoRender,
   });
   return response.job;
 }
@@ -1333,6 +1339,16 @@ export async function createPostProduction(videoJobId: string): Promise<PostProd
 export async function fetchPostProduction(jobId: string): Promise<PostProductionJob> {
   const response = await requestJson<{ job: PostProductionJob }>(
     `/api/post-production/${encodeURIComponent(jobId)}`,
+    {},
+  );
+  return response.job;
+}
+
+export async function fetchLatestPostProduction(
+  videoJobId: string,
+): Promise<PostProductionJob | null> {
+  const response = await requestJson<{ job: PostProductionJob | null }>(
+    `/api/videos/${encodeURIComponent(videoJobId)}/post-production`,
     {},
   );
   return response.job;
@@ -1384,6 +1400,94 @@ export async function replanPostProduction(jobId: string): Promise<PostProductio
 
 export function postProductionPreviewUrl(jobId: string, download = false): string {
   return `${BASE}/api/post-production/${encodeURIComponent(jobId)}/preview${download ? "?download=true" : ""}`;
+}
+
+export interface LocalVideoKitConfig {
+  name: string;
+  role: string;
+  title: string;
+  subtitle: string;
+  sectionNumber: string;
+  sectionTitle: string;
+  cta: string;
+  site: string;
+  accent: string;
+  sectionStartSeconds?: number | null;
+  includeOpening: boolean;
+  includeLowerThird: boolean;
+  includeSection: boolean;
+  includeOutro: boolean;
+}
+
+export interface LocalVideoKitJob {
+  id: string;
+  status: "fila" | "processando" | "pronto" | "erro";
+  progresso: number;
+  etapa: string;
+  sourceName: string;
+  sourcePath: string;
+  outputPath: string;
+  coverPath?: string;
+  config: LocalVideoKitConfig;
+  externalCreditsUsed: false;
+  duracaoSegundos?: number;
+  erro?: string;
+  criadoEm: string;
+  atualizadoEm: string;
+}
+
+export async function uploadLocalVideoKitSource(
+  file: File,
+): Promise<{ uploadId: string; filename: string; size: number }> {
+  const response = await fetch(`${BASE}/api/local-video-kit/uploads`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "video/mp4",
+      "X-Filename": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, "Não foi possível enviar o vídeo local."));
+  }
+  return (await response.json()) as { uploadId: string; filename: string; size: number };
+}
+
+export async function createLocalVideoKit(input: {
+  uploadId: string;
+  sourceName: string;
+  config: LocalVideoKitConfig;
+}): Promise<LocalVideoKitJob> {
+  const response = await postJson<{ ok: boolean; job: LocalVideoKitJob }>(
+    "/api/local-video-kit",
+    { uploadId: input.uploadId, sourceName: input.sourceName, ...input.config },
+  );
+  return response.job;
+}
+
+export async function fetchLocalVideoKit(jobId: string): Promise<LocalVideoKitJob> {
+  const response = await requestJson<{ job: LocalVideoKitJob }>(
+    `/api/local-video-kit/${encodeURIComponent(jobId)}`,
+    {},
+  );
+  return response.job;
+}
+
+export async function fetchLocalVideoKitJobs(): Promise<LocalVideoKitJob[]> {
+  const response = await requestJson<{ jobs: LocalVideoKitJob[] }>("/api/local-video-kit", {});
+  return response.jobs;
+}
+
+export function localVideoKitSourceUrl(jobId: string): string {
+  return `${BASE}/api/local-video-kit/${encodeURIComponent(jobId)}/source`;
+}
+
+export function localVideoKitResultUrl(jobId: string, download = false): string {
+  return `${BASE}/api/local-video-kit/${encodeURIComponent(jobId)}/result${download ? "?download=true" : ""}`;
+}
+
+export function localVideoKitCoverUrl(jobId: string, download = false): string {
+  return `${BASE}/api/local-video-kit/${encodeURIComponent(jobId)}/cover${download ? "?download=true" : ""}`;
 }
 
 export interface CutClip {

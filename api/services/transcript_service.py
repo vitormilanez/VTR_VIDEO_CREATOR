@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 
 TRANSCRIPT_SCHEMA_VERSION = "transcript-v1"
-TRANSCRIPT_NORMALIZATION_VERSION = "ptbr-medical-v1"
+TRANSCRIPT_NORMALIZATION_VERSION = "ptbr-medical-v2"
 
 
 def transcription_python(project_root: Path) -> Path:
@@ -81,6 +81,10 @@ def clean_text(value: str) -> str:
 def normalize_ptbr_medical_text(value: str) -> str:
     clean = clean_text(value)
     clean = re.sub(r"\bmonjaro\b", "Mounjaro", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bipera\b", "Hypera", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bsemav\b", "Semavy", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bsema\s+aglutida\b", "semaglutida", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bglp\s*-?\s*1\b", "GLP-1", clean, flags=re.IGNORECASE)
     clean = re.sub(
         r"\bsintomas\s+em\s+comuns\b",
         "sintomas incomuns",

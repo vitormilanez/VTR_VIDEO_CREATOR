@@ -197,7 +197,15 @@ function AvataresPage() {
           <AvatarCreator
             onCreated={(job) => {
               setJobs((current) => [job, ...current]);
-              toast.success("Avatar enviado. Complete o consentimento para liberar o uso.");
+              setActiveTab("library");
+              void loadData();
+              if (job.setupWarning) {
+                toast.warning(job.setupWarning);
+              } else if (job.consentUrl) {
+                toast.success("Avatar enviado. Complete o consentimento para liberar o uso.");
+              } else {
+                toast.success("Avatar criado e disponível na biblioteca.");
+              }
             }}
           />
         </TabsContent>
@@ -334,6 +342,11 @@ function AvatarLibrary({
                   <div className="text-xs text-muted-foreground">
                     {creationTypeLabel(job.creationType)} · {statusLabel(job.status)}
                   </div>
+                  {job.setupWarning ? (
+                    <div className="mt-1 text-xs text-status-warn-foreground">
+                      {job.setupWarning}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex items-center gap-2">
                   {job.consentUrl ? (

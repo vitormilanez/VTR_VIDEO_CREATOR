@@ -73,7 +73,7 @@ def _caption_image(text: str, destination: Path) -> None:
     document = f"""<!doctype html><html><head><meta charset='utf-8'><style>
     * {{ box-sizing:border-box }} html,body {{ margin:0; width:1080px; height:1920px; background:transparent; overflow:hidden }}
     body {{ display:flex; align-items:flex-end; justify-content:center; padding:0 100px 250px; font-family:Arial,sans-serif }}
-    .caption {{ max-width:880px; padding:18px 28px; color:#fff; background:rgba(0,0,0,.68); border-radius:12px; font-size:54px; font-weight:700; line-height:1.12; text-align:center; text-transform:uppercase; }}
+    .caption {{ max-width:860px; padding:15px 26px; color:#fff; background:rgba(3,23,37,.76); border:1px solid rgba(255,255,255,.12); border-radius:18px; box-shadow:0 12px 34px rgba(0,0,0,.22); font-size:46px; font-weight:700; line-height:1.14; text-align:center; }}
     </style></head><body><div class='caption'>{safe_text}</div></body></html>"""
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()

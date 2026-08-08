@@ -30,16 +30,33 @@ def _support_icon(asset_ref: str) -> str:
     return icons.get(kind, icons["focus"])
 
 
+def _stacked_copy(raw_text: str) -> str:
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if len(lines) == 1:
+        return f"<strong class='headline'>{html.escape(lines[0])}</strong>"
+    eyebrow = html.escape(lines[0])
+    headline = html.escape(lines[1])
+    detail = "<br>".join(html.escape(line) for line in lines[2:])
+    detail_markup = f"<span class='detail'>{detail}</span>" if detail else ""
+    return (
+        f"<span class='eyebrow'>{eyebrow}</span>"
+        f"<strong class='headline'>{headline}</strong>"
+        f"{detail_markup}"
+    )
+
+
 def _event_markup(kind: str, raw_text: str, asset_ref: str) -> str:
     if kind == "progressive_list":
         items = [item.strip(" ,;:") for item in re.split(r"\s*•\s*|\n", raw_text) if item.strip(" ,;:")]
         if len(items) >= 2:
             rows = "".join(f"<li>{html.escape(item)}</li>" for item in items[:4])
             return f"<ol>{rows}</ol>"
-    escaped = html.escape(raw_text).replace("\n", "<br>")
+    stacked = _stacked_copy(raw_text)
     if kind == "supporting_visual":
-        return f"<div class='visual-icon'>{_support_icon(asset_ref)}</div><div class='support-copy'>{escaped}</div>"
-    return escaped
+        return f"<div class='visual-icon'>{_support_icon(asset_ref)}</div><div class='support-copy'>{stacked}</div>"
+    return stacked
 
 
 def render_overlay(event: dict[str, Any], destination: Path) -> Path:
@@ -57,18 +74,27 @@ def render_overlay(event: dict[str, Any], destination: Path) -> Path:
     }.get(kind, "emphasis")
     document = f"""<!doctype html><html><head><meta charset='utf-8'><style>
     * {{ box-sizing:border-box }} html,body {{ margin:0;width:1080px;height:1920px;background:transparent;overflow:hidden }}
-    body {{ font-family:Arial,sans-serif;color:#fff;display:flex;align-items:flex-start;justify-content:center;padding:80px 90px 380px }}
-    .card {{ max-width:860px;padding:20px 30px;border-radius:22px;background:rgba(3,23,37,.88);border:2px solid rgba(32,191,222,.8);font-size:46px;font-weight:800;line-height:1.08;text-align:center;box-shadow:0 16px 50px rgba(0,0,0,.35) }}
-    .kinetic {{ font-size:58px;text-transform:uppercase;background:rgba(3,23,37,.76) }}
-    .list {{ text-align:left;border-left:12px solid #20bfde;padding:26px 38px }}
+    body {{ font-family:Arial,sans-serif;color:#fff;display:flex;align-items:flex-start;justify-content:flex-end;padding:230px 64px 390px }}
+    .card {{ position:relative;width:470px;min-height:280px;padding:38px;border-radius:34px;background:linear-gradient(145deg,rgba(3,23,37,.96),rgba(7,68,80,.91));border:1px solid rgba(140,236,255,.72);font-weight:800;line-height:1.05;text-align:left;box-shadow:0 26px 70px rgba(0,0,0,.34);overflow:hidden }}
+    .card::before {{ content:'';position:absolute;left:38px;right:38px;top:0;height:7px;border-radius:0 0 8px 8px;background:linear-gradient(90deg,#20bfde,#8cecff) }}
+    .eyebrow {{ display:block;margin-bottom:18px;color:#8cecff;font-size:20px;font-weight:800;letter-spacing:4px;text-transform:uppercase }}
+    .headline {{ display:block;font-size:50px;line-height:.98;letter-spacing:-1.6px;text-transform:uppercase }}
+    .detail {{ display:block;margin-top:20px;padding-top:18px;border-top:1px solid rgba(255,255,255,.2);color:rgba(255,255,255,.9);font-size:27px;font-weight:600;line-height:1.2 }}
+    .kinetic {{ background:linear-gradient(145deg,rgba(3,23,37,.96),rgba(9,92,107,.92)) }}
+    .kinetic .headline {{ font-size:54px }}
+    .emphasis {{ min-height:250px }}
+    .list {{ border-left:10px solid #20bfde;padding:34px 38px }}
     .list ol {{ margin:0;padding:0;list-style:none;display:grid;gap:12px }}
-    .list li {{ position:relative;padding-left:48px;font-size:40px;text-transform:none }}
+    .list li {{ position:relative;padding-left:44px;font-size:34px;line-height:1.15;text-transform:none }}
     .list li::before {{ content:'✓';position:absolute;left:0;color:#8cecff }}
-    .support {{ border-color:#8cecff;background:rgba(3,23,37,.88);display:flex;align-items:center;gap:26px;text-align:left;max-width:820px }}
-    .visual-icon {{ width:142px;height:142px;flex:0 0 142px;color:#8cecff;background:rgba(32,191,222,.12);border-radius:28px;padding:20px }}
+    .support {{ border-color:#8cecff;display:flex;align-items:flex-start;gap:22px }}
+    .visual-icon {{ width:94px;height:94px;flex:0 0 94px;color:#8cecff;background:rgba(32,191,222,.12);border-radius:24px;padding:16px }}
     .visual-icon svg {{ width:100%;height:100% }}
-    .support-copy {{ font-size:42px;line-height:1.04 }}
-    .cta {{ background:#0b7891;border-color:#8cecff;text-transform:uppercase }}
+    .support-copy {{ min-width:0;flex:1 }}
+    .support .headline {{ font-size:40px }}
+    .support .detail {{ font-size:24px }}
+    .cta {{ background:linear-gradient(145deg,rgba(5,80,96,.97),rgba(3,35,48,.96));border-color:#8cecff }}
+    .cta .headline {{ font-size:43px }}
     </style></head><body><div class='card {modifier}'>{markup}</div></body></html>"""
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()

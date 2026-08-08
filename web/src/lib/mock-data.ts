@@ -95,6 +95,8 @@ export interface VideoJob {
   criadoEm: string;
   atualizadoEm: string;
   videoUrl?: string;
+  localVideoUrl?: string;
+  remoteVideoUrl?: string;
   thumbnailUrl?: string;
   duracaoSegundos?: number;
   erro?: string;

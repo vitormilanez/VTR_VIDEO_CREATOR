@@ -89,6 +89,7 @@ import {
   Circle,
   Film,
   History,
+  Loader2,
   Pencil,
   Plus,
   RotateCcw,
@@ -760,6 +761,11 @@ function RoteiroDetalhe() {
       return;
     }
     setSending(true);
+    const notice = toast.loading(
+      forceNewVersion
+        ? "Enviando a nova versão ao HeyGen..."
+        : "Enviando o vídeo ao HeyGen...",
+    );
     try {
       let scriptToSend = script;
       if (dirty) {
@@ -780,7 +786,9 @@ function RoteiroDetalhe() {
         sceneResult.jobs.forEach((job) => addVideoJob(job));
         const firstJob = sceneResult.jobs[0];
         if (!firstJob) throw new Error("A HeyGen não retornou jobs por cena.");
-        toast.success(`${sceneResult.jobs.length} cena(s) enviada(s) para produção no HeyGen.`);
+        toast.success(`${sceneResult.jobs.length} cena(s) enviada(s) para produção no HeyGen.`, {
+          id: notice,
+        });
         navigate({ to: "/producao/$id", params: { id: firstJob.id } });
         return;
       }
@@ -804,13 +812,18 @@ function RoteiroDetalhe() {
       });
       addVideoJob(job);
       toast.success(
-        dirty
-          ? "Roteiro salvo e enviado para producao no HeyGen."
-          : "Roteiro enviado para producao no HeyGen.",
+        forceNewVersion
+          ? "Nova versão enviada. O status será atualizado automaticamente."
+          : dirty
+            ? "Roteiro salvo e enviado para producao no HeyGen."
+            : "Roteiro enviado para producao no HeyGen.",
+        { id: notice },
       );
       navigate({ to: "/producao/$id", params: { id: job.id } });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Nao foi possivel enviar ao HeyGen.");
+      toast.error(err instanceof Error ? err.message : "Nao foi possivel enviar ao HeyGen.", {
+        id: notice,
+      });
     } finally {
       setSending(false);
     }
@@ -1019,7 +1032,12 @@ function RoteiroDetalhe() {
                       saving || sending || Boolean(productionBlockedReason) || !selectedAvatarReady || !voiceId || !canSendToProduction
                     }
                   >
-                    <History className="mr-1 h-4 w-4" /> Refazer vídeo
+                    {sending ? (
+                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                    ) : (
+                      <History className="mr-1 h-4 w-4" />
+                    )}
+                    {sending ? "Enviando..." : "Refazer vídeo"}
                   </Button>
                 }
               />
@@ -1073,8 +1091,12 @@ function RoteiroDetalhe() {
                       saving || sending || Boolean(productionBlockedReason) || !selectedAvatarReady || !voiceId || !canSendToProduction
                     }
                   >
-                    <Film className="mr-1 h-4 w-4" />{" "}
-                    Gerar vídeo final
+                    {sending ? (
+                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Film className="mr-1 h-4 w-4" />
+                    )}
+                    {sending ? "Enviando..." : "Gerar vídeo final"}
                   </Button>
                 }
               />
