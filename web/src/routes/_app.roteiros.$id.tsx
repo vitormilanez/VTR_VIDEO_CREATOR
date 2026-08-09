@@ -276,9 +276,14 @@ function RoteiroDetalhe() {
   const [titleChoice, setTitleChoice] = useState<"current" | "suggested">("current");
   const [titleBeforeSuggestion, setTitleBeforeSuggestion] = useState(script?.titulo ?? "");
   const [editorStateLoaded, setEditorStateLoaded] = useState(false);
+  const [staleEditorResult, setStaleEditorResult] = useState<EditorAssistResult | null>(null);
+  const [durationAnnouncement, setDurationAnnouncement] = useState("");
   const lastSavedProfileKey = useRef("");
   const lastSavedEditorStateKey = useRef("");
   const sendPromiseRef = useRef<Promise<void> | null>(null);
+  const editorRevisionRef = useRef(0);
+  const editorRequestIdRef = useRef(0);
+  const editorMountedRef = useRef(true);
   const existingJobs = useMemo(
     () =>
       videoJobs
@@ -330,7 +335,16 @@ function RoteiroDetalhe() {
       : baseMedicalReviewStatus;
 
   useEffect(() => {
+    editorMountedRef.current = true;
+    return () => {
+      editorMountedRef.current = false;
+      editorRequestIdRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
     if (script) {
+      editorRevisionRef.current += 1;
       setDraft(script);
       setTitleBeforeSuggestion(script.titulo);
       const savedCaptureDuration = captureHookDuration(script);
@@ -346,6 +360,15 @@ function RoteiroDetalhe() {
       }
     }
   }, [script]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setDurationAnnouncement(
+        `${durationStatusLabel(durationAssessment.status)}. ${durationAssessment.message}`,
+      );
+    }, 450);
+    return () => window.clearTimeout(timeout);
+  }, [durationAssessment.message, durationAssessment.status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -790,6 +813,7 @@ function RoteiroDetalhe() {
   }
 
   function setProductionDuration(nextDuration: 10 | 15 | 30 | 45 | 60) {
+    editorRevisionRef.current += 1;
     setDurationSeconds(nextDuration);
     setLastEditorResult(null);
     setEditorSchemaValid(true);
@@ -1125,6 +1149,8 @@ function RoteiroDetalhe() {
   async function executarEditorComIa(operation: EditorOperation) {
     if (!draft || !displayText.trim() || naturalizing) return;
     const previousScript = displayText;
+    const requestId = ++editorRequestIdRef.current;
+    const editorRevision = editorRevisionRef.current;
     setNaturalizing(true);
     setActiveEditorOperation(operation);
     setEditorTechnicalError(null);
@@ -1154,6 +1180,17 @@ function RoteiroDetalhe() {
         durationSeconds,
         humanReviewApproved,
       });
+      if (
+        !editorMountedRef.current ||
+        requestId !== editorRequestIdRef.current ||
+        editorRevision !== editorRevisionRef.current
+      ) {
+        if (editorMountedRef.current && requestId === editorRequestIdRef.current) {
+          setStaleEditorResult(result);
+          toast.info("A fala mudou durante a revisão. O resultado antigo não foi aplicado.");
+        }
+        return;
+      }
       setLastEditorResult(result);
       setEditorSchemaValid(result.schemaValid);
       setEditorTechnicalError(
@@ -1167,6 +1204,7 @@ function RoteiroDetalhe() {
         toast.info(result.message || `O texto já está adequado para ${durationSeconds}s.`);
         return;
       }
+      editorRevisionRef.current += 1;
       setPreviousAiScript(previousScript);
       setDisplayText(result.script);
       setNarrationText(result.script);
@@ -1373,6 +1411,13 @@ function RoteiroDetalhe() {
       }
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+        <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {naturalizing
+            ? activeEditorOperation === "medical_rewrite"
+              ? "Revisão com inteligência artificial em andamento."
+              : "Ajuste de duração com inteligência artificial em andamento."
+            : durationAnnouncement}
+        </div>
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge {...scriptStatusLabel[draft.status]} />
@@ -1400,8 +1445,12 @@ function RoteiroDetalhe() {
               description="A fala final aprovada é a fonte do vídeo. O contexto editorial fica recolhido."
             />
             <div className="mt-4 space-y-4">
-              <Field label="Título">
-                <Input value={draft.titulo} onChange={(e) => set("titulo", e.target.value)} />
+              <Field label="Título" htmlFor="script-title">
+                <Input
+                  id="script-title"
+                  value={draft.titulo}
+                  onChange={(e) => set("titulo", e.target.value)}
+                />
               </Field>
               <div>
                 <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
@@ -1421,6 +1470,7 @@ function RoteiroDetalhe() {
                           draft,
                           durationSeconds === 10 ? "" : outroText,
                         );
+                        editorRevisionRef.current += 1;
                         setNarrationText(restored);
                         setDisplayText(restored);
                         setSpokenText("");
@@ -1438,6 +1488,7 @@ function RoteiroDetalhe() {
                         variant="ghost"
                         onClick={() => {
                           const current = displayText;
+                          editorRevisionRef.current += 1;
                           setDisplayText(previousAiScript);
                           setNarrationText(previousAiScript);
                           setSpokenText("");
@@ -1498,6 +1549,7 @@ function RoteiroDetalhe() {
                   rows={9}
                   value={displayText}
                   onChange={(event) => {
+                    editorRevisionRef.current += 1;
                     setDisplayText(event.target.value);
                     setNarrationText(event.target.value);
                     setSpokenText("");
@@ -1571,9 +1623,38 @@ function RoteiroDetalhe() {
                   </span>
                 </div>
                 {editorTechnicalError ? (
-                  <div className="mt-2 rounded-lg border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+                  <div
+                    className="mt-2 rounded-lg border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+                    role="alert"
+                  >
                     {editorTechnicalError} O texto anterior foi mantido; revise manualmente ou tente
                     novamente.
+                  </div>
+                ) : null}
+                {staleEditorResult ? (
+                  <div
+                    className="mt-2 rounded-lg border border-status-info/30 bg-status-info/10 px-3 py-2 text-xs text-status-info"
+                    role="status"
+                  >
+                    <p className="font-semibold">Resultado de IA desatualizado</p>
+                    <p className="mt-1 leading-5">
+                      A fala foi editada enquanto a IA trabalhava. A versão atual foi preservada.
+                    </p>
+                    <details className="mt-2">
+                      <summary className="cursor-pointer font-medium">Ver resultado antigo</summary>
+                      <p className="mt-2 whitespace-pre-wrap rounded-md bg-background p-2 text-foreground">
+                        {staleEditorResult.script}
+                      </p>
+                    </details>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="mt-2"
+                      onClick={() => setStaleEditorResult(null)}
+                    >
+                      Descartar resultado antigo
+                    </Button>
                   </div>
                 ) : null}
                 {qualityIssues.length > 0 ? (
@@ -1599,6 +1680,7 @@ function RoteiroDetalhe() {
                           className="h-7 px-2 text-[11px]"
                           onClick={() => {
                             const corrected = normalizeNarrationOutro(displayText, outroText);
+                            editorRevisionRef.current += 1;
                             setDisplayText(corrected);
                             setNarrationText(corrected);
                             setSpokenText("");
@@ -2276,9 +2358,10 @@ function RoteiroDetalhe() {
                             value={outroText}
                             onChange={(event) => setOutroText(event.target.value)}
                             onBlur={() =>
-                              setDisplayText((current) =>
-                                normalizeNarrationOutro(current, outroText),
-                              )
+                              setDisplayText((current) => {
+                                editorRevisionRef.current += 1;
+                                return normalizeNarrationOutro(current, outroText);
+                              })
                             }
                             placeholder="Ex.: Me siga para mais dicas."
                             maxLength={180}
@@ -2287,9 +2370,10 @@ function RoteiroDetalhe() {
                             type="button"
                             variant="secondary"
                             onClick={() =>
-                              setDisplayText((current) =>
-                                normalizeNarrationOutro(current, outroText),
-                              )
+                              setDisplayText((current) => {
+                                editorRevisionRef.current += 1;
+                                return normalizeNarrationOutro(current, outroText);
+                              })
                             }
                           >
                             Aplicar
@@ -4317,10 +4401,20 @@ function buildScriptTimeline(
   ];
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  htmlFor,
+  children,
+}: {
+  label: string;
+  htmlFor?: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="space-y-1">
-      <Label className="text-xs">{label}</Label>
+      <Label htmlFor={htmlFor} className="text-xs">
+        {label}
+      </Label>
       {children}
     </div>
   );
