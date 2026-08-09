@@ -1461,7 +1461,21 @@ class StableIdTests(unittest.TestCase):
         job = {
             "id": "v-agent-isolated",
             "scriptId": payload.scriptId,
-            "productionSettings": {"cinematicPrompt": leaked_direction},
+            "productionSettings": {
+                "cinematicPrompt": leaked_direction,
+                "providerCapabilities": {
+                    "capabilitiesVersion": "heygen-test-v1",
+                    "videoAgent": {
+                        "supported": True,
+                        "supportsStyleId": True,
+                        "supportsBrandKitId": True,
+                        "supportsChatMode": True,
+                        "supportsAttachments": True,
+                        "orientations": ["landscape", "portrait"],
+                        "modes": ["chat", "generate"],
+                    },
+                },
+            },
         }
 
         with tempfile.TemporaryDirectory() as temporary:

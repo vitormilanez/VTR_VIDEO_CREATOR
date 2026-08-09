@@ -98,6 +98,12 @@ from api.services.script_editor import (
     title_alignment,
 )
 from api.services.paid_generation import request_fingerprint, validate_paid_version
+from api.services.provider_capabilities import (
+    heygen_cli_version,
+    inspect_heygen_capabilities,
+    validate_video_agent_options,
+    video_agent_create_args,
+)
 from api.services.video_generation import (
     DIRECT_VIDEO_DURATIONS,
     direct_video_payload,
@@ -347,6 +353,13 @@ def _ai_db() -> sqlite3.Connection:
             pack_json TEXT NOT NULL,
             source_avatar_id TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS provider_capabilities (
+            provider TEXT PRIMARY KEY,
+            cli_version TEXT NOT NULL,
+            capabilities_version TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL,
+            checked_at TEXT NOT NULL
         );
         """
     )
@@ -1919,7 +1932,7 @@ def _migrate_video_job_script_ids(scripts: list[dict[str, Any]]) -> int:
     return changed
 
 
-def _heygen_cli() -> str:
+def _heygen_cli_binary() -> str:
     command = shutil.which("heygen")
     if not command:
         local_command = Path.home() / ".local" / "bin" / "heygen"
@@ -1933,9 +1946,88 @@ def _heygen_cli() -> str:
                 "videos para producao."
             ),
         )
+    return command
+
+
+def _heygen_cli() -> str:
+    command = _heygen_cli_binary()
     if not os.getenv("HEYGEN_API_KEY"):
         raise HTTPException(status_code=503, detail="Defina HEYGEN_API_KEY no arquivo .env.")
     return command
+
+
+def _saved_provider_capabilities(provider: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            """SELECT capabilities_json, checked_at
+               FROM provider_capabilities WHERE provider = ?""",
+            (provider,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    try:
+        capabilities = json.loads(str(row["capabilities_json"]))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(capabilities, dict):
+        return None
+    capabilities["checkedAt"] = row["checked_at"]
+    return capabilities
+
+
+def _save_provider_capabilities(capabilities: dict[str, Any]) -> dict[str, Any]:
+    saved = {**capabilities, "checkedAt": _now()}
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """INSERT INTO provider_capabilities(
+                   provider, cli_version, capabilities_version, capabilities_json, checked_at
+               ) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(provider) DO UPDATE SET
+                   cli_version=excluded.cli_version,
+                   capabilities_version=excluded.capabilities_version,
+                   capabilities_json=excluded.capabilities_json,
+                   checked_at=excluded.checked_at""",
+            (
+                saved["provider"],
+                saved["cliVersion"],
+                saved["capabilitiesVersion"],
+                json.dumps(capabilities, ensure_ascii=False, sort_keys=True),
+                saved["checkedAt"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return saved
+
+
+def _heygen_capabilities(*, refresh: bool = False) -> dict[str, Any]:
+    command = _heygen_cli_binary()
+    try:
+        current_cli_version = heygen_cli_version(command)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    cached = _saved_provider_capabilities("heygen")
+    if cached and not refresh and cached.get("cliVersion") == current_cli_version:
+        try:
+            checked_at = datetime.fromisoformat(str(cached.get("checkedAt") or ""))
+            age_seconds = (datetime.now(timezone.utc) - checked_at).total_seconds()
+        except ValueError:
+            age_seconds = 86401
+        if age_seconds <= 86400:
+            return cached
+    try:
+        inspected = inspect_heygen_capabilities(command)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Não foi possível validar as capacidades do HeyGen: {exc}",
+        ) from exc
+    return _save_provider_capabilities(inspected)
 
 
 def _read_json_output(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -2850,6 +2942,12 @@ def heygen_styles(tag: str = "cinematic") -> dict:
     return {"styles": styles if isinstance(styles, list) else [], "tag": selected_tag}
 
 
+@app.get("/api/providers/heygen/capabilities")
+def heygen_provider_capabilities(refresh: bool = False) -> dict:
+    """Inspeciona contratos locais do CLI; não cria sessão nem consome créditos."""
+    return {"ok": True, "capabilities": _heygen_capabilities(refresh=refresh)}
+
+
 class AvatarMediaIn(BaseModel):
     name: str
     mimeType: str
@@ -3346,6 +3444,8 @@ class VideoCreateIn(BaseModel):
     captions: bool = True
     optimizePronunciation: bool = True
     styleId: str | None = None
+    brandKitId: str | None = Field(default=None, max_length=160)
+    videoAgentMode: Literal["generate", "chat"] = "generate"
     forceNewVersion: bool = False
     narrationText: str | None = Field(default=None, max_length=6000)
     displayText: str | None = Field(default=None, max_length=6000)
@@ -5316,6 +5416,25 @@ def create_video(payload: VideoCreateIn) -> dict:
             status_code=422,
             detail="Escreva a direção cinematic antes de enviar este modo para produção.",
         )
+    if payload.generationMode == "direct" and (
+        payload.styleId or payload.brandKitId or payload.videoAgentMode != "generate"
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="styleId, brandKitId e modo chat pertencem somente ao Video Agent.",
+        )
+    provider_capabilities: dict[str, Any] | None = None
+    if payload.generationMode in {"video_agent", "cinematic"}:
+        provider_capabilities = _heygen_capabilities()
+        try:
+            validate_video_agent_options(
+                provider_capabilities,
+                style_id=payload.styleId,
+                brand_kit_id=payload.brandKitId,
+                mode=payload.videoAgentMode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     # Preserve the historical "existing video" response for callers that have
     # not supplied any editable text. Requests with production text always go
     # through the stricter pre-reservation compliance path below.
@@ -5380,6 +5499,20 @@ def create_video(payload: VideoCreateIn) -> dict:
             "captions": payload.captions,
             "optimizePronunciation": payload.optimizePronunciation,
             "styleId": payload.styleId,
+            "brandKitId": payload.brandKitId,
+            "videoAgentMode": payload.videoAgentMode,
+            **(
+                {
+                    "providerCapabilitiesVersion": provider_capabilities["capabilitiesVersion"],
+                    "providerCapabilities": {
+                        key: value
+                        for key, value in provider_capabilities.items()
+                        if key != "checkedAt"
+                    },
+                }
+                if provider_capabilities
+                else {}
+            ),
             "narrationText": final_display_text,
             "displayText": final_display_text,
             "spokenText": final_spoken_text,
@@ -5593,18 +5726,28 @@ def _create_video_job(
             raise HTTPException(status_code=400, detail="A fala final não pode estar vazia para o Video Agent.")
         job["productionSettings"]["agentInput"] = agent_input_mode
         _job_store().upsert("video", job)
-        args = [
-            "video-agent",
-            "create",
-            "--prompt",
-            agent_text,
-            "--avatar-id",
-            avatar_id,
-            "--voice-id",
-            voice_id,
-            "--orientation",
-            payload.orientation,
-        ]
+        capabilities = job["productionSettings"].get("providerCapabilities")
+        if not isinstance(capabilities, dict):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "O registro de capabilities usado na reserva deste job não está disponível. "
+                    "Crie uma nova reserva antes de enviar ao HeyGen."
+                ),
+            )
+        try:
+            args = video_agent_create_args(
+                capabilities,
+                prompt=agent_text,
+                avatar_id=avatar_id,
+                voice_id=voice_id,
+                orientation=payload.orientation,
+                style_id=payload.styleId,
+                brand_kit_id=payload.brandKitId,
+                mode=payload.videoAgentMode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         response = _run_heygen_json(command, args, timeout=60)
         session_id = _find_value(response, "session_id", "sessionId")
         video_id = _find_value(response, "video_id", "videoId", "id")
@@ -9668,6 +9811,8 @@ def _production_configuration_key(payload: VideoCreateIn, display_text: str, spo
         "captions": payload.captions,
         "orientation": payload.orientation,
         "styleId": payload.styleId,
+        "brandKitId": payload.brandKitId,
+        "videoAgentMode": payload.videoAgentMode,
     }
     digest = hashlib.sha256(json.dumps(configuration, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     return f"video:{payload.scriptId}:{digest[:32]}"

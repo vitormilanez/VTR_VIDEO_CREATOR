@@ -1167,6 +1167,8 @@ export async function createHeyGenVideo(
     captions: boolean;
     optimizePronunciation: boolean;
     styleId?: string;
+    brandKitId?: string;
+    videoAgentMode?: "generate" | "chat";
     forceNewVersion?: boolean;
     narrationText?: string;
     displayText?: string;
