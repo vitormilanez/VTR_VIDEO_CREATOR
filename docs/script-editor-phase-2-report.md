@@ -89,7 +89,18 @@ Data de início: 9 de agosto de 2026.
 
 ## Slice 15C
 
-- Status: `not_started`
+- Status: `completed`
+- Antes: rota com 4.773 linhas, 40 ocorrências de `useState`, 15 de `useEffect` e 19 handlers assíncronos. O mesmo arquivo continha orquestração, feedback do editor, avatar sets, Scene Plan, direção visual e checklist de produção.
+- Depois: rota com 2.671 linhas, 30 ocorrências de `useState`, 9 de `useEffect` e 8 handlers assíncronos. Regras determinísticas continuam em `web/src/lib/script-editor.ts`; nenhum endpoint ou payload mudou.
+- Extrações:
+  - `editor-feedback.tsx` e `editor-feedback-hooks.ts`: duração, erro/foco, resposta antiga, checks, título e revisão médica;
+  - `avatar-studio.tsx`: seleção de avatar, Avatar Sets e diálogo de edição;
+  - `scene-plan-editor.tsx`: direção, edição e persistência das cenas;
+  - `visual-plan-director.tsx`: direção visual e previews locais;
+  - `production-readiness.tsx`: avisos de crédito e gates/checklists;
+  - `editor-options.ts`: opções tipadas compartilhadas, sem duplicar contrato.
+- Comportamento preservado: mesma ordem do DOM, textos, acessibilidade, stale-response guard, dirty/save, autosave, revisão, gate e chamadas de API. As extrações não adicionam effects, fetches ou waterfalls.
+- Validação: 21 testes React/axe passaram; TypeScript e ESLint dos arquivos do slice passaram sem warnings; build de produção passou. Regressão visual real permaneceu sem overflow horizontal e foi salva em `artifacts/script-editor/phase-2/15C/desktop-regression.png`.
 
 ## Slice 15D
 
