@@ -398,8 +398,15 @@ describe("script editor React interactions", () => {
     );
     await userEvent.click(within(getEditor()).getByRole("button", { name: "Revisar com IA" }));
 
-    expect(await within(getEditor()).findByRole("alert")).toHaveTextContent("Resposta inválida");
-    expect(within(getEditor()).getByLabelText("Fala final")).toHaveValue(original);
+    const alert = await within(getEditor()).findByRole("alert");
+    expect(alert).toHaveTextContent("Resposta inválida");
+    expect(alert).toHaveFocus();
+    const speech = within(getEditor()).getByLabelText("Fala final");
+    expect(speech).toHaveValue(original);
+    expect(speech).toHaveAttribute(
+      "aria-describedby",
+      "script-duration-feedback script-editor-error",
+    );
     expect(runScriptEditorAssist).toHaveBeenCalledTimes(1);
     await expectNoCriticalAxeViolations();
   });

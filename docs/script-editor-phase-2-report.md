@@ -68,7 +68,13 @@ Data de início: 9 de agosto de 2026.
 
 ## Slice 15A
 
-- Status: `not_started`
+- Status: `completed`
+- Acessibilidade: nomes e descrições do editor permanecem associados; alertas técnicos usam `role=alert`, recebem foco programático e entram no `aria-describedby` da fala; estados assíncronos continuam anunciados em região `aria-live`.
+- Teclado e movimento: foco global visível foi confirmado no navegador e a folha de estilos agora respeita `prefers-reduced-motion` para animações, transições e scroll suave.
+- Responsividade: o cabeçalho deixa de depender de altura fixa, quebra as ações em uma segunda linha quando necessário e reduz o padding em telas estreitas. O conteúdo permanece sem overflow horizontal na viewport real de 1280 px; as regras responsivas cobrem 375/768/1024/1440 e zoom de 200% pela mesma quebra fluida.
+- Contraste: estados críticos mantêm texto + ícone/label, sem depender apenas de cor. Axe segue sem violações críticas nos estados ideal, warning, blocking, erro, desalinhamento de título e revisão médica.
+- Evidências visuais locais: `artifacts/script-editor/phase-2/15A/desktop-responsive.png`, `desktop-blocking.png` e `desktop-ideal.png`. O navegador embarcado desta execução possui viewport fixa; por isso larguras adicionais foram cobertas por CSS responsivo, testes de componentes e ausência de overflow no navegador disponível.
+- Validação: 21 testes React passaram; TypeScript, Prettier e ESLint dos arquivos alterados passaram.
 
 ## Slice 15B
 

@@ -290,6 +290,7 @@ function RoteiroDetalhe() {
   const editorRevisionRef = useRef(0);
   const editorRequestIdRef = useRef(0);
   const editorMountedRef = useRef(true);
+  const editorErrorRef = useRef<HTMLDivElement>(null);
   const existingJobs = useMemo(
     () =>
       videoJobs
@@ -375,6 +376,10 @@ function RoteiroDetalhe() {
     }, 450);
     return () => window.clearTimeout(timeout);
   }, [durationAssessment.message, durationAssessment.status]);
+
+  useEffect(() => {
+    if (editorTechnicalError) editorErrorRef.current?.focus();
+  }, [editorTechnicalError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1616,7 +1621,11 @@ function RoteiroDetalhe() {
                     setEditorTechnicalError(null);
                     setLastEditorResult(null);
                   }}
-                  aria-describedby="script-duration-feedback"
+                  aria-describedby={
+                    editorTechnicalError
+                      ? "script-duration-feedback script-editor-error"
+                      : "script-duration-feedback"
+                  }
                   className="min-h-56 leading-6"
                 />
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
@@ -1683,6 +1692,9 @@ function RoteiroDetalhe() {
                 </div>
                 {editorTechnicalError ? (
                   <div
+                    ref={editorErrorRef}
+                    id="script-editor-error"
+                    tabIndex={-1}
                     className="mt-2 rounded-lg border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
                     role="alert"
                   >

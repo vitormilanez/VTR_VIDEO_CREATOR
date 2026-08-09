@@ -146,18 +146,18 @@ export function AppShell({
       <div className="flex min-h-screen w-full bg-background">
         <AppSidebar />
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-10 flex h-14 items-center gap-3 border-b bg-card/80 px-4 backdrop-blur-md">
+          <header className="sticky top-0 z-10 flex min-h-14 flex-wrap items-center gap-x-3 gap-y-2 border-b bg-card/80 px-3 py-2 backdrop-blur-md sm:px-4">
             <SidebarTrigger />
             <div className="h-4 w-px bg-border" />
-            <h1 className="truncate font-display text-base font-semibold tracking-tight">
+            <h1 className="min-w-0 flex-1 truncate font-display text-base font-semibold tracking-tight">
               {title}
             </h1>
-            <div className="ml-auto flex items-center gap-2">
+            <div className="order-3 flex w-full flex-wrap items-center gap-2 sm:order-none sm:ml-auto sm:w-auto sm:justify-end">
               <SyncStatus syncedAt={syncedAt} />
               {actions}
             </div>
           </header>
-          <main className="flex-1 overflow-x-clip p-4 md:p-6">{children}</main>
+          <main className="flex-1 overflow-x-clip p-3 sm:p-4 md:p-6">{children}</main>
         </div>
       </div>
     </SidebarProvider>
