@@ -772,7 +772,10 @@ export async function fetchMusicTracks(): Promise<MusicTrack[]> {
   const response = await requestJson<{ ok: boolean; tracks: MusicTrack[] }>("/api/music-tracks", {
     method: "GET",
   });
-  return response.tracks;
+  return response.tracks.map((track) => ({
+    ...track,
+    url: /^https?:\/\//.test(track.url) ? track.url : `${BASE}${track.url}`,
+  }));
 }
 
 export async function fetchAvatarSets(): Promise<AvatarSet[]> {

@@ -17,6 +17,7 @@ from api.services.local_video_kit import (
     _motion_filter,
     _motion_profile,
     _outro_tail_seconds,
+    _section_enabled,
     _section_transition,
     _section_timing,
     _voice_filters,
@@ -89,6 +90,27 @@ class LocalVideoKitTests(unittest.TestCase):
         self.assertEqual(profile["rampSeconds"], 0.7)
         self.assertEqual(profile["focusY"], 0.43)
         self.assertEqual(profile["intervals"], [(6.5, 9.1), (26.1, 28.7)])
+
+    def test_blank_topic_card_is_disabled_even_when_switch_is_on(self) -> None:
+        from api import server
+
+        payload = server.LocalVideoKitCreateIn(
+            uploadId="upload-123",
+            sectionTitle="   ",
+            includeSection=True,
+        )
+        config = server._local_video_kit_config(payload)
+
+        self.assertFalse(_section_enabled(config))
+        self.assertFalse(config["includeSection"])
+        self.assertEqual(config["sectionTitle"], "")
+
+    def test_music_library_exposes_preview_url(self) -> None:
+        from api import server
+
+        track = server._music_track_response(server.MUSIC_LIBRARY[0])
+
+        self.assertEqual(track["url"], "/api/music-tracks/soft-focus/file")
 
     def test_social_motion_is_stronger_and_more_frequent(self) -> None:
         subtle = _motion_profile({"motionPreset": "subtle"}, 30)

@@ -9,6 +9,7 @@ import {
   Image as ImageIcon,
   LoaderCircle,
   Mic2,
+  RefreshCcw,
   ScanLine,
   ShieldCheck,
   Upload,
@@ -153,14 +154,32 @@ function LocalVideoKitPage() {
   const [sourcePreview, setSourcePreview] = useState<string | null>(null);
   const [config, setConfig] = useState<LocalVideoKitConfig>(DEFAULT_CONFIG);
   const [musicTracks, setMusicTracks] = useState<MusicTrack[]>([]);
+  const [musicLibraryState, setMusicLibraryState] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [musicLibraryRetry, setMusicLibraryRetry] = useState(0);
   const [job, setJob] = useState<LocalVideoKitJob | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const configTouched = useRef(false);
 
   useEffect(() => {
+    let cancelled = false;
+    setMusicLibraryState("loading");
     void fetchMusicTracks()
-      .then(setMusicTracks)
-      .catch(() => undefined);
-  }, []);
+      .then((tracks) => {
+        if (cancelled) return;
+        setMusicTracks(tracks);
+        setMusicLibraryState("ready");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setMusicTracks([]);
+        setMusicLibraryState("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [musicLibraryRetry]);
 
   useEffect(() => {
     if (videoJobId) return;
@@ -170,7 +189,9 @@ function LocalVideoKitPage() {
         const recovered = jobs.find((item) => item.id === savedId) || jobs[0];
         if (recovered) {
           setJob(recovered);
-          setConfig({ ...DEFAULT_CONFIG, ...recovered.config });
+          if (!configTouched.current) {
+            setConfig({ ...DEFAULT_CONFIG, ...recovered.config });
+          }
         }
       })
       .catch(() => undefined);
@@ -227,6 +248,7 @@ function LocalVideoKitPage() {
   }
 
   function update<K extends keyof LocalVideoKitConfig>(key: K, value: LocalVideoKitConfig[K]) {
+    configTouched.current = true;
     setConfig((current) => ({ ...current, [key]: value }));
   }
 
@@ -238,12 +260,17 @@ function LocalVideoKitPage() {
     setSubmitting(true);
     try {
       const upload = file ? await uploadLocalVideoKitSource(file) : null;
+      const sectionTitle = config.sectionTitle.trim();
       const created = await createLocalVideoKit({
         uploadId: upload?.uploadId,
         videoJobId: file ? undefined : videoJobId,
         sourceKitJobId: file || videoJobId || job?.status !== "pronto" ? undefined : job.id,
         sourceName: file?.name || sourceName || job?.sourceName || `video-${videoJobId}.mp4`,
-        config,
+        config: {
+          ...config,
+          sectionTitle,
+          includeSection: Boolean(sectionTitle && config.includeSection),
+        },
       });
       window.localStorage.setItem("local-video-kit:last-job", created.id);
       setJob(created);
@@ -256,6 +283,7 @@ function LocalVideoKitPage() {
   }
 
   const working = submitting || job?.status === "fila" || job?.status === "processando";
+  const hasSectionContent = Boolean(config.sectionTitle.trim());
   const selectedMusicTrack = musicTracks.find((track) => track.id === config.musicTrackId) || null;
   const originalUrl =
     sourcePreview ||
@@ -341,6 +369,11 @@ function LocalVideoKitPage() {
                 value={config.sectionTitle}
                 onChange={(value) => update("sectionTitle", value)}
               />
+              {!hasSectionContent ? (
+                <p className="-mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                  Sem texto, nenhuma cartela de tópico será criada.
+                </p>
+              ) : null}
               <TextField
                 id="kit-cta"
                 label="Encerramento"
@@ -354,44 +387,46 @@ function LocalVideoKitPage() {
                 onChange={(value) => update("site", value)}
               />
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="kit-section-start">Cartela entra aos</Label>
-                  <Input
-                    id="kit-section-start"
-                    type="number"
-                    min={3}
-                    step={0.5}
-                    placeholder="Automático"
-                    value={config.sectionStartSeconds ?? ""}
-                    onChange={(event) =>
-                      update(
-                        "sectionStartSeconds",
-                        event.target.value ? Number(event.target.value) : null,
-                      )
-                    }
-                  />
-                  <p className="text-[11px] text-muted-foreground">segundos do vídeo</p>
+              {hasSectionContent ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="kit-section-start">Cartela entra aos</Label>
+                    <Input
+                      id="kit-section-start"
+                      type="number"
+                      min={3}
+                      step={0.5}
+                      placeholder="Automático"
+                      value={config.sectionStartSeconds ?? ""}
+                      onChange={(event) =>
+                        update(
+                          "sectionStartSeconds",
+                          event.target.value ? Number(event.target.value) : null,
+                        )
+                      }
+                    />
+                    <p className="text-[11px] text-muted-foreground">segundos do vídeo</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="kit-section-duration">Fica na tela por</Label>
+                    <Input
+                      id="kit-section-duration"
+                      type="number"
+                      min={0.5}
+                      max={120}
+                      step={0.5}
+                      value={config.sectionDurationSeconds ?? 3}
+                      onChange={(event) =>
+                        update(
+                          "sectionDurationSeconds",
+                          event.target.value ? Number(event.target.value) : 3,
+                        )
+                      }
+                    />
+                    <p className="text-[11px] text-muted-foreground">segundos</p>
+                  </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="kit-section-duration">Fica na tela por</Label>
-                  <Input
-                    id="kit-section-duration"
-                    type="number"
-                    min={0.5}
-                    max={120}
-                    step={0.5}
-                    value={config.sectionDurationSeconds ?? 3}
-                    onChange={(event) =>
-                      update(
-                        "sectionDurationSeconds",
-                        event.target.value ? Number(event.target.value) : 3,
-                      )
-                    }
-                  />
-                  <p className="text-[11px] text-muted-foreground">segundos</p>
-                </div>
-              </div>
+              ) : null}
 
               <div className="space-y-1.5">
                 <Label htmlFor="kit-accent">Destaque</Label>
@@ -404,34 +439,56 @@ function LocalVideoKitPage() {
                 />
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className={`grid gap-3 ${hasSectionContent ? "sm:grid-cols-2" : ""}`}>
+                {hasSectionContent ? (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="kit-section-transition">Transição da cartela</Label>
+                    <select
+                      id="kit-section-transition"
+                      value={config.sectionTransition ?? "fade"}
+                      onChange={(event) =>
+                        update(
+                          "sectionTransition",
+                          event.target.value as LocalVideoKitConfig["sectionTransition"],
+                        )
+                      }
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
+                    >
+                      <option value="fade">Fade suave</option>
+                      <option value="slide_up">Deslizar de baixo</option>
+                      <option value="none">Corte direto</option>
+                    </select>
+                  </div>
+                ) : null}
                 <div className="space-y-1.5">
-                  <Label htmlFor="kit-section-transition">Transição da cartela</Label>
-                  <select
-                    id="kit-section-transition"
-                    value={config.sectionTransition ?? "fade"}
-                    onChange={(event) =>
-                      update(
-                        "sectionTransition",
-                        event.target.value as LocalVideoKitConfig["sectionTransition"],
-                      )
-                    }
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
-                  >
-                    <option value="fade">Fade suave</option>
-                    <option value="slide_up">Deslizar de baixo</option>
-                    <option value="none">Corte direto</option>
-                  </select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="kit-music">Música de fundo</Label>
+                  <div className="flex items-center justify-between gap-2">
+                    <Label htmlFor="kit-music">Música de fundo</Label>
+                    {musicLibraryState === "error" ? (
+                      <button
+                        type="button"
+                        onClick={() => setMusicLibraryRetry((value) => value + 1)}
+                        className="inline-flex cursor-pointer items-center gap-1 text-[11px] font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <RefreshCcw className="h-3 w-3" /> Tentar novamente
+                      </button>
+                    ) : null}
+                  </div>
                   <select
                     id="kit-music"
                     value={config.musicTrackId ?? ""}
                     onChange={(event) => update("musicTrackId", event.target.value || null)}
+                    disabled={musicLibraryState !== "ready"}
                     className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring"
                   >
-                    <option value="">Sem música</option>
+                    <option value="">
+                      {musicLibraryState === "loading"
+                        ? "Carregando músicas..."
+                        : musicLibraryState === "error"
+                          ? "Não foi possível carregar as músicas"
+                          : musicTracks.length
+                            ? "Sem música"
+                            : "Nenhuma música local encontrada"}
+                    </option>
                     {musicTracks.map((track) => (
                       <option key={track.id} value={track.id}>
                         {track.name} · {track.mood}
@@ -703,7 +760,9 @@ function LocalVideoKitPage() {
               </div>
 
               <p className="text-[11px] leading-relaxed text-muted-foreground">
-                O movimento usa aceleração suave, prioriza o rosto e não entra sobre a cartela.
+                {hasSectionContent
+                  ? "O movimento usa aceleração suave, prioriza o rosto e não entra sobre a cartela."
+                  : "O movimento usa aceleração suave e prioriza o rosto."}
               </p>
             </CardContent>
           </Card>
@@ -725,12 +784,14 @@ function LocalVideoKitPage() {
                 checked={config.includeLowerThird}
                 onCheckedChange={(value) => update("includeLowerThird", value)}
               />
-              <PieceSwitch
-                label="Cartela"
-                detail={`${config.sectionTransition === "slide_up" ? "Desliza" : config.sectionTransition === "none" ? "Corte direto" : "Fade"} · ${config.sectionDurationSeconds ?? 3} segundos`}
-                checked={config.includeSection}
-                onCheckedChange={(value) => update("includeSection", value)}
-              />
+              {hasSectionContent ? (
+                <PieceSwitch
+                  label="Cartela"
+                  detail={`${config.sectionTransition === "slide_up" ? "Desliza" : config.sectionTransition === "none" ? "Corte direto" : "Fade"} · ${config.sectionDurationSeconds ?? 3} segundos`}
+                  checked={config.includeSection}
+                  onCheckedChange={(value) => update("includeSection", value)}
+                />
+              ) : null}
               <div className="space-y-1.5 rounded-lg border bg-muted/20 px-3 py-2.5">
                 <div className="flex items-center justify-between gap-3">
                   <Label htmlFor="kit-outro-tail">Slide final acrescenta</Label>

@@ -94,7 +94,7 @@ def _kit_documents(config: dict[str, Any], project_root: Path) -> dict[str, tupl
     role = _safe_text(config.get("role"), "Médico", 90)
     title = _safe_text(config.get("title"), "Saúde e desempenho", 120)
     subtitle = _safe_text(config.get("subtitle"), "Informação clara, direto ao ponto.", 150)
-    section_title = _safe_text(config.get("sectionTitle"), "O que realmente ajuda", 100)
+    section_title = _safe_text(config.get("sectionTitle"), "", 100)
     cta = _safe_text(config.get("cta"), "Quer mais dicas?", 90)
     site = _safe_text(config.get("site"), "@drguilhermemartins", 80)
     base = f"""
@@ -255,6 +255,14 @@ def _section_timing(config: dict[str, Any], duration: float) -> tuple[float, flo
     section_duration = float(requested_duration) if requested_duration is not None else 3.0
     section_duration = min(max(0.5, section_duration), max(0.5, duration - topic_start))
     return topic_start, section_duration
+
+
+def _section_enabled(config: dict[str, Any]) -> bool:
+    """Uma cartela sem conteúdo nunca deve existir no vídeo final."""
+    return bool(
+        config.get("includeSection", True)
+        and re.sub(r"\s+", "", str(config.get("sectionTitle") or ""))
+    )
 
 
 def _section_transition(
@@ -443,6 +451,7 @@ def render_local_kit_video(
     progress(42, "Ajustando o enquadramento vertical")
     crop = _detect_flat_horizontal_bars(source, duration, ffmpeg)
 
+    include_section = _section_enabled(config)
     topic_start, section_duration = _section_timing(config, duration)
     section_end = min(duration, topic_start + section_duration)
     section_stream, section_position = _section_transition(config, topic_start, section_end)
@@ -450,7 +459,7 @@ def render_local_kit_video(
         config,
         duration,
         blocked_intervals=(
-            [(topic_start, section_end)] if config.get("includeSection", True) else []
+            [(topic_start, section_end)] if include_section else []
         ),
     )
     outro_tail = _outro_tail_seconds(config) if config.get("includeOutro", True) else 0.0
@@ -475,7 +484,7 @@ def render_local_kit_video(
     )
     section_enable = (
         f"between(t,{topic_start:.3f},{section_end:.3f})"
-        if config.get("includeSection", True)
+        if include_section
         else "0"
     )
     outro_enable = f"between(t,{duration:.3f},{expected_duration:.3f})" if outro_tail else "0"
@@ -509,7 +518,7 @@ def render_local_kit_video(
         enable_terms = [f"between(t,0,{duration:.3f})"]
         if config.get("includeOpening", True) and opening_end:
             enable_terms.append(f"not(between(t,0,{opening_end:.3f}))")
-        if config.get("includeSection", True):
+        if include_section:
             enable_terms.append(
                 f"not(between(t,{topic_start:.3f},{section_end:.3f}))"
             )
@@ -647,7 +656,7 @@ def render_local_kit_video(
         "events": [
             {"kind": "opening", "enabled": config.get("includeOpening", True), "start": 0, "end": round(opening_end, 3)},
             {"kind": "lowerThird", "enabled": config.get("includeLowerThird", True), "start": round(lower_start, 3), "end": round(lower_end, 3)},
-            {"kind": "section", "enabled": config.get("includeSection", True), "start": round(topic_start, 3), "end": round(section_end, 3)},
+            {"kind": "section", "enabled": include_section, "start": round(topic_start, 3), "end": round(section_end, 3)},
             {"kind": "outro", "enabled": config.get("includeOutro", True), "start": round(duration, 3), "end": round(expected_duration, 3)},
         ],
         "sectionTransition": str(config.get("sectionTransition") or "fade"),

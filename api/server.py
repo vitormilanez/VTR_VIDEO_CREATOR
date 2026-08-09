@@ -3263,7 +3263,14 @@ def save_script_editor_state(script_id: str, payload: ScriptEditorStateIn) -> di
 @app.get("/api/music-tracks")
 def list_music_tracks() -> dict:
     """Lista faixas locais disponíveis para a mixagem final, sem custo externo."""
-    return {"ok": True, "tracks": [_music_track_response(track) for track in MUSIC_LIBRARY if (MUSIC_TRACKS_DIR / track["file"]).is_file()]}
+    return {
+        "ok": True,
+        "tracks": [
+            _music_track_response(track)
+            for track in MUSIC_LIBRARY
+            if (MUSIC_TRACKS_DIR / track["file"]).is_file()
+        ],
+    }
 
 
 @app.get("/api/music-tracks/{track_id}/file")
@@ -5647,7 +5654,7 @@ class LocalVideoKitCreateIn(BaseModel):
         max_length=150,
     )
     sectionNumber: str = Field(default="Ponto 01", min_length=1, max_length=30)
-    sectionTitle: str = Field(default="O que realmente ajuda", min_length=1, max_length=100)
+    sectionTitle: str = Field(default="O que realmente ajuda", max_length=100)
     cta: str = Field(default="Quer mais dicas?", min_length=1, max_length=90)
     site: str = Field(default="@drguilhermemartins", min_length=1, max_length=80)
     accent: str = Field(default="#c8e05a", pattern=r"^#[0-9a-fA-F]{6}$")
@@ -5798,6 +5805,17 @@ def _launch_local_video_kit(job_id: str) -> None:
     threading.Thread(target=render, daemon=True, name=f"local-video-kit-{job_id}").start()
 
 
+def _local_video_kit_config(payload: LocalVideoKitCreateIn) -> dict[str, Any]:
+    """Normaliza peças opcionais antes de persistir e iniciar o render."""
+    config = payload.model_dump(
+        exclude={"uploadId", "videoJobId", "sourceKitJobId", "sourceName"}
+    )
+    config["sectionTitle"] = str(config.get("sectionTitle") or "").strip()
+    if not config["sectionTitle"]:
+        config["includeSection"] = False
+    return config
+
+
 @app.post("/api/local-video-kit")
 def create_local_video_kit(payload: LocalVideoKitCreateIn) -> dict:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
@@ -5847,7 +5865,7 @@ def create_local_video_kit(payload: LocalVideoKitCreateIn) -> dict:
         "sourceVideoJobId": payload.videoJobId,
         "sourceKitJobId": payload.sourceKitJobId,
         "outputPath": str(output.relative_to(ROOT)),
-        "config": payload.model_dump(exclude={"uploadId", "videoJobId", "sourceKitJobId", "sourceName"}),
+        "config": _local_video_kit_config(payload),
         "externalCreditsUsed": False,
         "criadoEm": now,
         "atualizadoEm": now,
