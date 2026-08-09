@@ -78,7 +78,7 @@ Data de início: 9 de agosto de 2026.
 
 ## Slice 15B
 
-- Status: `completed_mocked`; smokes reais `pending_external_authorization`
+- Status: `completed_with_external_step_pending`; smokes reais aguardam autorização externa
 - Falhas do editor: timeout, HTTP 429, HTTP 500 e conexão interrompida são classificados sem copiar resposta bruta. Cada caso admite uma única correção/retry, para após a segunda falha e devolve resposta segura com a fala anterior, schema inválido e revisão humana obrigatória.
 - Structured output e segurança: cobertura para JSON/schema sem `script`, `script` vazio, warning aceito, blocking rejeitado em `fit_duration`, percentuais, dose, prazo, contagem clínica e experiência profissional inventada. Claims novos pedem conferência da fonte; o sistema não os rotula automaticamente como falsos.
 - Cache/concorrência/no-op: request repetido usa cache sem nova chamada; requests simultâneos continuam deduplicados; texto já confortável permanece no caminho determinístico local.
@@ -104,12 +104,42 @@ Data de início: 9 de agosto de 2026.
 
 ## Slice 15D
 
-- Status: `not_started`
+- Status: `completed`
+- Diagnóstico global: havia quatro vulnerabilidades npm transitivas, avisos FastAPI pelo uso de `on_event`, dívida de formatação em quatro rotas legadas, exports incompatíveis com `react-refresh/only-export-components` e um effect com dependências instáveis na produção. Nenhuma regra foi desabilitada.
+- FastAPI lifespan:
+  - os dois handlers legados de startup foram migrados para um único lifespan;
+  - reconciliação de jobs de vídeo, retomada de cortes e retomada de pós-produção executam exatamente uma vez;
+  - `tests/test_api_lifespan.py` caracteriza a ordem e impede inicialização duplicada;
+  - os quatro avisos de depreciação anteriores desapareceram.
+- ESLint e Prettier:
+  - lint global passou com zero erros e zero warnings;
+  - variantes de `Button` e `Toggle` foram separadas em módulos sem componentes para atender Fast Refresh sem silenciar a regra;
+  - exports sem consumidores foram removidos de `badge`, `form`, `navigation-menu` e `sidebar`;
+  - o polling de pós-produção usa dependências escalares estáveis (`postJobId` e `postJobStatus`), preservando a frequência e o encerramento do timer;
+  - as quatro rotas legadas apontadas pelo check foram formatadas sem alteração intencional de comportamento.
+- Dependências:
+  - antes: `brace-expansion` (alta), `js-yaml` (alta), `nanoid` (alta) e `postcss` (moderada), todas transitivas e com correção não-major disponível;
+  - `npm audit fix` atualizou somente transitivas compatíveis: `brace-expansion` 1.1.18/5.0.9, `js-yaml` 4.3.1, `nanoid` 3.3.18 e `postcss` 8.5.26;
+  - depois: `npm audit --json` confirmou 0 vulnerabilidades em 643 dependências auditadas;
+  - `web/.nvmrc` fixa Node 24.15.0, faixa suportada pelo `jsdom` atual. A runtime empacotada usada nesta execução era 24.14.0 e passou em toda a regressão.
+- CI local: `npm run ci`, dentro de `web`, executa em sequência Prettier check, ESLint global, TypeScript, Vitest, build e pytest do ambiente virtual do repositório.
+- Arquivos principais: `api/server.py`, `tests/test_api_lifespan.py`, `web/package.json`, `web/package-lock.json`, `web/.nvmrc`, componentes base em `web/src/components/ui/` e as quatro rotas legadas formatadas.
+- Validação: `npm run ci` passou integralmente; 34 testes Vitest e 237 testes pytest passaram, com 2 smokes reais corretamente pulados.
+- Nota de fornecedor: o build informa que `vite-tsconfig-paths` se tornou redundante no Vite 8. O plugin é injetado e exigido como peer pelo wrapper `@lovable.dev/vite-tanstack-config`, inclusive em sua versão atual; não foi removido nem mascarado para evitar divergir da configuração suportada pelo fornecedor.
 
 ## Validação final
 
-- Status: `not_started`
+- Status: `completed_with_external_step_pending`
+- Comando reproduzível: `cd web && npm run ci`.
+- Backend: 237 testes passaram, 2 smokes opt-in foram pulados, 0 falhas e 0 warnings, em aproximadamente 17 segundos.
+- Frontend: 34 testes Vitest passaram; TypeScript, ESLint global, Prettier check e build de produção passaram.
+- Auditoria: 0 vulnerabilidades npm (0 baixa, 0 moderada, 0 alta e 0 crítica).
+- Interações: cobertura React preservada para presets, limites, dirty/save, loading, concorrência, timeout, undo, título, revisão médica, resposta antiga, acessibilidade e entry points pagos.
+- Regressão visual: editor carregou no navegador real sem overflow horizontal após a modularização; evidência em `artifacts/script-editor/phase-2/15C/desktop-regression.png`.
+- Resultado: os seis slices executáveis (14A, 14B e 15A–15D) foram concluídos. Apenas os smokes reais pagos permanecem opt-in e não impedem o uso local nem a homologação mockada.
 
 ## Riscos residuais
 
 - Chamadas reais de IA e HeyGen exigem autorização e limites explícitos; credenciais presentes não serão tratadas como autorização.
+- O aviso informativo de `vite-tsconfig-paths` será eliminável quando o wrapper Lovable deixar de injetar o plugin; removê-lo unilateralmente hoje quebraria o peer contract da configuração instalada.
+- Ambientes locais devem respeitar `web/.nvmrc` (Node 24.15.0) antes de reinstalar dependências.

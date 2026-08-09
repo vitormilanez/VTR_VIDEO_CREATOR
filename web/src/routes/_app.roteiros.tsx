@@ -105,7 +105,9 @@ export function RoteirosPage() {
   );
   const usedCount = weeklyScripts.filter((script) => usedScriptIds.has(script.id)).length;
   const scheduledScriptIds = new Set(
-    calendarPosts.map((post) => post.scriptId).filter((scriptId): scriptId is string => Boolean(scriptId)),
+    calendarPosts
+      .map((post) => post.scriptId)
+      .filter((scriptId): scriptId is string => Boolean(scriptId)),
   );
 
   async function excluirRoteiro(script: Script) {
@@ -220,99 +222,103 @@ export function RoteirosPage() {
                   const hasCalendarPost = scheduledScriptIds.has(s.id);
                   const deletionProtected = hasVideo || hasCalendarPost;
                   return (
-                  <TableRow key={s.id} className="group">
-                    <TableCell className="align-top py-4">
-                      <Link
-                        to="/roteiros/$id"
-                        params={{ id: s.id }}
-                        className="line-clamp-2 font-semibold leading-5 transition-colors hover:text-status-info hover:underline"
-                      >
-                        {s.titulo}
-                      </Link>
-                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                        <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                          {familiaLabel[s.categoria]}
-                        </span>
-                        {usedScriptIds.has(s.id) ? (
-                          <Badge
-                            variant="outline"
-                            className="h-5 border-status-success/40 px-1.5 text-[10px] text-status-success"
-                          >
-                            <CircleCheck className="mr-1 h-3 w-3" />
-                            Vídeo produzido
-                          </Badge>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                    <TableCell className="align-top py-4">
-                      <ScriptPreviewButton
-                        label="Abrir resumo completo"
-                        text={scriptSummary(s)}
-                        onClick={() => setSelectedScript(s)}
-                      />
-                    </TableCell>
-                    <TableCell className="align-top py-4">
-                      <ScriptPreviewButton
-                        label="Abrir fala completa"
-                        text={scriptSpokenText(s)}
-                        onClick={() => setSelectedScript(s)}
-                      />
-                    </TableCell>
-                    <TableCell className="align-top py-3 text-center">
-                      <ScriptSignals script={s} />
-                    </TableCell>
-                    <TableCell className="align-top py-4">
-                      <StatusBadge {...scriptStatusLabel[s.status]} />
-                    </TableCell>
-                    <TableCell className="align-top py-3 text-right">
-                      <div className="flex justify-end gap-1">
-                        <Button asChild size="sm" variant="secondary">
-                          <Link to="/packs" search={{ scriptId: s.id }}>
-                            <PanelsTopLeft className="mr-1 h-3.5 w-3.5" /> Pack
-                          </Link>
-                        </Button>
-                        <Button asChild size="icon" variant="ghost">
-                          <Link
-                            to="/roteiros/$id"
-                            params={{ id: s.id }}
-                            aria-label={`Abrir roteiro ${s.titulo}`}
-                          >
-                            <ExternalLink className="h-3.5 w-3.5" />
-                          </Link>
-                        </Button>
-                        <ConfirmAction
-                          destructive
-                          title={deletionProtected ? "Este roteiro não pode ser excluído" : "Excluir roteiro?"}
-                          description={
-                            deletionProtected
-                              ? hasVideo
-                                ? "Existe um vídeo ou uma prévia vinculada. O roteiro será preservado para manter o histórico da produção."
-                                : "Existe um item do Calendário vinculado. Remova ou altere o agendamento antes de excluir o roteiro."
-                              : `“${s.titulo}” será removido do Google Sheets junto com Scene Plan, slides e Pack locais. Esta ação não pode ser desfeita pelo app.`
-                          }
-                          confirmLabel="Excluir roteiro"
-                          confirmDisabled={deletionProtected || deletingScriptId === s.id}
-                          onConfirm={() => void excluirRoteiro(s)}
-                          trigger={
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              aria-label={`Excluir roteiro ${s.titulo}`}
-                              title="Excluir roteiro"
-                              disabled={deletingScriptId !== null}
-                              className="text-muted-foreground hover:bg-status-danger/10 hover:text-status-danger"
+                    <TableRow key={s.id} className="group">
+                      <TableCell className="align-top py-4">
+                        <Link
+                          to="/roteiros/$id"
+                          params={{ id: s.id }}
+                          className="line-clamp-2 font-semibold leading-5 transition-colors hover:text-status-info hover:underline"
+                        >
+                          {s.titulo}
+                        </Link>
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                            {familiaLabel[s.categoria]}
+                          </span>
+                          {usedScriptIds.has(s.id) ? (
+                            <Badge
+                              variant="outline"
+                              className="h-5 border-status-success/40 px-1.5 text-[10px] text-status-success"
                             >
-                              {deletingScriptId === s.id ? (
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              ) : (
-                                <Trash2 className="h-3.5 w-3.5" />
-                              )}
-                            </Button>
-                          }
+                              <CircleCheck className="mr-1 h-3 w-3" />
+                              Vídeo produzido
+                            </Badge>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell className="align-top py-4">
+                        <ScriptPreviewButton
+                          label="Abrir resumo completo"
+                          text={scriptSummary(s)}
+                          onClick={() => setSelectedScript(s)}
                         />
-                      </div>
-                    </TableCell>
-                  </TableRow>
+                      </TableCell>
+                      <TableCell className="align-top py-4">
+                        <ScriptPreviewButton
+                          label="Abrir fala completa"
+                          text={scriptSpokenText(s)}
+                          onClick={() => setSelectedScript(s)}
+                        />
+                      </TableCell>
+                      <TableCell className="align-top py-3 text-center">
+                        <ScriptSignals script={s} />
+                      </TableCell>
+                      <TableCell className="align-top py-4">
+                        <StatusBadge {...scriptStatusLabel[s.status]} />
+                      </TableCell>
+                      <TableCell className="align-top py-3 text-right">
+                        <div className="flex justify-end gap-1">
+                          <Button asChild size="sm" variant="secondary">
+                            <Link to="/packs" search={{ scriptId: s.id }}>
+                              <PanelsTopLeft className="mr-1 h-3.5 w-3.5" /> Pack
+                            </Link>
+                          </Button>
+                          <Button asChild size="icon" variant="ghost">
+                            <Link
+                              to="/roteiros/$id"
+                              params={{ id: s.id }}
+                              aria-label={`Abrir roteiro ${s.titulo}`}
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            </Link>
+                          </Button>
+                          <ConfirmAction
+                            destructive
+                            title={
+                              deletionProtected
+                                ? "Este roteiro não pode ser excluído"
+                                : "Excluir roteiro?"
+                            }
+                            description={
+                              deletionProtected
+                                ? hasVideo
+                                  ? "Existe um vídeo ou uma prévia vinculada. O roteiro será preservado para manter o histórico da produção."
+                                  : "Existe um item do Calendário vinculado. Remova ou altere o agendamento antes de excluir o roteiro."
+                                : `“${s.titulo}” será removido do Google Sheets junto com Scene Plan, slides e Pack locais. Esta ação não pode ser desfeita pelo app.`
+                            }
+                            confirmLabel="Excluir roteiro"
+                            confirmDisabled={deletionProtected || deletingScriptId === s.id}
+                            onConfirm={() => void excluirRoteiro(s)}
+                            trigger={
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                aria-label={`Excluir roteiro ${s.titulo}`}
+                                title="Excluir roteiro"
+                                disabled={deletingScriptId !== null}
+                                className="text-muted-foreground hover:bg-status-danger/10 hover:text-status-danger"
+                              >
+                                {deletingScriptId === s.id ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                )}
+                              </Button>
+                            }
+                          />
+                        </div>
+                      </TableCell>
+                    </TableRow>
                   );
                 })}
               </TableBody>

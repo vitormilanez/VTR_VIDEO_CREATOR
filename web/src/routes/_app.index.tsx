@@ -355,7 +355,7 @@ function VideoCostPanel({
           <span>Saída: {formatTokens(claudeOutputTokens)}</span>
           <span className="text-right">Chamadas: {claudeProvider?.calls ?? 0}</span>
         </div>
-        {(claudeCacheReadTokens > 0 || claudeCacheWriteTokens > 0) ? (
+        {claudeCacheReadTokens > 0 || claudeCacheWriteTokens > 0 ? (
           <div className="mt-1 grid grid-cols-2 gap-2 text-[10px] text-muted-foreground">
             <span>Cache lido: {formatTokens(claudeCacheReadTokens)}</span>
             <span className="text-right">Cache criado: {formatTokens(claudeCacheWriteTokens)}</span>

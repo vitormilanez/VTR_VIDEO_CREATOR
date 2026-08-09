@@ -102,6 +102,8 @@ function VideoDetalhe() {
   const trackedJobId = job?.id;
   const trackedJobProvider = job?.provider;
   const trackedJobStatus = job?.status;
+  const postJobId = postJob?.id;
+  const postJobStatus = postJob?.status;
 
   useEffect(() => {
     if (!script) return;
@@ -134,13 +136,17 @@ function VideoDetalhe() {
   }, [id]);
 
   useEffect(() => {
-    if (!postJob) return;
-    const active = ["queued", "transcribing", "planning", "preflight", "rendering_preview"].includes(
-      postJob.status,
-    );
+    if (!postJobId || !postJobStatus) return;
+    const active = [
+      "queued",
+      "transcribing",
+      "planning",
+      "preflight",
+      "rendering_preview",
+    ].includes(postJobStatus);
     const refresh = async () => {
       try {
-        const current = await fetchPostProduction(postJob.id);
+        const current = await fetchPostProduction(postJobId);
         setPostJob(current);
         if (["needs_review", "preview_ready", "failed", "stale"].includes(current.status)) {
           const artifacts = await fetchPostProductionArtifacts(current.id);
@@ -156,7 +162,7 @@ function VideoDetalhe() {
     }
     const timer = window.setInterval(() => void refresh(), 2500);
     return () => window.clearInterval(timer);
-  }, [postJob?.id, postJob?.status]);
+  }, [postJobId, postJobStatus]);
 
   useEffect(() => {
     const active =
@@ -265,7 +271,10 @@ function VideoDetalhe() {
     atualizadoEm: job.atualizadoEm,
   });
   const postApplying = Boolean(
-    postJob && ["queued", "transcribing", "planning", "preflight", "rendering_preview"].includes(postJob.status),
+    postJob &&
+    ["queued", "transcribing", "planning", "preflight", "rendering_preview"].includes(
+      postJob.status,
+    ),
   );
 
   return (
@@ -553,7 +562,12 @@ function VideoDetalhe() {
               {job.duracaoSegundos ? (
                 <Info label="Duracao" value={`${job.duracaoSegundos}s`} />
               ) : null}
-              {job.videoUrl ? <Info label="Arquivo" value={job.isComposed ? "Vídeo final composto" : "Video disponivel"} /> : null}
+              {job.videoUrl ? (
+                <Info
+                  label="Arquivo"
+                  value={job.isComposed ? "Vídeo final composto" : "Video disponivel"}
+                />
+              ) : null}
             </div>
             {job.videoUrl ? (
               <div className="mt-3 flex flex-wrap gap-2">
@@ -727,20 +741,21 @@ function PostProductionPanel({
   onReportChange: (value: PreflightReport | null) => void;
   onBusyChange: (value: boolean) => void;
 }) {
-
   async function saveEvents() {
     if (!artifacts) return;
     onBusyChange(true);
     try {
       const result = await updatePostProductionEvents(
         job.id,
-        artifacts.timeline.events.map(({ id, enabled, visualText, interactionType, reviewStatus }) => ({
-          id,
-          enabled,
-          visualText,
-          interactionType,
-          reviewStatus,
-        })),
+        artifacts.timeline.events.map(
+          ({ id, enabled, visualText, interactionType, reviewStatus }) => ({
+            id,
+            enabled,
+            visualText,
+            interactionType,
+            reviewStatus,
+          }),
+        ),
       );
       onJobChange(result.job);
       onArtifactsChange({ ...artifacts, timeline: result.timeline });
@@ -816,7 +831,10 @@ function PostProductionPanel({
   }
 
   return (
-    <section id="post-production" className="rounded-xl border border-status-info/30 bg-card p-4 shadow-sm">
+    <section
+      id="post-production"
+      className="rounded-xl border border-status-info/30 bg-card p-4 shadow-sm"
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="font-display text-sm font-semibold">Pós-produção inteligente</h3>
@@ -827,7 +845,9 @@ function PostProductionPanel({
         </span>
       </div>
       <Progress value={job.progresso} className="mt-3" />
-      {job.erro ? <p className="mt-3 rounded bg-destructive/10 p-2 text-xs text-destructive">{job.erro}</p> : null}
+      {job.erro ? (
+        <p className="mt-3 rounded bg-destructive/10 p-2 text-xs text-destructive">{job.erro}</p>
+      ) : null}
 
       {artifacts ? (
         <>
@@ -890,10 +910,19 @@ function PostProductionPanel({
             <Button size="sm" variant="secondary" disabled={busy} onClick={() => void saveEvents()}>
               <Save className="mr-1 h-4 w-4" /> Salvar eventos
             </Button>
-            <Button size="sm" variant="secondary" disabled={busy} onClick={() => void runPreflight()}>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => void runPreflight()}
+            >
               Executar preflight
             </Button>
-            <Button size="sm" disabled={busy || report?.ok === false} onClick={() => void renderPreview()}>
+            <Button
+              size="sm"
+              disabled={busy || report?.ok === false}
+              onClick={() => void renderPreview()}
+            >
               Gerar prévia
             </Button>
           </div>
@@ -914,7 +943,9 @@ function PostProductionPanel({
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <div>
             <div className="mb-2 text-xs font-semibold">Original</div>
-            {originalUrl ? <video src={originalUrl} controls className="aspect-[9/16] w-full rounded bg-black" /> : null}
+            {originalUrl ? (
+              <video src={originalUrl} controls className="aspect-[9/16] w-full rounded bg-black" />
+            ) : null}
           </div>
           <div>
             <div className="mb-2 text-xs font-semibold">Prévia editada</div>

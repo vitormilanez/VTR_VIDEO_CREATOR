@@ -31,6 +31,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -167,7 +168,21 @@ MUSIC_LIBRARY: tuple[dict[str, Any], ...] = (
     {"id": "too-lost", "file": "kontraa-too-lost-trap-soul-music-579792.mp3", "name": "Too Lost", "artist": "Kontraa", "mood": "Trap soul", "durationSeconds": 157.61},
 )
 
-app = FastAPI(title="AI Video Creator API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    reconciliation = _reconcile_incomplete_video_jobs()
+    if any(reconciliation.values()):
+        LOGGER.info(
+            "video_job_reconciliation failed_safe=%s submission_uncertain=%s",
+            reconciliation["failedSafe"],
+            reconciliation["submissionUncertain"],
+        )
+    resume_interrupted_cut_projects()
+    resume_interrupted_post_production_jobs()
+    yield
+
+
+app = FastAPI(title="AI Video Creator API", version="0.1.0", lifespan=_lifespan)
 
 # Dev: o frontend roda em outra porta (vite). Liberar localhost.
 app.add_middleware(
@@ -6552,7 +6567,6 @@ def _cut_project_sources(
     return source_url, youtube_url, source_path
 
 
-@app.on_event("startup")
 def resume_interrupted_cut_projects() -> None:
     store = _job_store()
     for project in store.list("cut"):
@@ -6581,7 +6595,6 @@ def resume_interrupted_cut_projects() -> None:
         )
 
 
-@app.on_event("startup")
 def resume_interrupted_post_production_jobs() -> None:
     store = _job_store()
     for job in store.list("post_production"):

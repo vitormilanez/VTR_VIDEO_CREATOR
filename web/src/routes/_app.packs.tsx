@@ -171,8 +171,7 @@ function PacksPage() {
   const videoJob = script ? jobs.find((job) => job.scriptId === script.id) : undefined;
   const scheduledPost = script ? posts.find((post) => post.scriptId === script.id) : undefined;
   const packIsLegacy =
-    pack !== null &&
-    (pack.carousel.length !== REQUIRED_CAROUSEL_SLIDES || outdatedPackSchema);
+    pack !== null && (pack.carousel.length !== REQUIRED_CAROUSEL_SLIDES || outdatedPackSchema);
 
   useEffect(() => {
     if (!script) {
@@ -187,7 +186,9 @@ function PacksPage() {
       .then((data) => {
         if (!cancelled) {
           setPack(data.pack);
-          setOutdatedAvatar(Boolean((data.outdatedIdentity ?? data.outdatedAvatar) && !data.outdatedPackSchema));
+          setOutdatedAvatar(
+            Boolean((data.outdatedIdentity ?? data.outdatedAvatar) && !data.outdatedPackSchema),
+          );
           setOutdatedPackSchema(data.outdatedPackSchema ?? false);
         }
       })
@@ -254,7 +255,10 @@ function PacksPage() {
       setOutdatedPackSchema(false);
       toast.success("Identidade do Pack atualizada sem nova chamada ao Claude.", { id: notice });
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a identidade.", { id: notice });
+      toast.error(
+        error instanceof Error ? error.message : "Nao foi possivel atualizar a identidade.",
+        { id: notice },
+      );
     } finally {
       setGenerating(false);
     }
@@ -263,7 +267,9 @@ function PacksPage() {
   async function saveLocal() {
     if (!script || !pack) return;
     if (packIsLegacy) {
-      toast.error("Salvar PNGs esta bloqueado porque este Pack ainda tem 6 slides. Gere a versao com 7 slides primeiro.");
+      toast.error(
+        "Salvar PNGs esta bloqueado porque este Pack ainda tem 6 slides. Gere a versao com 7 slides primeiro.",
+      );
       return;
     }
     setSaving(true);
@@ -357,7 +363,12 @@ function PacksPage() {
             {packIsLegacy ? "Gerar 7 slides agora" : pack ? "Gerar nova versao" : "Gerar Pack"}
           </Button>
           {outdatedAvatar && pack ? (
-            <Button size="sm" variant="outline" onClick={() => void refreshIdentity()} disabled={generating}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void refreshIdentity()}
+              disabled={generating}
+            >
               <RefreshCw className="mr-1 h-3.5 w-3.5" /> Atualizar identidade sem Claude
             </Button>
           ) : null}
@@ -400,7 +411,13 @@ function PacksPage() {
               <div className="min-w-0">
                 <div className="mb-3 flex flex-wrap items-center gap-2">
                   <StatusBadge
-                    label={packIsLegacy ? "Versao antiga" : pack ? "Carrossel pronto" : "Aguardando geracao"}
+                    label={
+                      packIsLegacy
+                        ? "Versao antiga"
+                        : pack
+                          ? "Carrossel pronto"
+                          : "Aguardando geracao"
+                    }
                     tone={packIsLegacy ? "warn" : "info"}
                   />
                   {script ? <StatusBadge {...riskLabel[script.risco]} /> : null}
@@ -466,10 +483,13 @@ function PacksPage() {
               {packIsLegacy ? (
                 <section className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 shadow-sm md:flex-row md:items-center md:justify-between">
                   <div>
-                    <div className="font-semibold">Ainda nao existe a versao de 7 slides deste Pack.</div>
+                    <div className="font-semibold">
+                      Ainda nao existe a versao de 7 slides deste Pack.
+                    </div>
                     <p className="mt-1">
-                      O arquivo salvo tem {pack.carousel.length} de {REQUIRED_CAROUSEL_SLIDES} slides. Por isso o
-                      app bloqueia “Salvar PNGs” até gerar a nova versão com o slide de contexto.
+                      O arquivo salvo tem {pack.carousel.length} de {REQUIRED_CAROUSEL_SLIDES}{" "}
+                      slides. Por isso o app bloqueia “Salvar PNGs” até gerar a nova versão com o
+                      slide de contexto.
                     </p>
                   </div>
                   <Button size="sm" onClick={generateVisualPack} disabled={generating}>
