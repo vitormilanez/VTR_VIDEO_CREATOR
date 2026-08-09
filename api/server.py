@@ -5478,7 +5478,12 @@ def _authorize_story_production(version_id: str) -> dict[str, Any]:
             "STORY_BUDGET_APPROVAL_STALE",
             "O orçamento aprovado não corresponde mais ao plano e às taxas atuais.",
         )
-    return {**context, "budget": budget, "approval": approval}
+    return {
+        **context,
+        "brief": context["brief"].model_dump(mode="json"),
+        "budget": budget,
+        "approval": approval,
+    }
 
 
 def _story_generation(generation_id: str) -> dict[str, Any] | None:

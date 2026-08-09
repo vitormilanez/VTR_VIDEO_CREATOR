@@ -189,14 +189,26 @@ Status: concluído.
   figurino, época, anacronismos proibidos e prompts finais de produção;
 - o Narrative Director aceita o plano completo em uma única chamada mockada;
 - geração mockada acontece um shot por vez, sem alcançar o transporte real do HeyGen;
+- um único teste P0 percorre Brief, plano Claude mockado, Story Bible, Shot Plan,
+  edição e aprovação do shot, orçamento, seis gerações individuais mockadas,
+  regeneração exclusiva do shot 03, composição local e MP4 final;
+- a validação integrada corrigiu a autorização de produção para expor o Story Brief
+  no formato usado pela reserva e pelo roteamento dos shots;
 - os testes P0 cobrem vínculo com a fala, invalidação por edição, aprovação, budget,
   capabilities, idempotência, regeneração seletiva, ordem e narração sobre B-roll;
 - nenhuma chamada real a Anthropic ou HeyGen foi feita nesta fase.
 
+Teste focado principal:
+
+```bash
+.venv/bin/python -m pytest -q \
+  tests/test_story_medieval_mvp.py::test_medieval_critical_path_with_mocks_outputs_final_mp4
+```
+
 Checkpoint final de 9 de agosto de 2026:
 
-- Python: 276 testes aprovados e 2 smoke tests reais ignorados;
-- Web: 38 testes aprovados;
+- Python: 280 testes aprovados e 2 smoke tests reais ignorados;
+- Web: 39 testes aprovados;
 - TypeScript: typecheck aprovado;
 - ESLint: zero erros e quatro avisos não bloqueantes de Fast Refresh no editor;
 - build Vite/Nitro de produção aprovado.
@@ -206,6 +218,21 @@ Checkpoint final de 9 de agosto de 2026:
 A montagem usa como fonte de áudio o vídeo-base pronto mais recente do mesmo roteiro. Isso
 preserva a voz e a sincronização sem criar jobs adicionais de voz. Se não existir vídeo-base,
 o botão informa o pré-requisito e não inicia nenhuma chamada paga.
+
+## Etapas que ainda usam créditos reais
+
+- gerar o Story Plan e executar o Story Critic usam Anthropic quando operados pela interface;
+- gerar ou refazer `avatar_anchor` e `cinematic_broll` usa um job HeyGen por ação;
+- salvar o Brief, editar e aprovar shots, calcular o orçamento e compor o MP4 são locais;
+- o teste P0 medieval substitui Anthropic e HeyGen por mocks e não consome créditos.
+
+## Riscos conhecidos
+
+- mocks não validam disponibilidade, latência, qualidade visual nem mudanças de contrato dos
+  providers reais;
+- custos são estimativas configuradas no ambiente, não uma cotação do provider em tempo real;
+- a composição depende de um vídeo-base pronto do mesmo roteiro para fornecer a narração;
+- a fixture comprova regeneração isolada do shot 03, mas não avalia continuidade visual real.
 
 ## Backlog explicitamente adiado
 
