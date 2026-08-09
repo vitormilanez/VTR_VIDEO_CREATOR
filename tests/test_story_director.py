@@ -279,6 +279,91 @@ def test_same_story_input_uses_cache_and_preserves_one_version() -> None:
             server.OPERATIONAL_DB = original_database
 
 
+def test_human_story_revision_is_versioned_idempotent_and_keeps_shot_locks() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        original_database = server.OPERATIONAL_DB
+        server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+        try:
+            project = server._save_story_brief("script-story", brief())
+            first = server._save_story_version(
+                project_id=project["id"],
+                plan=valid_plan(),
+                source=source_context(),
+                provider_capabilities_version="heygen-test-v1",
+                request_fingerprint="f" * 64,
+                model="claude-story-test",
+            )
+            revised = valid_plan()
+            revised["shots"][0]["action"] = "O médico caminha entre as barracas com movimento discreto"
+            payload = server.StoryPlanRevisionIn(
+                expectedStoryHash=first["storyHash"],
+                expectedProviderCapabilitiesVersion="heygen-test-v1",
+                plan=revised,
+                shotReviews=[
+                    server.StoryShotReviewIn(
+                        shotId="shot-01",
+                        promptOverride="Aproximação suave, sem alterar o rosto.",
+                        lockIdentity=True,
+                        lockWardrobe=True,
+                        lockEnvironment=True,
+                        approved=True,
+                    ),
+                    server.StoryShotReviewIn(shotId="shot-02", approved=True),
+                ],
+                storyBibleApproved=True,
+                idempotencyKey="revision-safe-001",
+            )
+            with (
+                patch.object(
+                    server,
+                    "_find_script",
+                    return_value={**source_context()["script"], "textoFalado": SPEECH},
+                ),
+                patch.object(
+                    server,
+                    "_script_editor_state",
+                    return_value={
+                        "scriptRevision": 3,
+                        "finalSpeechHash": SPEECH_HASH,
+                        "approvedScriptRevision": 3,
+                        "approvedFinalSpeechHash": SPEECH_HASH,
+                        "contractVersion": "script-editor-v1",
+                        "humanReviewApproved": True,
+                    },
+                ),
+                patch.object(
+                    server,
+                    "_heygen_capabilities",
+                    return_value={
+                        "capabilitiesVersion": "heygen-test-v1",
+                        "videoAgent": {"supported": True},
+                        "directVideo": {"supported": False},
+                    },
+                ),
+            ):
+                created = server.revise_story_version(first["id"], payload)
+                repeated = server.revise_story_version(first["id"], payload)
+
+            assert created["version"]["id"] == repeated["version"]["id"]
+            assert repeated["deduplicated"] is True
+            assert created["version"]["storyRevision"] == 2
+            assert created["version"]["storyBibleApproved"] is True
+            assert created["version"]["shots"][0]["controls"] == {
+                "promptOverride": "Aproximação suave, sem alterar o rosto.",
+                "lockIdentity": True,
+                "lockWardrobe": True,
+                "lockEnvironment": True,
+                "approved": True,
+            }
+            conn = server._ai_db()
+            try:
+                assert conn.execute("SELECT COUNT(*) FROM story_versions").fetchone()[0] == 2
+            finally:
+                conn.close()
+        finally:
+            server.OPERATIONAL_DB = original_database
+
+
 def test_simultaneous_story_requests_are_deduplicated() -> None:
     def delayed_call(**_kwargs):
         time.sleep(0.15)

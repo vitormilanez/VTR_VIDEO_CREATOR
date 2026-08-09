@@ -31,6 +31,7 @@ import {
 } from "@/components/script-editor/production-readiness";
 import { ScenePlanEditor } from "@/components/script-editor/scene-plan-editor";
 import { VisualPlanDirector } from "@/components/script-editor/visual-plan-director";
+import { StoryModeEditor } from "@/components/script-editor/story-mode-editor";
 import {
   DEFAULT_OUTRO,
   narrationQualityIssues,
@@ -112,6 +113,7 @@ import {
   ArrowLeft,
   Captions,
   CheckCircle2,
+  Clapperboard,
   Film,
   History,
   Loader2,
@@ -251,7 +253,8 @@ function RoteiroDetalhe() {
   const [voiceMood, setVoiceMood] = useState<VoiceMood>("confident");
   const [generationMode, setGenerationMode] = useState<GenerationMode>("direct");
   const cinematicMode = generationMode === "cinematic";
-  const heygenAgentMode = generationMode !== "direct";
+  const storyMode = generationMode === "story";
+  const heygenAgentMode = generationMode === "video_agent" || cinematicMode;
   const [musicTracks, setMusicTracks] = useState<MusicTrack[]>([]);
   const [musicTrackId, setMusicTrackId] = useState<string | null>(null);
   const [musicVolume, setMusicVolume] = useState(0.12);
@@ -649,6 +652,7 @@ function RoteiroDetalhe() {
     paidScriptVersion.contractVersion === SCRIPT_EDITOR_CONTRACT_VERSION,
   );
   const canSendToProduction =
+    !storyMode &&
     paidVersionReady &&
     editorGenerationGate.allowed &&
     selectedAvatarReady &&
@@ -875,27 +879,29 @@ function RoteiroDetalhe() {
       ? "Carregando o versionamento seguro da fala."
       : !paidVersionReady
         ? "A fala salva ainda não possui revisão e hash de segurança. Atualize a página ou salve o roteiro novamente."
-        : catalogLoading
-          ? "Carregando avatares e vozes da HeyGen."
-          : !profileLoaded
-            ? "Carregando perfil de producao do roteiro."
-            : cinematicMode && !cinematicPrompt.trim()
-              ? "Escreva a direção cinematic antes de enviar este modo."
-              : avatarMode === "set" && !selectedAvatarSet
-                ? "Selecione um Avatar Set."
-                : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
-                  ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
-                  : !heygenAgentMode && avatarMode === "set" && !productionModeReady
-                    ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
-                    : !heygenAgentMode && avatarMode === "set" && !visualProductionReady
-                      ? `Clique em "Fazer tudo com Claude" para gerar e renderizar ${requiredVisualCount} slide(s) de transição.`
-                      : !avatarId
-                        ? "Selecione um avatar pronto."
-                        : !voiceId
-                          ? "Selecione uma voz."
-                          : saving
-                            ? "Salvando roteiro."
-                            : null;
+        : storyMode
+          ? "No Story Mode, aprove o storyboard e o orçamento antes da geração por shots."
+          : catalogLoading
+            ? "Carregando avatares e vozes da HeyGen."
+            : !profileLoaded
+              ? "Carregando perfil de producao do roteiro."
+              : cinematicMode && !cinematicPrompt.trim()
+                ? "Escreva a direção cinematic antes de enviar este modo."
+                : avatarMode === "set" && !selectedAvatarSet
+                  ? "Selecione um Avatar Set."
+                  : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
+                    ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
+                    : !heygenAgentMode && avatarMode === "set" && !productionModeReady
+                      ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
+                      : !heygenAgentMode && avatarMode === "set" && !visualProductionReady
+                        ? `Clique em "Fazer tudo com Claude" para gerar e renderizar ${requiredVisualCount} slide(s) de transição.`
+                        : !avatarId
+                          ? "Selecione um avatar pronto."
+                          : !voiceId
+                            ? "Selecione uma voz."
+                            : saving
+                              ? "Salvando roteiro."
+                              : null;
   const productionChecklist = [
     {
       label: "Roteiro revisado",
@@ -1005,6 +1011,10 @@ function RoteiroDetalhe() {
 
   async function enviarProducaoCore(forceNewVersion = false) {
     if (!draft || !script) return;
+    if (storyMode) {
+      toast.info("O Story Mode gera por shots somente após aprovação do plano e do orçamento.");
+      return;
+    }
     if (avatarMode === "set" && generationMode === "direct" && !sceneGenerationPlan) {
       toast.error("Salve o Scene Plan antes de gerar o vídeo por cenas.");
       return;
@@ -1446,6 +1456,7 @@ function RoteiroDetalhe() {
                     size="sm"
                     variant="secondary"
                     disabled={
+                      storyMode ||
                       saving ||
                       previewing ||
                       !selectedAvatarReady ||
@@ -1966,10 +1977,11 @@ function RoteiroDetalhe() {
                 <div>
                   <Label className="text-xs">Quem monta o vídeo?</Label>
                   <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    Escolha entre produção guiada, Video Agent comum ou o fluxo Cinematic separado.
+                    Escolha entre produção guiada, agentes do HeyGen ou planejamento cinematográfico
+                    por shots.
                   </p>
                 </div>
-                <div className="grid gap-2 md:grid-cols-3">
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
                   <button
                     type="button"
                     aria-pressed={generationMode === "direct"}
@@ -2021,6 +2033,24 @@ function RoteiroDetalhe() {
                       Um fluxo separado para câmera, encenação e acontecimentos no ambiente.
                     </span>
                   </button>
+                  <button
+                    type="button"
+                    aria-pressed={generationMode === "story"}
+                    onClick={() => setGenerationMode("story")}
+                    className={cn(
+                      "cursor-pointer rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      generationMode === "story" &&
+                        "border-primary bg-primary/5 ring-1 ring-primary/30",
+                    )}
+                  >
+                    <span className="flex items-center gap-2 text-xs font-semibold">
+                      <Clapperboard className="h-4 w-4 text-primary" /> História cinematográfica
+                    </span>
+                    <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                      Claude planeja a história e você aprova cada shot e o orçamento antes de
+                      gerar.
+                    </span>
+                  </button>
                 </div>
                 {generationMode === "video_agent" ? (
                   <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
@@ -2035,6 +2065,14 @@ function RoteiroDetalhe() {
                     <span className="font-semibold text-foreground">Fluxo Cinematic separado.</span>{" "}
                     Somente este modo recebe o briefing de câmera, encenação e ações de fundo. Ele
                     não usa Scene Plan, slides ou a direção dos fluxos anteriores.
+                  </div>
+                ) : storyMode ? (
+                  <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                    <span className="font-semibold text-foreground">
+                      Planejamento com controle humano.
+                    </span>{" "}
+                    A fala permanece imutável. Nenhum shot do HeyGen é reservado antes de Story
+                    Bible, storyboard, crítica e orçamento estarem aprovados.
                   </div>
                 ) : null}
               </div>
@@ -2059,11 +2097,13 @@ function RoteiroDetalhe() {
                 <p className="text-[11px] leading-4 text-muted-foreground">
                   {durationSeconds <= 15
                     ? "A duração final acompanha a fala, sem silêncio para completar o tempo."
-                    : cinematicMode
-                      ? "O Cinematic organiza câmera, encenação e acontecimentos dentro deste tempo aproximado."
-                      : heygenAgentMode
-                        ? "O HeyGen Video Agent organiza ritmo, cortes e visuais dentro deste tempo aproximado."
-                        : "O app distribui a fala e as cenas dentro deste tempo aproximado."}
+                    : storyMode
+                      ? "A duração orienta o Story Director e será distribuída entre os shots aprovados."
+                      : cinematicMode
+                        ? "O Cinematic organiza câmera, encenação e acontecimentos dentro deste tempo aproximado."
+                        : heygenAgentMode
+                          ? "O HeyGen Video Agent organiza ritmo, cortes e visuais dentro deste tempo aproximado."
+                          : "O app distribui a fala e as cenas dentro deste tempo aproximado."}
                 </p>
                 {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
               </div>
@@ -2111,6 +2151,7 @@ function RoteiroDetalhe() {
                             </SelectItem>
                             <SelectItem value="video_agent">Video Agent</SelectItem>
                             <SelectItem value="cinematic">Cinematic separado</SelectItem>
+                            <SelectItem value="story">História cinematográfica</SelectItem>
                           </SelectContent>
                         </Select>
                       </Field>
@@ -2301,15 +2342,32 @@ function RoteiroDetalhe() {
               index={3}
               title="Direção"
               description={
-                cinematicMode
-                  ? "Briefing exclusivo do Cinematic. Ele não altera Scene Plan, slides ou o Video Agent comum."
-                  : generationMode === "video_agent"
-                    ? "O Video Agent comum cria a edição sem receber nenhuma direção cinematic."
-                    : "Depois de escolher duração e avatar, deixe o Claude organizar cenas, cortes de look e slide de transição."
+                storyMode
+                  ? "Planeje a narrativa, revise cada shot e aprove o pior cenário de custo antes de gerar vídeo."
+                  : cinematicMode
+                    ? "Briefing exclusivo do Cinematic. Ele não altera Scene Plan, slides ou o Video Agent comum."
+                    : generationMode === "video_agent"
+                      ? "O Video Agent comum cria a edição sem receber nenhuma direção cinematic."
+                      : "Depois de escolher duração e avatar, deixe o Claude organizar cenas, cortes de look e slide de transição."
               }
             />
             <div className="mt-4">
-              {cinematicMode ? (
+              {storyMode ? (
+                <StoryModeEditor
+                  scriptId={id}
+                  title={draft.titulo}
+                  durationSeconds={durationSeconds}
+                  orientation={orientation}
+                  characterId={avatarSetId || avatarId || null}
+                  lookId={primaryAvatarId || avatarId || null}
+                  characterDescription={
+                    selectedAvatar?.name
+                      ? `${selectedAvatar.name}, identidade visual aprovada no catálogo.`
+                      : ""
+                  }
+                  wardrobeDirection={selectedAvatarSet?.name || "Manter o look aprovado."}
+                />
+              ) : cinematicMode ? (
                 <div className="space-y-3">
                   <div className="rounded-xl border bg-muted/20 p-4">
                     <Label htmlFor="cinematic-prompt" className="text-sm font-semibold">
@@ -2410,20 +2468,36 @@ function RoteiroDetalhe() {
               description="Confirme que fala, avatar, direção e compliance estão prontos antes de gastar créditos."
             />
             <div className="mt-4 space-y-3">
-              <ProductionGateChecklist
-                items={productionChecklist}
-                blockedReason={productionBlockedReason}
-                latestJobId={latestJob?.id}
-                dirty={dirty}
-                narrationWords={narrationWords}
-                estimatedSpeechSeconds={estimatedSpeechSeconds}
-                onOpenLatest={
-                  latestJob
-                    ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } })
-                    : undefined
-                }
-                onSend={() => void enviarProducao(false)}
-              />
+              {storyMode ? (
+                <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
+                  <div className="flex items-start gap-2">
+                    <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                    <div>
+                      <h3 className="text-sm font-semibold">Geração protegida por aprovação</h3>
+                      <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                        Use a etapa Direção para aprovar Story Bible, todos os shots, a crítica e o
+                        orçamento. A geração por shots será liberada somente com esses vínculos
+                        válidos.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <ProductionGateChecklist
+                  items={productionChecklist}
+                  blockedReason={productionBlockedReason}
+                  latestJobId={latestJob?.id}
+                  dirty={dirty}
+                  narrationWords={narrationWords}
+                  estimatedSpeechSeconds={estimatedSpeechSeconds}
+                  onOpenLatest={
+                    latestJob
+                      ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } })
+                      : undefined
+                  }
+                  onSend={() => void enviarProducao(false)}
+                />
+              )}
               {latestPreview ? (
                 <div className="rounded-lg border border-status-info/30 bg-status-info/5 p-3 text-sm">
                   <div className="flex flex-wrap items-center justify-between gap-3">

@@ -421,6 +421,7 @@ def _ai_db() -> sqlite3.Connection:
             prompt_version TEXT NOT NULL,
             model TEXT NOT NULL,
             active_critique_id TEXT,
+            story_bible_approved INTEGER NOT NULL DEFAULT 0,
             budget_approved INTEGER NOT NULL DEFAULT 0,
             budget_approval_json TEXT,
             approved INTEGER NOT NULL DEFAULT 0,
@@ -443,6 +444,27 @@ def _ai_db() -> sqlite3.Connection:
             created_at TEXT NOT NULL,
             FOREIGN KEY(story_version_id) REFERENCES story_versions(id),
             UNIQUE(story_version_id, critique_revision)
+        );
+        CREATE TABLE IF NOT EXISTS story_shots (
+            id TEXT PRIMARY KEY,
+            story_version_id TEXT NOT NULL,
+            shot_id TEXT NOT NULL,
+            shot_order INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            prompt_json TEXT NOT NULL,
+            prompt_hash TEXT NOT NULL,
+            continuity_hash TEXT NOT NULL,
+            controls_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            shot_revision INTEGER NOT NULL DEFAULT 1,
+            remote_job_id TEXT,
+            asset_path TEXT,
+            regeneration_count INTEGER NOT NULL DEFAULT 0,
+            quality_status TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(story_version_id) REFERENCES story_versions(id),
+            UNIQUE(story_version_id, shot_id)
         );
         """
     )
@@ -478,6 +500,7 @@ def _ai_db() -> sqlite3.Connection:
                 raise
     for column, definition in (
         ("active_critique_id", "TEXT"),
+        ("story_bible_approved", "INTEGER NOT NULL DEFAULT 0"),
         ("budget_approved", "INTEGER NOT NULL DEFAULT 0"),
         ("budget_approval_json", "TEXT"),
     ):
@@ -3552,6 +3575,25 @@ class StoryPlanApprovalIn(BaseModel):
     confirmed: Literal[True]
 
 
+class StoryShotReviewIn(BaseModel):
+    shotId: str = Field(pattern=r"^shot-[0-9]{2}$")
+    promptOverride: str = Field(default="", max_length=2000)
+    lockIdentity: bool = True
+    lockWardrobe: bool = True
+    lockEnvironment: bool = False
+    approved: bool = False
+
+
+class StoryPlanRevisionIn(BaseModel):
+    expectedStoryHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expectedProviderCapabilitiesVersion: str = Field(min_length=1, max_length=160)
+    plan: dict[str, Any]
+    shotReviews: list[StoryShotReviewIn] = Field(min_length=1, max_length=12)
+    storyBibleApproved: bool = False
+    reason: str = Field(default="Edição humana do storyboard.", min_length=3, max_length=500)
+    idempotencyKey: str = Field(min_length=8, max_length=128)
+
+
 class VideoCreateIn(BaseModel):
     scriptId: str
     avatarId: str | None = Field(default=None, max_length=160)
@@ -3624,7 +3666,7 @@ class ProductionProfileIn(BaseModel):
     voiceId: str = Field(min_length=1, max_length=160)
     speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
     voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident"
-    generationMode: Literal["direct", "video_agent", "cinematic"] = "direct"
+    generationMode: Literal["direct", "video_agent", "cinematic", "story"] = "direct"
     avatarMode: Literal["single", "set"] = "single"
     avatarSetId: str | None = Field(default=None, max_length=160)
     primaryAvatarId: str | None = Field(default=None, max_length=160)
@@ -3970,6 +4012,7 @@ def _story_version_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "promptVersion": row["prompt_version"],
         "model": row["model"],
         "activeCritiqueId": row["active_critique_id"],
+        "storyBibleApproved": bool(row["story_bible_approved"]),
         "budgetApproved": bool(row["budget_approved"]),
         "budgetApproval": (
             json.loads(str(row["budget_approval_json"]))
@@ -4025,6 +4068,40 @@ def _story_critique(critique_id: str) -> dict[str, Any] | None:
         conn.close()
 
 
+def _story_shot_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "storyVersionId": row["story_version_id"],
+        "shotId": row["shot_id"],
+        "order": int(row["shot_order"]),
+        "provider": row["provider"],
+        "prompt": json.loads(str(row["prompt_json"])),
+        "promptHash": row["prompt_hash"],
+        "continuityHash": row["continuity_hash"],
+        "controls": json.loads(str(row["controls_json"])),
+        "status": row["status"],
+        "shotRevision": int(row["shot_revision"]),
+        "remoteJobId": row["remote_job_id"],
+        "assetPath": row["asset_path"],
+        "regenerationCount": int(row["regeneration_count"]),
+        "qualityStatus": row["quality_status"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _story_shots(version_id: str) -> list[dict[str, Any]]:
+    conn = _ai_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM story_shots WHERE story_version_id = ? ORDER BY shot_order",
+            (version_id,),
+        ).fetchall()
+        return [_story_shot_from_row(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def _story_project_from_row(
     conn: sqlite3.Connection,
     row: sqlite3.Row | None,
@@ -4046,6 +4123,14 @@ def _story_project_from_row(
                     (active_version["activeCritiqueId"],),
                 ).fetchone()
             )
+        if active_version:
+            active_version["shots"] = [
+                _story_shot_from_row(shot_row)
+                for shot_row in conn.execute(
+                    "SELECT * FROM story_shots WHERE story_version_id = ? ORDER BY shot_order",
+                    (active_version["id"],),
+                ).fetchall()
+            ]
     return {
         "id": row["id"],
         "scriptId": row["script_id"],
@@ -4135,6 +4220,72 @@ def _save_story_brief(script_id: str, brief: StoryBrief) -> dict[str, Any]:
     return project
 
 
+def _persist_story_shots(
+    conn: sqlite3.Connection,
+    *,
+    version_id: str,
+    plan: dict[str, Any],
+    shot_reviews: list[dict[str, Any]] | None = None,
+) -> None:
+    review_by_id = {
+        str(review.get("shotId")): review
+        for review in (shot_reviews or [])
+        if isinstance(review, dict)
+    }
+    now = _now()
+    for order, shot in enumerate(plan.get("shots") or [], start=1):
+        shot_id = str(shot.get("id") or f"shot-{order:02d}")
+        supplied = review_by_id.get(shot_id) or {}
+        controls = {
+            "promptOverride": str(supplied.get("promptOverride") or ""),
+            "lockIdentity": bool(supplied.get("lockIdentity", True)),
+            "lockWardrobe": bool(supplied.get("lockWardrobe", True)),
+            "lockEnvironment": bool(supplied.get("lockEnvironment", False)),
+            "approved": bool(supplied.get("approved", False)),
+        }
+        prompt_hash = story_canonical_hash(
+            {"shot": shot, "promptOverride": controls["promptOverride"]}
+        )
+        continuity_hash = story_canonical_hash(
+            {
+                "characterBible": plan.get("characterBible"),
+                "visualBible": plan.get("visualBible"),
+                "continuityKeys": shot.get("continuityKeys") or [],
+                "locks": {
+                    "identity": controls["lockIdentity"],
+                    "wardrobe": controls["lockWardrobe"],
+                    "environment": controls["lockEnvironment"],
+                },
+            }
+        )
+        row_id = "story-shot-" + hashlib.sha256(
+            f"{version_id}:{shot_id}".encode("utf-8")
+        ).hexdigest()[:20]
+        conn.execute(
+            """INSERT INTO story_shots(
+                   id, story_version_id, shot_id, shot_order, provider,
+                   prompt_json, prompt_hash, continuity_hash, controls_json,
+                   status, shot_revision, remote_job_id, asset_path,
+                   regeneration_count, quality_status, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, 0, NULL, ?, ?)
+               ON CONFLICT(story_version_id, shot_id) DO NOTHING""",
+            (
+                row_id,
+                version_id,
+                shot_id,
+                order,
+                str(shot.get("providerStrategy") or "local_compositor"),
+                json.dumps(shot, ensure_ascii=False),
+                prompt_hash,
+                continuity_hash,
+                json.dumps(controls, ensure_ascii=False),
+                "approved" if controls["approved"] else "review",
+                now,
+                now,
+            ),
+        )
+
+
 def _save_story_version(
     *,
     project_id: str,
@@ -4143,6 +4294,8 @@ def _save_story_version(
     provider_capabilities_version: str,
     request_fingerprint: str,
     model: str,
+    shot_reviews: list[dict[str, Any]] | None = None,
+    story_bible_approved: bool = False,
 ) -> dict[str, Any]:
     conn = _ai_db()
     try:
@@ -4152,6 +4305,16 @@ def _save_story_version(
             (request_fingerprint,),
         ).fetchone()
         if existing:
+            _persist_story_shots(
+                conn,
+                version_id=str(existing["id"]),
+                plan=plan,
+                shot_reviews=shot_reviews,
+            )
+            conn.execute(
+                "UPDATE story_versions SET story_bible_approved=? WHERE id=?",
+                (int(story_bible_approved), existing["id"]),
+            )
             conn.execute(
                 "UPDATE story_projects SET active_story_version=?, status='planned', updated_at=? WHERE id=?",
                 (existing["id"], _now(), project_id),
@@ -4176,8 +4339,8 @@ def _save_story_version(
                    provider_capabilities_version, story_bible_json,
                    character_bible_json, visual_bible_json, shot_plan_json,
                    story_hash, request_fingerprint, prompt_version, model,
-                   approved, approved_at, created_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)""",
+                   story_bible_approved, approved, approved_at, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)""",
             (
                 version_id,
                 project_id,
@@ -4195,8 +4358,15 @@ def _save_story_version(
                 request_fingerprint,
                 STORY_PROMPT_VERSION,
                 model,
+                int(story_bible_approved),
                 now,
             ),
+        )
+        _persist_story_shots(
+            conn,
+            version_id=version_id,
+            plan=plan,
+            shot_reviews=shot_reviews,
         )
         conn.execute(
             "UPDATE story_projects SET active_story_version=?, status='planned', updated_at=? WHERE id=?",
@@ -4470,6 +4640,92 @@ def create_script_story_plan(script_id: str, payload: StoryPlanCreateIn) -> dict
     finally:
         with _STORY_PLAN_INFLIGHT_LOCK:
             _STORY_PLAN_INFLIGHT.pop(request_key, None)
+
+
+@app.get("/api/story-versions/{version_id}/shots")
+def get_story_version_shots(version_id: str) -> dict:
+    if not _story_version(version_id):
+        raise _story_error(404, "STORY_VERSION_NOT_FOUND", "Versão narrativa não encontrada.")
+    return {"ok": True, "shots": _story_shots(version_id)}
+
+
+@app.post("/api/story-versions/{version_id}/revise")
+def revise_story_version(version_id: str, payload: StoryPlanRevisionIn) -> dict:
+    raw_reviews = [review.model_dump(mode="json") for review in payload.shotReviews]
+    revision_fingerprint = story_canonical_hash(
+        {
+            "parentVersionId": version_id,
+            "parentStoryHash": payload.expectedStoryHash,
+            "plan": payload.plan,
+            "shotReviews": raw_reviews,
+            "storyBibleApproved": payload.storyBibleApproved,
+            "providerCapabilitiesVersion": payload.expectedProviderCapabilitiesVersion,
+            "reason": payload.reason,
+            "idempotencyKey": payload.idempotencyKey,
+        }
+    )
+    conn = _ai_db()
+    try:
+        existing = conn.execute(
+            """SELECT child.id, project.script_id
+                 FROM story_versions parent
+                 JOIN story_projects project ON project.id = parent.story_project_id
+                 JOIN story_versions child ON child.story_project_id = parent.story_project_id
+                WHERE parent.id = ? AND child.request_fingerprint = ?""",
+            (version_id, revision_fingerprint),
+        ).fetchone()
+    finally:
+        conn.close()
+    if existing:
+        saved = _story_version(str(existing["id"]))
+        if not saved:
+            raise RuntimeError("Revisão idempotente não pôde ser carregada.")
+        return {
+            "ok": True,
+            "version": {**saved, "shots": _story_shots(saved["id"])},
+            "project": _story_project(str(existing["script_id"])),
+            "deduplicated": True,
+        }
+    context = _story_version_context(
+        version_id,
+        expected_story_hash=payload.expectedStoryHash,
+        expected_provider_capabilities_version=payload.expectedProviderCapabilitiesVersion,
+    )
+    try:
+        revised_plan = validate_story_plan(
+            payload.plan,
+            brief=context["brief"],
+            approved_speech=context["source"]["speech"],
+            allowed_provider_strategies=context["providerContext"]["providerStrategies"],
+        )
+    except StoryContractError as exc:
+        raise _story_error(422, exc.code, exc.message) from exc
+    plan_shot_ids = [str(shot["id"]) for shot in revised_plan["shots"]]
+    review_shot_ids = [review.shotId for review in payload.shotReviews]
+    if review_shot_ids != plan_shot_ids:
+        raise _story_error(
+            422,
+            "STORY_SHOT_REVIEW_COVERAGE_INVALID",
+            "As aprovações devem cobrir todos os shots, na mesma ordem do storyboard.",
+        )
+    reviews = raw_reviews
+    version = _save_story_version(
+        project_id=context["project"]["id"],
+        plan=revised_plan,
+        source=context["source"],
+        provider_capabilities_version=context["providerContext"][
+            "providerCapabilitiesVersion"
+        ],
+        request_fingerprint=revision_fingerprint,
+        model="human_editor",
+        shot_reviews=reviews,
+        story_bible_approved=payload.storyBibleApproved,
+    )
+    return {
+        "ok": True,
+        "version": {**version, "shots": _story_shots(version["id"])},
+        "project": _story_project(context["project"]["scriptId"]),
+    }
 
 
 def _story_version_context(
@@ -4861,6 +5117,20 @@ def _approve_story_version(
             "STORY_CRITIQUE_NOT_ACTIVE",
             "A crítica informada não é a revisão ativa deste Story Plan.",
         )
+    shots = _story_shots(version_id)
+    if not version.get("storyBibleApproved"):
+        raise _story_error(
+            422,
+            "STORY_BIBLE_APPROVAL_REQUIRED",
+            "Aprove a Story Bible antes de aprovar o plano completo.",
+        )
+    pending_shots = [shot["shotId"] for shot in shots if shot["status"] != "approved"]
+    if pending_shots:
+        raise _story_error(
+            422,
+            "STORY_SHOT_APPROVAL_REQUIRED",
+            "Aprove todos os shots antes do plano completo: " + ", ".join(pending_shots),
+        )
     budget = estimate_story_budget(
         plan=version["plan"],
         brief=context["brief"],
@@ -4934,6 +5204,15 @@ def _authorize_story_production(version_id: str) -> dict[str, Any]:
             422,
             "STORY_BUDGET_APPROVAL_REQUIRED",
             "Aprove o Story Plan e o orçamento antes de reservar qualquer shot.",
+        )
+    shots = _story_shots(version_id)
+    if not version.get("storyBibleApproved") or any(
+        shot["status"] != "approved" for shot in shots
+    ):
+        raise _story_error(
+            422,
+            "STORY_SHOT_APPROVAL_REQUIRED",
+            "A Story Bible e todos os shots precisam permanecer aprovados.",
         )
     context = _story_version_context(
         version_id,

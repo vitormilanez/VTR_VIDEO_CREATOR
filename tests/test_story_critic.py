@@ -148,6 +148,25 @@ def seed_story(brief: StoryBrief | None = None) -> tuple[dict, dict]:
         provider_capabilities_version="heygen-test-v1",
         request_fingerprint="d" * 64,
         model="claude-story-test",
+        shot_reviews=[
+            {
+                "shotId": "shot-01",
+                "promptOverride": "",
+                "lockIdentity": True,
+                "lockWardrobe": True,
+                "lockEnvironment": False,
+                "approved": True,
+            },
+            {
+                "shotId": "shot-02",
+                "promptOverride": "",
+                "lockIdentity": True,
+                "lockWardrobe": True,
+                "lockEnvironment": False,
+                "approved": True,
+            },
+        ],
+        story_bible_approved=True,
     )
     return project, version
 

@@ -92,8 +92,31 @@ Implementado:
 
 ## Próximos slices
 
-- 16D — Storyboard na interface;
+- 16D — Storyboard na interface: concluído;
 - 16E — Orquestrador por shot e Asset Store;
 - 16F — B-roll em vídeo no compositor;
 - 16G — Claude Visual QC;
 - 16H — preparação do piloto medieval controlado.
+
+## Slice 16D — Storyboard e aprovação por shot
+
+Status: concluído.
+
+Implementado:
+
+- modo “História cinematográfica” separado dos fluxos Direct, Video Agent e
+  Cinematic;
+- Story Brief com objetivo, período, local, realismo, referências por hash e limites
+  explícitos de jobs, regenerações e orçamento;
+- Story Bible, storyboard editável, provider, duração e prompt adicional por shot;
+- travas independentes de identidade, figurino e ambiente;
+- aprovação humana da Bible e de cada shot antes da crítica;
+- alterações salvas em nova revisão, preservando a anterior e com retry idempotente;
+- crítica e aprovação vinculadas à revisão ativa; qualquer edição invalida o vínculo
+  anterior;
+- orçamento e pior cenário sempre visíveis antes da aprovação;
+- proteção contra respostas assíncronas antigas e suporte a desfazer edições locais;
+- botões antigos de prévia e vídeo final bloqueados no Story Mode;
+- nenhum job HeyGen criado nesta fase;
+- validação focada: 3 testes do reducer web e 18 testes Python de contrato,
+  versionamento, crítica e orçamento aprovados.
