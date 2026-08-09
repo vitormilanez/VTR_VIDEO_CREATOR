@@ -27,7 +27,7 @@ Implementado:
 - transporte do Video Agent compilado somente com flags confirmadas;
 - versão das capabilities incorporada ao fingerprint do job;
 - endpoint local de leitura e refresh do registro;
-- testes sem criação de sessões ou vídeos.
+- testes sem criação de sessões ou vídeos;
 - o snapshot de capabilities é congelado na reserva e obrigatório no envio, evitando
   que um job mude de contrato por diferenças de ambiente ou atualização do CLI.
 
@@ -35,13 +35,38 @@ Evidência do ambiente em 9 de agosto de 2026:
 
 - CLI: `heygen 0.5.0`;
 - Video Agent: estilos, Brand Kit, modo chat, anexos e 9:16/16:9 confirmados;
-- Direct Video: contrato obtido via `--request-schema`, sem chamada de geração.
+- Direct Video: contrato obtido via `--request-schema`, sem chamada de geração;
 - validação local completa: 35 testes web e 247 testes Python aprovados; 2 smoke
+  tests de providers reais permaneceram ignorados.
+
+## Slice 16B — Story Contract e Narrative Director
+
+Status: concluído.
+
+Implementado:
+
+- contrato JSON estrito e compartilhado para Story Bible, Character Bible, Visual
+  Bible e Shot Plan;
+- Story Brief tipado com período, local, realismo, personagem, referências e limites
+  de custo;
+- cobertura integral da fala por índices de palavras, sem campo para fala livre nos
+  shots;
+- validação determinística de duração, ordem, lacunas, sobreposições, IDs, provider,
+  referências, personagem, jobs e novos sinais médicos ou numéricos;
+- prompt global do Narrative Director com schema e contexto estável preparados para
+  prompt caching;
+- modelo premium configurável e reparo explícito limitado a uma tentativa;
+- cache persistente, deduplicação de requests simultâneos e registro de tokens;
+- persistência versionada de projetos e planos, sem sobrescrever versões anteriores;
+- invalidação do plano ativo quando fala, contrato, briefing ou capabilities mudam;
+- endpoints para salvar o briefing, gerar o plano e ler o projeto ativo;
+- confirmação explícita obrigatória antes da chamada Anthropic;
+- nenhuma chamada ao HeyGen no fluxo de planejamento;
+- validação local completa: 35 testes web e 258 testes Python aprovados; 2 smoke
   tests de providers reais permaneceram ignorados.
 
 ## Próximos slices
 
-- 16B — Story Contract e Narrative Director;
 - 16C — Story Critic e orçamento;
 - 16D — Storyboard na interface;
 - 16E — Orquestrador por shot e Asset Store;

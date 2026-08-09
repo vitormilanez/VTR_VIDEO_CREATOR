@@ -104,6 +104,22 @@ from api.services.provider_capabilities import (
     validate_video_agent_options,
     video_agent_create_args,
 )
+from api.services.story_contract import (
+    STORY_CONTRACT_SCHEMA,
+    STORY_CONTRACT_VERSION,
+    STORY_PROMPT_VERSION,
+    StoryBrief,
+    StoryContractError,
+    canonical_hash as story_canonical_hash,
+    story_hash,
+    validate_story_plan,
+)
+from api.services.story_director import (
+    allowed_provider_strategies,
+    build_repair_instruction,
+    build_story_prompt,
+    story_cache_payload,
+)
 from api.services.video_generation import (
     DIRECT_VIDEO_DURATIONS,
     direct_video_payload,
@@ -153,6 +169,8 @@ MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
 LOGGER = logging.getLogger("uvicorn.error")
 _PAID_GENERATION_LOCKS_GUARD = threading.Lock()
 _PAID_GENERATION_LOCKS: dict[str, threading.RLock] = {}
+_STORY_PLAN_INFLIGHT: dict[str, Future[dict[str, Any]]] = {}
+_STORY_PLAN_INFLIGHT_LOCK = threading.Lock()
 
 
 def _paid_generation_lock(script_id: str) -> threading.RLock:
@@ -360,6 +378,40 @@ def _ai_db() -> sqlite3.Connection:
             capabilities_version TEXT NOT NULL,
             capabilities_json TEXT NOT NULL,
             checked_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS story_projects (
+            id TEXT PRIMARY KEY,
+            script_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            active_story_version TEXT,
+            production_tier TEXT NOT NULL,
+            story_brief_json TEXT NOT NULL,
+            budget_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS story_versions (
+            id TEXT PRIMARY KEY,
+            story_project_id TEXT NOT NULL,
+            story_revision INTEGER NOT NULL,
+            script_revision INTEGER NOT NULL,
+            final_speech_hash TEXT NOT NULL,
+            script_contract_version TEXT NOT NULL,
+            story_contract_version TEXT NOT NULL,
+            provider_capabilities_version TEXT NOT NULL,
+            story_bible_json TEXT NOT NULL,
+            character_bible_json TEXT NOT NULL,
+            visual_bible_json TEXT NOT NULL,
+            shot_plan_json TEXT NOT NULL,
+            story_hash TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL UNIQUE,
+            prompt_version TEXT NOT NULL,
+            model TEXT NOT NULL,
+            approved INTEGER NOT NULL DEFAULT 0,
+            approved_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(story_project_id) REFERENCES story_projects(id),
+            UNIQUE(story_project_id, story_revision)
         );
         """
     )
@@ -3431,6 +3483,18 @@ def save_settings(payload: AppSettingsIn) -> dict:
 # --------------------------------------------------------------------------- #
 # HeyGen: envio e consulta somente por acao explicita do usuario
 # --------------------------------------------------------------------------- #
+class StoryBriefSaveIn(BaseModel):
+    brief: StoryBrief
+    expectedScriptRevision: int = Field(ge=1)
+    expectedFinalSpeechHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    scriptContractVersion: str = Field(min_length=1, max_length=80)
+
+
+class StoryPlanCreateIn(StoryBriefSaveIn):
+    expectedProviderCapabilitiesVersion: str = Field(min_length=1, max_length=160)
+    confirmed: Literal[True]
+
+
 class VideoCreateIn(BaseModel):
     scriptId: str
     avatarId: str | None = Field(default=None, max_length=160)
@@ -3685,6 +3749,614 @@ def _direct_video_payload(
         optimize_pronunciation=optimize_pronunciation,
         caption_source_matches_spoken=caption_source_matches_spoken,
     )
+
+
+def _story_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _story_source_context(
+    script_id: str,
+    *,
+    expected_script_revision: int,
+    expected_final_speech_hash: str,
+    script_contract_version: str,
+) -> dict[str, Any]:
+    script = _find_script(script_id)
+    state = _script_editor_state(script_id, script)
+    speech = _canonical_script_speech(script)
+    current_revision = int(state.get("scriptRevision") or 0)
+    current_hash = str(state.get("finalSpeechHash") or "")
+    _invalidate_story_project(
+        script_id,
+        script_revision=current_revision,
+        final_speech_hash=current_hash,
+        script_contract_version=str(state.get("contractVersion") or ""),
+    )
+    if (
+        expected_script_revision != current_revision
+        or expected_final_speech_hash != current_hash
+    ):
+        raise _story_error(
+            409,
+            "SCRIPT_VERSION_CONFLICT",
+            "A fala aprovada mudou. Recarregue o roteiro antes de planejar a história.",
+        )
+    if script_contract_version != str(state.get("contractVersion") or ""):
+        raise _story_error(
+            409,
+            "SCRIPT_CONTRACT_VERSION_CONFLICT",
+            "O contrato do roteiro mudou. Recarregue a página.",
+        )
+    approval_matches = bool(
+        state.get("humanReviewApproved")
+        and state.get("approvedScriptRevision") == current_revision
+        and state.get("approvedFinalSpeechHash") == current_hash
+        and script.get("status") == "aprovado_clinicamente"
+    )
+    if not approval_matches:
+        raise _story_error(
+            422,
+            "MEDICAL_APPROVAL_REQUIRED",
+            "A fala precisa de aprovação médica vinculada à versão atual.",
+        )
+    if not speech.strip() or hash_text(speech) != current_hash:
+        raise _story_error(
+            409,
+            "SCRIPT_STATE_INCOMPLETE",
+            "O hash da fala aprovada não corresponde ao texto salvo.",
+        )
+    return {
+        "script": script,
+        "editorState": state,
+        "speech": speech,
+        "scriptRevision": current_revision,
+        "finalSpeechHash": current_hash,
+        "scriptContractVersion": script_contract_version,
+    }
+
+
+def _story_capability_context(
+    expected_version: str,
+    *,
+    script_id: str | None = None,
+) -> dict[str, Any]:
+    capabilities = _heygen_capabilities()
+    current_version = str(capabilities.get("capabilitiesVersion") or "")
+    if script_id:
+        _invalidate_story_project(
+            script_id,
+            provider_capabilities_version=current_version,
+        )
+    if current_version != expected_version:
+        raise _story_error(
+            409,
+            "PROVIDER_CAPABILITIES_VERSION_CONFLICT",
+            "As capabilities do provider mudaram. Atualize o storyboard.",
+        )
+    return {
+        "capabilities": capabilities,
+        "providerCapabilitiesVersion": current_version,
+        "providerStrategies": allowed_provider_strategies(capabilities),
+    }
+
+
+def _story_project_id(script_id: str) -> str:
+    return "story-" + hashlib.sha256(script_id.encode("utf-8")).hexdigest()[:20]
+
+
+def _invalidate_story_project(
+    script_id: str,
+    *,
+    script_revision: int | None = None,
+    final_speech_hash: str | None = None,
+    script_contract_version: str | None = None,
+    provider_capabilities_version: str | None = None,
+) -> None:
+    expected = {
+        "script_revision": script_revision,
+        "final_speech_hash": final_speech_hash,
+        "script_contract_version": script_contract_version,
+        "provider_capabilities_version": provider_capabilities_version,
+    }
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            """SELECT p.id, p.active_story_version, v.script_revision,
+                      v.final_speech_hash, v.script_contract_version,
+                      v.provider_capabilities_version
+                 FROM story_projects p
+                 LEFT JOIN story_versions v ON v.id = p.active_story_version
+                WHERE p.script_id = ?""",
+            (script_id,),
+        ).fetchone()
+        if not row or not row["active_story_version"]:
+            return
+        stale = any(
+            value is not None and row[column] != value
+            for column, value in expected.items()
+        )
+        if stale:
+            conn.execute(
+                """UPDATE story_projects
+                   SET status='stale', active_story_version=NULL, updated_at=?
+                   WHERE id=?""",
+                (_now(), row["id"]),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def _story_version_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    plan = {
+        "contractVersion": row["story_contract_version"],
+        "storyBible": json.loads(str(row["story_bible_json"])),
+        "characterBible": json.loads(str(row["character_bible_json"])),
+        "visualBible": json.loads(str(row["visual_bible_json"])),
+        "medicalAssertions": [],
+        "shots": json.loads(str(row["shot_plan_json"])),
+    }
+    return {
+        "id": row["id"],
+        "storyProjectId": row["story_project_id"],
+        "storyRevision": int(row["story_revision"]),
+        "scriptRevision": int(row["script_revision"]),
+        "finalSpeechHash": row["final_speech_hash"],
+        "scriptContractVersion": row["script_contract_version"],
+        "storyContractVersion": row["story_contract_version"],
+        "providerCapabilitiesVersion": row["provider_capabilities_version"],
+        "storyHash": row["story_hash"],
+        "requestFingerprint": row["request_fingerprint"],
+        "promptVersion": row["prompt_version"],
+        "model": row["model"],
+        "approved": bool(row["approved"]),
+        "approvedAt": row["approved_at"],
+        "createdAt": row["created_at"],
+        "plan": plan,
+    }
+
+
+def _story_project_from_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row | None,
+) -> dict[str, Any] | None:
+    if not row:
+        return None
+    active_version = None
+    if row["active_story_version"]:
+        active_version = _story_version_from_row(
+            conn.execute(
+                "SELECT * FROM story_versions WHERE id = ?",
+                (row["active_story_version"],),
+            ).fetchone()
+        )
+    return {
+        "id": row["id"],
+        "scriptId": row["script_id"],
+        "status": row["status"],
+        "activeStoryVersion": row["active_story_version"],
+        "productionTier": row["production_tier"],
+        "brief": json.loads(str(row["story_brief_json"])),
+        "budget": json.loads(str(row["budget_json"])),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "activeVersion": active_version,
+    }
+
+
+def _story_project(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM story_projects WHERE script_id = ?", (script_id,)
+        ).fetchone()
+        return _story_project_from_row(conn, row)
+    finally:
+        conn.close()
+
+
+def _save_story_brief(script_id: str, brief: StoryBrief) -> dict[str, Any]:
+    brief_json = brief.model_dump(mode="json")
+    budget = {
+        "maxHeyGenJobs": brief.maxHeyGenJobs,
+        "maxRegenerationsPerShot": brief.maxRegenerationsPerShot,
+        "maxBudgetUsd": brief.maxBudgetUsd,
+    }
+    project_id = _story_project_id(script_id)
+    now = _now()
+    conn = _ai_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM story_projects WHERE script_id = ?", (script_id,)
+        ).fetchone()
+        changed = bool(
+            existing
+            and story_canonical_hash(json.loads(str(existing["story_brief_json"])))
+            != story_canonical_hash(brief_json)
+        )
+        if not existing:
+            conn.execute(
+                """INSERT INTO story_projects(
+                       id, script_id, status, active_story_version, production_tier,
+                       story_brief_json, budget_json, created_at, updated_at
+                   ) VALUES (?, ?, 'brief', NULL, ?, ?, ?, ?, ?)""",
+                (
+                    project_id,
+                    script_id,
+                    brief.productionTier,
+                    json.dumps(brief_json, ensure_ascii=False),
+                    json.dumps(budget, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        else:
+            conn.execute(
+                """UPDATE story_projects
+                   SET status=?, active_story_version=?, production_tier=?,
+                       story_brief_json=?, budget_json=?, updated_at=?
+                   WHERE script_id=?""",
+                (
+                    "brief_changed" if changed else existing["status"],
+                    None if changed else existing["active_story_version"],
+                    brief.productionTier,
+                    json.dumps(brief_json, ensure_ascii=False),
+                    json.dumps(budget, ensure_ascii=False),
+                    now,
+                    script_id,
+                ),
+            )
+        row = conn.execute(
+            "SELECT * FROM story_projects WHERE script_id = ?", (script_id,)
+        ).fetchone()
+        conn.commit()
+        project = _story_project_from_row(conn, row)
+    finally:
+        conn.close()
+    if not project:
+        raise RuntimeError("Não foi possível persistir o Story Brief.")
+    return project
+
+
+def _save_story_version(
+    *,
+    project_id: str,
+    plan: dict[str, Any],
+    source: dict[str, Any],
+    provider_capabilities_version: str,
+    request_fingerprint: str,
+    model: str,
+) -> dict[str, Any]:
+    conn = _ai_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM story_versions WHERE request_fingerprint = ?",
+            (request_fingerprint,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE story_projects SET active_story_version=?, status='planned', updated_at=? WHERE id=?",
+                (existing["id"], _now(), project_id),
+            )
+            conn.commit()
+            saved = _story_version_from_row(existing)
+            if not saved:
+                raise RuntimeError("Versão narrativa existente não pôde ser lida.")
+            return saved
+        row = conn.execute(
+            "SELECT COALESCE(MAX(story_revision), 0) AS revision FROM story_versions WHERE story_project_id = ?",
+            (project_id,),
+        ).fetchone()
+        revision = int(row["revision"] or 0) + 1
+        version_id = "story-version-" + request_fingerprint[:20]
+        now = _now()
+        plan_hash = story_hash(plan)
+        conn.execute(
+            """INSERT INTO story_versions(
+                   id, story_project_id, story_revision, script_revision,
+                   final_speech_hash, script_contract_version, story_contract_version,
+                   provider_capabilities_version, story_bible_json,
+                   character_bible_json, visual_bible_json, shot_plan_json,
+                   story_hash, request_fingerprint, prompt_version, model,
+                   approved, approved_at, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)""",
+            (
+                version_id,
+                project_id,
+                revision,
+                source["scriptRevision"],
+                source["finalSpeechHash"],
+                source["scriptContractVersion"],
+                STORY_CONTRACT_VERSION,
+                provider_capabilities_version,
+                json.dumps(plan["storyBible"], ensure_ascii=False),
+                json.dumps(plan["characterBible"], ensure_ascii=False),
+                json.dumps(plan["visualBible"], ensure_ascii=False),
+                json.dumps(plan["shots"], ensure_ascii=False),
+                plan_hash,
+                request_fingerprint,
+                STORY_PROMPT_VERSION,
+                model,
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE story_projects SET active_story_version=?, status='planned', updated_at=? WHERE id=?",
+            (version_id, now, project_id),
+        )
+        saved_row = conn.execute(
+            "SELECT * FROM story_versions WHERE id = ?", (version_id,)
+        ).fetchone()
+        conn.commit()
+        saved = _story_version_from_row(saved_row)
+    finally:
+        conn.close()
+    if not saved:
+        raise RuntimeError("Não foi possível persistir a versão narrativa.")
+    return saved
+
+
+def _story_director_model_call(
+    *,
+    model: str,
+    system: list[dict[str, Any]],
+    user: str,
+) -> tuple[Any, str]:
+    import anthropic
+
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model=model,
+        max_tokens=6000,
+        system=system,
+        output_config={"format": {"type": "json_schema", "schema": STORY_CONTRACT_SCHEMA}},
+        messages=[{"role": "user", "content": user}],
+    )
+    raw_text = "".join(getattr(block, "text", "") for block in message.content)
+    return message, raw_text
+
+
+def _run_story_director(
+    *,
+    brief: StoryBrief,
+    source: dict[str, Any],
+    provider_context: dict[str, Any],
+    model: str,
+    repair_model: str,
+) -> dict[str, Any]:
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise _story_error(
+            503,
+            "ANTHROPIC_NOT_CONFIGURED",
+            "Defina ANTHROPIC_API_KEY para usar o Narrative Director.",
+        )
+    system, user = build_story_prompt(
+        brief=brief,
+        approved_speech=source["speech"],
+        script_revision=source["scriptRevision"],
+        final_speech_hash=source["finalSpeechHash"],
+        provider_capabilities_version=provider_context["providerCapabilitiesVersion"],
+        provider_strategies=provider_context["providerStrategies"],
+    )
+    last_error = StoryContractError(
+        "STORY_SCHEMA_INVALID", "A resposta não passou no contrato narrativo."
+    )
+    for attempt in range(2):
+        selected_model = model if attempt == 0 else repair_model
+        request_user = user
+        if attempt:
+            request_user += "\n\n" + build_repair_instruction(
+                last_error.code, last_error.message
+            )
+        try:
+            message, raw = _story_director_model_call(
+                model=selected_model,
+                system=system,
+                user=request_user,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            LOGGER.warning(
+                "story_director_provider_error model=%s attempt=%s type=%s",
+                selected_model,
+                attempt + 1,
+                type(exc).__name__,
+            )
+            raise _story_error(
+                502,
+                "STORY_PROVIDER_ERROR",
+                "O Narrative Director não respondeu. Nenhuma versão foi alterada.",
+            ) from exc
+        else:
+            _record_anthropic_usage(
+                "story.plan" if attempt == 0 else "story.repair",
+                selected_model,
+                message,
+            )
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                plan = validate_story_plan(
+                    parsed,
+                    brief=brief,
+                    approved_speech=source["speech"],
+                    allowed_provider_strategies=provider_context["providerStrategies"],
+                )
+                return {
+                    "plan": plan,
+                    "model": model,
+                    "repairModel": selected_model if attempt else None,
+                    "retryCount": attempt,
+                }
+            except json.JSONDecodeError as exc:
+                last_error = StoryContractError("STORY_JSON_INVALID", str(exc))
+            except StoryContractError as exc:
+                last_error = exc
+        if attempt == 1:
+            break
+    raise _story_error(
+        502,
+        last_error.code,
+        "O plano continuou inválido após uma correção. A versão anterior foi preservada.",
+    )
+
+
+@app.get("/api/scripts/{script_id}/story")
+def get_script_story(script_id: str) -> dict:
+    script = _find_script(script_id)
+    editor_state = _script_editor_state(script_id, script)
+    _invalidate_story_project(
+        script_id,
+        script_revision=int(editor_state.get("scriptRevision") or 0),
+        final_speech_hash=str(editor_state.get("finalSpeechHash") or ""),
+        script_contract_version=str(editor_state.get("contractVersion") or ""),
+    )
+    return {
+        "ok": True,
+        "project": _story_project(script_id),
+        "bindings": {
+            "scriptRevision": editor_state.get("scriptRevision"),
+            "finalSpeechHash": editor_state.get("finalSpeechHash"),
+            "scriptContractVersion": editor_state.get("contractVersion"),
+            "storyContractVersion": STORY_CONTRACT_VERSION,
+            "storyPromptVersion": STORY_PROMPT_VERSION,
+        },
+    }
+
+
+@app.put("/api/scripts/{script_id}/story/brief")
+def save_script_story_brief(script_id: str, payload: StoryBriefSaveIn) -> dict:
+    source = _story_source_context(
+        script_id,
+        expected_script_revision=payload.expectedScriptRevision,
+        expected_final_speech_hash=payload.expectedFinalSpeechHash,
+        script_contract_version=payload.scriptContractVersion,
+    )
+    project = _save_story_brief(script_id, payload.brief)
+    return {
+        "ok": True,
+        "project": project,
+        "bindings": {
+            "scriptRevision": source["scriptRevision"],
+            "finalSpeechHash": source["finalSpeechHash"],
+            "scriptContractVersion": source["scriptContractVersion"],
+            "storyContractVersion": STORY_CONTRACT_VERSION,
+        },
+    }
+
+
+@app.post("/api/scripts/{script_id}/story/plan")
+def create_script_story_plan(script_id: str, payload: StoryPlanCreateIn) -> dict:
+    source = _story_source_context(
+        script_id,
+        expected_script_revision=payload.expectedScriptRevision,
+        expected_final_speech_hash=payload.expectedFinalSpeechHash,
+        script_contract_version=payload.scriptContractVersion,
+    )
+    provider_context = _story_capability_context(
+        payload.expectedProviderCapabilitiesVersion,
+        script_id=script_id,
+    )
+    model = str(os.getenv("ANTHROPIC_STORY_MODEL") or "").strip()
+    if not model:
+        raise _story_error(
+            503,
+            "STORY_MODEL_NOT_CONFIGURED",
+            "Defina ANTHROPIC_STORY_MODEL com um modelo premium disponível na conta.",
+        )
+    repair_model = str(os.getenv("ANTHROPIC_STORY_REPAIR_MODEL") or model).strip()
+    cache_payload = story_cache_payload(
+        brief=payload.brief,
+        approved_speech=source["speech"],
+        script_revision=source["scriptRevision"],
+        final_speech_hash=source["finalSpeechHash"],
+        script_contract_version=source["scriptContractVersion"],
+        provider_capabilities_version=provider_context["providerCapabilitiesVersion"],
+        provider_strategies=provider_context["providerStrategies"],
+        model=model,
+    )
+    request_fingerprint = story_canonical_hash(cache_payload)
+    request_key = _ai_cache_key("story.plan", cache_payload)
+    owner = False
+    with _STORY_PLAN_INFLIGHT_LOCK:
+        future = _STORY_PLAN_INFLIGHT.get(request_key)
+        if future is None:
+            future = Future()
+            _STORY_PLAN_INFLIGHT[request_key] = future
+            owner = True
+    if not owner:
+        try:
+            response = future.result(timeout=180)
+        except FutureTimeoutError as exc:
+            raise _story_error(
+                409,
+                "STORY_PLAN_IN_PROGRESS",
+                "Um planejamento idêntico ainda está em andamento.",
+            ) from exc
+        return {**response, "deduplicated": True}
+
+    try:
+        project = _save_story_brief(script_id, payload.brief)
+        cached = _ai_cache_get("story.plan", cache_payload)
+        director_result: dict[str, Any] | None = None
+        if cached and isinstance(cached.get("plan"), dict):
+            try:
+                plan = validate_story_plan(
+                    cached["plan"],
+                    brief=payload.brief,
+                    approved_speech=source["speech"],
+                    allowed_provider_strategies=provider_context["providerStrategies"],
+                )
+                director_result = {
+                    "plan": plan,
+                    "model": str(cached.get("model") or model),
+                    "repairModel": cached.get("repairModel"),
+                    "retryCount": int(cached.get("retryCount") or 0),
+                }
+            except StoryContractError:
+                director_result = None
+        cache_hit = director_result is not None
+        if director_result is None:
+            director_result = _run_story_director(
+                brief=payload.brief,
+                source=source,
+                provider_context=provider_context,
+                model=model,
+                repair_model=repair_model,
+            )
+            _ai_cache_put("story.plan", cache_payload, director_result)
+        version = _save_story_version(
+            project_id=project["id"],
+            plan=director_result["plan"],
+            source=source,
+            provider_capabilities_version=provider_context[
+                "providerCapabilitiesVersion"
+            ],
+            request_fingerprint=request_fingerprint,
+            model=director_result["model"],
+        )
+        response = {
+            "ok": True,
+            "project": _story_project(script_id),
+            "version": version,
+            "cacheHit": cache_hit,
+            "deduplicated": False,
+            "retryCount": director_result["retryCount"],
+            "repairModel": director_result["repairModel"],
+        }
+        future.set_result(response)
+        return response
+    except BaseException as exc:
+        future.set_exception(exc)
+        raise
+    finally:
+        with _STORY_PLAN_INFLIGHT_LOCK:
+            _STORY_PLAN_INFLIGHT.pop(request_key, None)
 
 
 @app.get("/api/scripts/{script_id}/production-profile")
