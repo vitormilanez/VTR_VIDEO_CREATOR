@@ -111,6 +111,7 @@ from api.services.story_contract import (
     StoryBrief,
     StoryContractError,
     canonical_hash as story_canonical_hash,
+    shot_continuity_context,
     story_hash,
     validate_story_plan,
 )
@@ -3951,19 +3952,21 @@ def _invalidate_story_project(
     final_speech_hash: str | None = None,
     script_contract_version: str | None = None,
     provider_capabilities_version: str | None = None,
+    story_contract_version: str | None = None,
 ) -> None:
     expected = {
         "script_revision": script_revision,
         "final_speech_hash": final_speech_hash,
         "script_contract_version": script_contract_version,
         "provider_capabilities_version": provider_capabilities_version,
+        "story_contract_version": story_contract_version,
     }
     conn = _ai_db()
     try:
         row = conn.execute(
             """SELECT p.id, p.active_story_version, v.script_revision,
                       v.final_speech_hash, v.script_contract_version,
-                      v.provider_capabilities_version
+                      v.provider_capabilities_version, v.story_contract_version
                  FROM story_projects p
                  LEFT JOIN story_versions v ON v.id = p.active_story_version
                 WHERE p.script_id = ?""",
@@ -4248,9 +4251,7 @@ def _persist_story_shots(
         )
         continuity_hash = story_canonical_hash(
             {
-                "characterBible": plan.get("characterBible"),
-                "visualBible": plan.get("visualBible"),
-                "continuityKeys": shot.get("continuityKeys") or [],
+                "context": shot_continuity_context(plan, shot_id),
                 "locks": {
                     "identity": controls["lockIdentity"],
                     "wardrobe": controls["lockWardrobe"],
@@ -4498,6 +4499,7 @@ def get_script_story(script_id: str) -> dict:
         script_revision=int(editor_state.get("scriptRevision") or 0),
         final_speech_hash=str(editor_state.get("finalSpeechHash") or ""),
         script_contract_version=str(editor_state.get("contractVersion") or ""),
+        story_contract_version=STORY_CONTRACT_VERSION,
     )
     return {
         "ok": True,

@@ -502,7 +502,9 @@ export interface StoryPlanShot {
   order: number;
   narrativePurpose: string;
   shotType: "avatar_anchor" | "historical_broll" | "modern_broll" | "transition" | "local_asset";
+  strategy: "avatar_anchor" | "cinematic_broll" | "local_transition";
   providerStrategy: "video_agent" | "direct_video" | "local_compositor";
+  subject: string;
   durationSeconds: number;
   speech: {
     mode: "avatar_speaks" | "voice_continues_from_base_scene";
@@ -511,18 +513,22 @@ export interface StoryPlanShot {
   };
   character: { required: boolean; characterId: string | null; lookId: string | null };
   environment: string;
+  period: string;
+  wardrobe: string;
   action: string;
   camera: { framing: string; movement: string; lens: string };
   lighting: string;
+  atmosphere: string;
   continuityKeys: string[];
   referenceAssetIds: string[];
   negativePrompt: string[];
+  heygenPrompt: string;
   audioPolicy: "preserve_base_narration" | "mute_generated_audio";
   estimatedCost: { heygenJobs: number; anthropicCalls: 0 };
 }
 
 export interface StoryPlan {
-  contractVersion: "story-contract-v1";
+  contractVersion: "story-contract-v2";
   storyBible: {
     premise: string;
     educationalGoal: string;

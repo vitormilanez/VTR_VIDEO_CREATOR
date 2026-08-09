@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.ai-video-creator/story-contract-v1.json",
+  "$id": "https://local.ai-video-creator/story-contract-v2.json",
   "title": "AI Video Creator Story Plan",
   "type": "object",
   "additionalProperties": false,
@@ -14,7 +14,7 @@
   ],
   "properties": {
     "contractVersion": {
-      "const": "story-contract-v1"
+      "const": "story-contract-v2"
     },
     "storyBible": {
       "type": "object",
@@ -130,17 +130,23 @@
           "order",
           "narrativePurpose",
           "shotType",
+          "strategy",
           "providerStrategy",
+          "subject",
           "durationSeconds",
           "speech",
           "character",
           "environment",
+          "period",
+          "wardrobe",
           "action",
           "camera",
           "lighting",
+          "atmosphere",
           "continuityKeys",
           "referenceAssetIds",
           "negativePrompt",
+          "heygenPrompt",
           "audioPolicy",
           "estimatedCost"
         ],
@@ -152,10 +158,15 @@
             "type": "string",
             "enum": ["avatar_anchor", "historical_broll", "modern_broll", "transition", "local_asset"]
           },
+          "strategy": {
+            "type": "string",
+            "enum": ["avatar_anchor", "cinematic_broll", "local_transition"]
+          },
           "providerStrategy": {
             "type": "string",
             "enum": ["video_agent", "direct_video", "local_compositor"]
           },
+          "subject": { "type": "string", "minLength": 3, "maxLength": 400 },
           "durationSeconds": { "type": "number", "exclusiveMinimum": 0, "maximum": 30 },
           "speech": {
             "type": "object",
@@ -181,6 +192,8 @@
             }
           },
           "environment": { "type": "string", "minLength": 3, "maxLength": 500 },
+          "period": { "type": "string", "maxLength": 160 },
+          "wardrobe": { "type": "string", "maxLength": 300 },
           "action": { "type": "string", "minLength": 3, "maxLength": 500 },
           "camera": {
             "type": "object",
@@ -193,6 +206,7 @@
             }
           },
           "lighting": { "type": "string", "minLength": 2, "maxLength": 200 },
+          "atmosphere": { "type": "string", "minLength": 2, "maxLength": 240 },
           "continuityKeys": {
             "type": "array",
             "minItems": 1,
@@ -209,6 +223,7 @@
             "maxItems": 20,
             "items": { "type": "string", "minLength": 1, "maxLength": 140 }
           },
+          "heygenPrompt": { "type": "string", "minLength": 40, "maxLength": 4000 },
           "audioPolicy": {
             "type": "string",
             "enum": ["preserve_base_narration", "mute_generated_audio"]

@@ -759,12 +759,16 @@ function BibleCard({
 function ShotCard({
   shot,
   controls,
+  characterId,
+  lookId,
   disabled,
   onShotChange,
   onControlsChange,
 }: {
   shot: StoryPlanShot;
   controls: ShotControls;
+  characterId: string | null;
+  lookId: string | null;
   disabled: boolean;
   onShotChange: (shot: StoryPlanShot) => void;
   onControlsChange: (controls: ShotControls) => void;
@@ -774,6 +778,25 @@ function ShotCard({
     ["lockWardrobe", "Travar figurino"],
     ["lockEnvironment", "Travar ambiente"],
   ] as const;
+  function changeStrategy(strategy: StoryPlanShot["strategy"]) {
+    const avatar = strategy === "avatar_anchor";
+    const local = strategy === "local_transition";
+    onShotChange({
+      ...shot,
+      strategy,
+      shotType: avatar ? "avatar_anchor" : local ? "transition" : "historical_broll",
+      providerStrategy: avatar ? "direct_video" : local ? "local_compositor" : "video_agent",
+      speech: {
+        ...shot.speech,
+        mode: avatar ? "avatar_speaks" : "voice_continues_from_base_scene",
+      },
+      character: avatar
+        ? { required: true, characterId, lookId }
+        : { required: false, characterId: null, lookId: null },
+      audioPolicy: avatar ? "preserve_base_narration" : "mute_generated_audio",
+      estimatedCost: { heygenJobs: local ? 0 : 1, anthropicCalls: 0 },
+    });
+  }
   return (
     <Card className={cn("shadow-sm", controls.approved && "border-status-success/40")}>
       <CardHeader className="p-4">
@@ -785,7 +808,7 @@ function ShotCard({
             </CardTitle>
             <CardDescription className="mt-1 text-xs">
               Palavras {shot.speech.startWordIndex + 1}–{shot.speech.endWordIndex + 1} ·{" "}
-              {shot.shotType.replaceAll("_", " ")}
+              {shot.strategy.replaceAll("_", " ")}
             </CardDescription>
           </div>
           <Badge variant={controls.approved ? "default" : "outline"}>
@@ -795,28 +818,23 @@ function ShotCard({
       </CardHeader>
       <CardContent className="space-y-3 p-4 pt-0">
         <div className="grid gap-3 sm:grid-cols-2">
-          <BriefField label="Provedor" htmlFor={`${shot.id}-provider`}>
+          <BriefField label="Estratégia" htmlFor={`${shot.id}-strategy`}>
             <Select
-              value={shot.providerStrategy}
+              value={shot.strategy}
               disabled={disabled}
-              onValueChange={(value) =>
-                onShotChange({
-                  ...shot,
-                  providerStrategy: value as StoryPlanShot["providerStrategy"],
-                  estimatedCost: {
-                    heygenJobs: value === "local_compositor" ? 0 : 1,
-                    anthropicCalls: 0,
-                  },
-                })
-              }
+              onValueChange={(value) => changeStrategy(value as StoryPlanShot["strategy"])}
             >
-              <SelectTrigger id={`${shot.id}-provider`}>
+              <SelectTrigger id={`${shot.id}-strategy`}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="video_agent">HeyGen Video Agent</SelectItem>
-                <SelectItem value="direct_video">HeyGen Direct Video</SelectItem>
-                <SelectItem value="local_compositor">Compositor local</SelectItem>
+                <SelectItem value="avatar_anchor" disabled={!characterId || !lookId}>
+                  Avatar falando · HeyGen Direct
+                </SelectItem>
+                <SelectItem value="cinematic_broll">
+                  B-roll cinematográfico · Video Agent
+                </SelectItem>
+                <SelectItem value="local_transition">Transição · render local</SelectItem>
               </SelectContent>
             </Select>
           </BriefField>
@@ -834,6 +852,13 @@ function ShotCard({
               }
             />
           </BriefField>
+        </div>
+        <div className="rounded-lg border bg-muted/20 p-3 text-xs leading-5">
+          <p className="font-semibold">{shot.subject}</p>
+          <p className="text-muted-foreground">
+            {shot.period || "Período contemporâneo"} · {shot.wardrobe || "Sem figurino em quadro"}
+          </p>
+          <p className="mt-1 text-muted-foreground">{shot.atmosphere}</p>
         </div>
         <BriefField label="Ambiente" htmlFor={`${shot.id}-environment`}>
           <Textarea
@@ -853,17 +878,20 @@ function ShotCard({
             onChange={(event) => onShotChange({ ...shot, action: event.target.value })}
           />
         </BriefField>
-        <BriefField label="Prompt adicional do editor" htmlFor={`${shot.id}-prompt`}>
+        <BriefField label="Prompt final do HeyGen" htmlFor={`${shot.id}-prompt`}>
           <Textarea
             id={`${shot.id}-prompt`}
             rows={3}
-            value={controls.promptOverride}
+            value={controls.promptOverride || shot.heygenPrompt}
             disabled={disabled}
             onChange={(event) =>
               onControlsChange({ ...controls, promptOverride: event.target.value })
             }
-            placeholder="Complementos visuais sem alterar a fala aprovada."
+            placeholder="Prompt visual estruturado pelo Claude, sem fala nova."
           />
+          <p className="text-[11px] text-muted-foreground">
+            Criado pelo Claude no Story Plan. Editar e salvar gera uma nova revisão do storyboard.
+          </p>
         </BriefField>
         <div className="grid gap-2 sm:grid-cols-3">
           {lockItems.map(([key, label]) => (
@@ -1337,6 +1365,8 @@ export function StoryModeEditor(props: StoryModeEditorProps) {
                 key={shot.id}
                 shot={shot}
                 controls={state.reviews[index] ?? defaultControls()}
+                characterId={state.plan?.characterBible.characterId ?? null}
+                lookId={state.plan?.characterBible.lookId ?? null}
                 disabled={pendingDisabled || Boolean(state.version?.approved)}
                 onShotChange={(nextShot) =>
                   dispatch({ type: "shot-change", index, shot: nextShot })

@@ -22,8 +22,8 @@ STORY_CONTRACT_PATH = Path(__file__).resolve().parents[2] / "shared" / "story_co
 STORY_CONTRACT_SCHEMA: dict[str, Any] = json.loads(
     STORY_CONTRACT_PATH.read_text(encoding="utf-8")
 )
-STORY_CONTRACT_VERSION = "story-contract-v1"
-STORY_PROMPT_VERSION = "story-director-v1"
+STORY_CONTRACT_VERSION = "story-contract-v2"
+STORY_PROMPT_VERSION = "story-director-v2"
 PROVIDER_STRATEGIES = ("video_agent", "direct_video", "local_compositor")
 
 
@@ -147,23 +147,29 @@ class StoryShot(StrictModel):
         "transition",
         "local_asset",
     ]
+    strategy: Literal["avatar_anchor", "cinematic_broll", "local_transition"]
     providerStrategy: Literal["video_agent", "direct_video", "local_compositor"]
+    subject: str = Field(min_length=3, max_length=400)
     durationSeconds: float = Field(gt=0, le=30)
     speech: ShotSpeech
     character: ShotCharacter
     environment: str = Field(min_length=3, max_length=500)
+    period: str = Field(max_length=160)
+    wardrobe: str = Field(max_length=300)
     action: str = Field(min_length=3, max_length=500)
     camera: ShotCamera
     lighting: str = Field(min_length=2, max_length=200)
+    atmosphere: str = Field(min_length=2, max_length=240)
     continuityKeys: list[str] = Field(min_length=1, max_length=12)
     referenceAssetIds: list[str] = Field(max_length=12)
     negativePrompt: list[str] = Field(max_length=20)
+    heygenPrompt: str = Field(min_length=40, max_length=4000)
     audioPolicy: Literal["preserve_base_narration", "mute_generated_audio"]
     estimatedCost: ShotEstimatedCost
 
 
 class StoryPlan(StrictModel):
-    contractVersion: Literal["story-contract-v1"]
+    contractVersion: Literal["story-contract-v2"]
     storyBible: StoryBible
     characterBible: CharacterBible
     visualBible: VisualBible
@@ -207,9 +213,14 @@ def _semantic_strings(plan: StoryPlan) -> list[str]:
         values.extend(
             [
                 shot.narrativePurpose,
+                shot.subject,
                 shot.environment,
+                shot.period,
+                shot.wardrobe,
                 shot.action,
                 shot.lighting,
+                shot.atmosphere,
+                shot.heygenPrompt,
             ]
         )
     return values
@@ -333,6 +344,22 @@ def validate_story_plan(
                 "PROVIDER_NOT_ALLOWED",
                 f"A estratégia '{shot.providerStrategy}' não está disponível no contexto.",
             )
+        expected_route = {
+            "avatar_anchor": ("avatar_anchor", "direct_video"),
+            "cinematic_broll": (
+                {"historical_broll", "modern_broll"},
+                "video_agent",
+            ),
+            "local_transition": ({"transition", "local_asset"}, "local_compositor"),
+        }[shot.strategy]
+        expected_types = (
+            {expected_route[0]} if isinstance(expected_route[0], str) else expected_route[0]
+        )
+        if shot.shotType not in expected_types or shot.providerStrategy != expected_route[1]:
+            raise StoryContractError(
+                "SHOT_STRATEGY_INCONSISTENT",
+                f"A estratégia de {shot.id} não corresponde ao tipo e provider confirmados.",
+            )
         unknown_assets = set(shot.referenceAssetIds) - allowed_assets
         if unknown_assets:
             raise StoryContractError(
@@ -407,6 +434,25 @@ def validate_story_plan(
         )
 
     return plan.model_dump(mode="json")
+
+
+def shot_continuity_context(plan: StoryPlan | dict[str, Any], shot_id: str) -> dict[str, Any]:
+    """Retorna uma única fonte canônica de continuidade para geração e QC."""
+    payload = plan.model_dump(mode="json") if isinstance(plan, StoryPlan) else plan
+    shot = next(
+        (candidate for candidate in payload.get("shots", []) if candidate.get("id") == shot_id),
+        None,
+    )
+    if not shot:
+        raise StoryContractError("STORY_SHOT_NOT_FOUND", f"Shot não encontrado: {shot_id}.")
+    return {
+        "character": payload.get("characterBible") or {},
+        "visual": payload.get("visualBible") or {},
+        "historical": (payload.get("storyBible") or {}).get("historicalSetting") or {},
+        "shotContinuityKeys": list(shot.get("continuityKeys") or []),
+        "shotPeriod": str(shot.get("period") or ""),
+        "shotWardrobe": str(shot.get("wardrobe") or ""),
+    }
 
 
 def story_hash(plan: dict[str, Any]) -> str:

@@ -120,3 +120,17 @@ Implementado:
 - nenhum job HeyGen criado nesta fase;
 - validação focada: 3 testes do reducer web e 18 testes Python de contrato,
   versionamento, crítica e orçamento aprovados.
+
+## Slice MVP-1 — Storyboard funcional
+
+Status: concluído.
+
+- contrato narrativo atualizado para `story-contract-v2`;
+- cada shot recebe do Claude uma estratégia MVP (`avatar_anchor`,
+  `cinematic_broll` ou `local_transition`) e um `heygenPrompt` final;
+- subject, período, figurino, atmosfera e continuidade passam pelo structured output;
+- rotas de provider são determinísticas e limitadas às capabilities confirmadas;
+- uma única função canônica fornece Character, Visual e Historical Bible para geração e QC;
+- planos v1 ativos são invalidados em vez de reutilizados silenciosamente;
+- editor permite revisar estratégia e prompt final antes de criar uma nova revisão;
+- nenhuma chamada Anthropic ou HeyGen foi executada na validação local.

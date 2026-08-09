@@ -94,7 +94,9 @@ def valid_plan() -> dict:
                 "order": 1,
                 "narrativePurpose": "Apresentar o contexto visual com cuidado.",
                 "shotType": "avatar_anchor",
-                "providerStrategy": "video_agent",
+                "strategy": "avatar_anchor",
+                "providerStrategy": "direct_video",
+                "subject": "O médico aprovado diante da feira medieval",
                 "durationSeconds": 10,
                 "speech": {
                     "mode": "avatar_speaks",
@@ -107,6 +109,8 @@ def valid_plan() -> dict:
                     "lookId": "look-medieval",
                 },
                 "environment": "Entrada de uma feira medieval movimentada",
+                "period": "Europa medieval, século XIII",
+                "wardrobe": "Túnica grafite e capa marrom de lã",
                 "action": "O médico observa as barracas com movimento discreto",
                 "camera": {
                     "framing": "plano médio",
@@ -114,9 +118,11 @@ def valid_plan() -> dict:
                     "lens": "perspectiva natural",
                 },
                 "lighting": "Manhã quente e suave",
+                "atmosphere": "Documental, investigativa e historicamente plausível",
                 "continuityKeys": ["market-v1", "wardrobe-v1"],
                 "referenceAssetIds": ["reference-doctor"],
                 "negativePrompt": ["objetos modernos", "rosto diferente"],
+                "heygenPrompt": "Photorealistic approved doctor at a medieval European market, preserving face, beard, graphite tunic and brown wool cape, warm documentary light, no modern objects or text.",
                 "audioPolicy": "preserve_base_narration",
                 "estimatedCost": {"heygenJobs": 1, "anthropicCalls": 0},
             },
@@ -125,7 +131,9 @@ def valid_plan() -> dict:
                 "order": 2,
                 "narrativePurpose": "Concluir com um apoio visual discreto.",
                 "shotType": "historical_broll",
+                "strategy": "cinematic_broll",
                 "providerStrategy": "video_agent",
+                "subject": "Frascos, ervas e tecidos apropriados para a época",
                 "durationSeconds": 10,
                 "speech": {
                     "mode": "voice_continues_from_base_scene",
@@ -138,6 +146,8 @@ def valid_plan() -> dict:
                     "lookId": None,
                 },
                 "environment": "Interior de uma botica com madeira e ervas",
+                "period": "Europa medieval, século XIII",
+                "wardrobe": "Sem personagem principal em quadro",
                 "action": "Frascos e tecidos aparecem em movimento natural",
                 "camera": {
                     "framing": "plano aberto",
@@ -145,9 +155,11 @@ def valid_plan() -> dict:
                     "lens": "perspectiva documental",
                 },
                 "lighting": "Luz lateral suave",
+                "atmosphere": "Realista, orgânica e observacional",
                 "continuityKeys": ["market-v1", "warm-light-v1"],
                 "referenceAssetIds": [],
                 "negativePrompt": ["plástico", "aparência de desenho"],
+                "heygenPrompt": "Photorealistic cinematic B-roll inside a medieval European apothecary, wood, herbs and period glassware, slow tracking camera, organic light, no plastic, electricity, text or cartoon style.",
                 "audioPolicy": "mute_generated_audio",
                 "estimatedCost": {"heygenJobs": 1, "anthropicCalls": 0},
             },
@@ -170,7 +182,7 @@ def provider_context() -> dict:
     return {
         "capabilities": {"capabilitiesVersion": "heygen-test-v1"},
         "providerCapabilitiesVersion": "heygen-test-v1",
-        "providerStrategies": ["local_compositor", "video_agent"],
+        "providerStrategies": ["direct_video", "local_compositor", "video_agent"],
     }
 
 
@@ -201,7 +213,7 @@ def test_contract_covers_every_approved_word_without_speech_text() -> None:
         valid_plan(),
         brief=brief(),
         approved_speech=SPEECH,
-        allowed_provider_strategies=["video_agent", "local_compositor"],
+        allowed_provider_strategies=["video_agent", "direct_video", "local_compositor"],
     )
 
     assert plan["shots"][0]["speech"] == {
@@ -218,7 +230,7 @@ def test_contract_covers_every_approved_word_without_speech_text() -> None:
         (lambda plan: plan["shots"][1]["speech"].update(startWordIndex=9), "SPEECH_COVERAGE_GAP"),
         (lambda plan: plan["shots"][0]["speech"].update(text="Fala inventada"), "STORY_SCHEMA_INVALID"),
         (lambda plan: plan["shots"][0].update(referenceAssetIds=["asset-inventado"]), "ASSET_ID_UNKNOWN"),
-        (lambda plan: plan["shots"][0].update(providerStrategy="direct_video"), "PROVIDER_NOT_ALLOWED"),
+        (lambda plan: plan["shots"][0].update(providerStrategy="video_agent"), "SHOT_STRATEGY_INCONSISTENT"),
         (lambda plan: plan["shots"][0].update(narrativePurpose="Prometer melhora de 42%"), "UNAUTHORIZED_NUMERIC_CLAIM"),
         (lambda plan: plan["shots"][0].update(narrativePurpose="Afirmar que a obesidade cura câncer"), "UNAUTHORIZED_MEDICAL_ASSERTION"),
     ],
@@ -232,7 +244,7 @@ def test_contract_rejects_gaps_invented_speech_claims_and_ids(mutate, code: str)
             plan,
             brief=brief(),
             approved_speech=SPEECH,
-            allowed_provider_strategies=["video_agent", "local_compositor"],
+            allowed_provider_strategies=["video_agent", "direct_video", "local_compositor"],
         )
 
     assert raised.value.code == code
@@ -337,7 +349,7 @@ def test_human_story_revision_is_versioned_idempotent_and_keeps_shot_locks() -> 
                     return_value={
                         "capabilitiesVersion": "heygen-test-v1",
                         "videoAgent": {"supported": True},
-                        "directVideo": {"supported": False},
+                        "directVideo": {"supported": True},
                     },
                 ),
             ):
