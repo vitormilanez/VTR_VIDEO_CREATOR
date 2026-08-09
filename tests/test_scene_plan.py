@@ -50,7 +50,56 @@ class ScenePlanTests(unittest.TestCase):
 
         self.assertEqual([scene["avatarId"] for scene in plan["scenes"]], ["look-close", "look-front"])
         self.assertEqual([scene["order"] for scene in plan["scenes"]], [1, 2])
+        self.assertEqual(plan["transitionStyle"], "smooth")
         self.assertEqual(server._scene_plan("script-1"), plan)
+
+    def test_scene_plan_persists_transition_and_syncs_to_new_saved_speech(self) -> None:
+        server._save_production_profile(
+            {
+                "scriptId": "script-sync",
+                "avatarId": "look-close",
+                "voiceId": "voice-1",
+                "speechMode": "natural",
+                "generationMode": "direct",
+            }
+        )
+        server._save_scene_plan(
+            "script-sync",
+            [
+                {"id": "scene-1", "text": "Texto antigo um.", "lookRole": "close"},
+                {"id": "scene-2", "text": "Texto antigo dois.", "lookRole": "front"},
+            ],
+            transition_style="dip_to_black",
+        )
+
+        synced = server._sync_scene_plan_to_saved_speech(
+            "script-sync",
+            "Texto novo de abertura. Explicação nova e segura. Encerramento novo.",
+        )
+
+        self.assertIsNotNone(synced)
+        assert synced is not None
+        self.assertEqual(synced["transitionStyle"], "dip_to_black")
+        self.assertNotIn("Texto antigo", " ".join(scene["text"] for scene in synced["scenes"]))
+        self.assertEqual(
+            " ".join(scene["text"] for scene in synced["scenes"]),
+            "Texto novo de abertura. Explicação nova e segura. Encerramento novo.",
+        )
+
+        with patch.object(
+            server,
+            "_find_script",
+            return_value={
+                "textoFalado": "Outra abertura. Outra explicação.",
+                "outroText": "Novo encerramento.",
+            },
+        ):
+            migrated = server._scene_plan_synced_to_script("script-sync")
+        assert migrated is not None
+        self.assertEqual(
+            " ".join(scene["text"] for scene in migrated["scenes"]),
+            "Outra abertura. Outra explicação. Novo encerramento.",
+        )
 
     def test_generation_plan_refreshes_stale_avatar_ids_from_current_set(self) -> None:
         old_set = server._save_avatar_set(

@@ -344,7 +344,7 @@ describe("script editor React interactions", () => {
       expect(saveScript).toHaveBeenCalledWith(
         expect.objectContaining({
           id: "script-test",
-          textoFalado: nextSpeech,
+          textoFalado: `${nextSpeech}\n\n${baseScript.outroText}`,
           titulo: baseScript.titulo,
         }),
       ),
@@ -356,7 +356,29 @@ describe("script editor React interactions", () => {
     firstRender.unmount();
     render(<RoteiroDetalhe />);
     expect(await screen.findByLabelText("Fala final")).toHaveValue(
-      `${nextSpeech}.\n\n${baseScript.outroText}`,
+      `${nextSpeech}\n\n${baseScript.outroText}`,
+    );
+  });
+
+  it("keeps an AI rewrite as the canonical speech after saving", async () => {
+    const aiSpeech = `${makeWords(96)}\n\n${baseScript.outroText}`;
+    vi.mocked(runScriptEditorAssist).mockResolvedValue(assistResult({ script: aiSpeech }));
+    await renderEditor();
+    const user = userEvent.setup();
+
+    await user.click(within(getEditor()).getByRole("button", { name: "Revisar com IA" }));
+    await waitFor(() =>
+      expect(within(getEditor()).getByLabelText("Fala final")).toHaveValue(aiSpeech),
+    );
+    await user.click(within(getEditor()).getByRole("button", { name: "Salvar" }));
+
+    await waitFor(() =>
+      expect(saveScript).toHaveBeenCalledWith(expect.objectContaining({ textoFalado: aiSpeech })),
+    );
+    expect(within(getEditor()).getByLabelText("Fala final")).toHaveValue(aiSpeech);
+    expect(useStore.getState().scripts[0]?.textoFalado).toBe(aiSpeech);
+    expect(toastMock.success).toHaveBeenCalledWith(
+      "Roteiro salvo e sincronizado com as próximas fases.",
     );
   });
 

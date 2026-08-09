@@ -887,6 +887,12 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
 
 
 AVATAR_SET_ROLES = frozenset({"primary", "front", "close", "three_quarter", "standing", "wide"})
+SCENE_TRANSITION_STYLES = frozenset({"smooth", "hard_cut", "dip_to_black"})
+
+
+def _clean_scene_transition_style(value: Any) -> str:
+    style = str(value or "smooth").strip()
+    return style if style in SCENE_TRANSITION_STYLES else "smooth"
 
 
 def _normalize_avatar_set_looks(looks: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -1090,7 +1096,12 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return saved
 
 
-def _resolve_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, Any]:
+def _resolve_scene_plan(
+    script_id: str,
+    scenes: list[dict[str, Any]],
+    *,
+    transition_style: str = "smooth",
+) -> dict[str, Any]:
     profile = _production_profile(script_id)
     if not profile:
         raise HTTPException(status_code=409, detail="Salve o perfil de produção antes do Scene Plan.")
@@ -1118,7 +1129,12 @@ def _resolve_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[st
                 "estimatedEnd": max(0, float(scene.get("estimatedEnd") or 0)),
             }
         )
-    return {"scriptId": script_id, "scenes": resolved_scenes, "updatedAt": _now()}
+    return {
+        "scriptId": script_id,
+        "scenes": resolved_scenes,
+        "transitionStyle": _clean_scene_transition_style(transition_style),
+        "updatedAt": _now(),
+    }
 
 
 def _scene_plan(script_id: str) -> dict[str, Any] | None:
@@ -1135,8 +1151,15 @@ def _scene_plan(script_id: str) -> dict[str, Any] | None:
     return json.loads(str(row["plan_json"]))
 
 
-def _save_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, Any]:
-    plan = _resolve_scene_plan(script_id, scenes)
+def _save_scene_plan(
+    script_id: str,
+    scenes: list[dict[str, Any]],
+    *,
+    transition_style: str | None = None,
+) -> dict[str, Any]:
+    stored = _scene_plan(script_id) if transition_style is None else None
+    resolved_transition = transition_style or (stored or {}).get("transitionStyle") or "smooth"
+    plan = _resolve_scene_plan(script_id, scenes, transition_style=resolved_transition)
     conn = _ai_db()
     try:
         conn.execute(
@@ -1166,7 +1189,11 @@ def _refresh_scene_plan_avatar_bindings(script_id: str) -> dict[str, Any] | None
     stored = _scene_plan(script_id)
     if not stored or not stored.get("scenes"):
         return stored
-    resolved = _resolve_scene_plan(script_id, list(stored["scenes"]))
+    resolved = _resolve_scene_plan(
+        script_id,
+        list(stored["scenes"]),
+        transition_style=str(stored.get("transitionStyle") or "smooth"),
+    )
     stored_bindings = [
         (
             str(scene.get("id") or ""),
@@ -1183,10 +1210,108 @@ def _refresh_scene_plan_avatar_bindings(script_id: str) -> dict[str, Any] | None
         )
         for scene in resolved["scenes"]
     ]
-    if stored_bindings == resolved_bindings:
+    stored_transition = str(stored.get("transitionStyle") or "")
+    if stored_bindings == resolved_bindings and stored_transition in SCENE_TRANSITION_STYLES:
         return stored
-    LOGGER.info("Scene Plan avatar bindings refreshed: script_id=%s", script_id)
-    return _save_scene_plan(script_id, list(stored["scenes"]))
+    LOGGER.info("Scene Plan refreshed: script_id=%s", script_id)
+    return _save_scene_plan(
+        script_id,
+        list(stored["scenes"]),
+        transition_style=str(stored.get("transitionStyle") or "smooth"),
+    )
+
+
+def _split_speech_for_scene_count(text: str, scene_count: int) -> list[str]:
+    """Redistribui uma fala salva sem usar IA nem manter texto antigo nas cenas."""
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return []
+    if scene_count <= 1:
+        return [clean]
+    sentences = [
+        sentence.strip()
+        for sentence in re.findall(r".+?(?:[.!?…]+(?=\s|$)|$)", clean)
+        if sentence.strip()
+    ]
+    if len(sentences) >= scene_count:
+        chunks: list[str] = []
+        for index in range(scene_count):
+            start = round(index * len(sentences) / scene_count)
+            end = round((index + 1) * len(sentences) / scene_count)
+            chunks.append(" ".join(sentences[start:end]).strip())
+        return [chunk for chunk in chunks if chunk]
+    words = clean.split()
+    target_count = min(scene_count, len(words))
+    chunks = []
+    for index in range(target_count):
+        start = round(index * len(words) / target_count)
+        end = round((index + 1) * len(words) / target_count)
+        chunks.append(" ".join(words[start:end]))
+    return chunks
+
+
+def _canonical_saved_script_speech(script: dict[str, Any]) -> str:
+    speech = str(script.get("textoFalado") or "").strip()
+    if not speech:
+        speech = "\n\n".join(
+            str(script.get(field) or "").strip()
+            for field in ("hook", "dorConflito", "explicacaoSimples", "virada", "cta")
+            if str(script.get(field) or "").strip()
+        )
+    outro = re.sub(r"\s+", " ", str(script.get("outroText") or "")).strip()
+    if outro and not speech.casefold().endswith(outro.casefold()):
+        speech = f"{speech.rstrip()}\n\n{outro}" if speech else outro
+    return speech.strip()
+
+
+def _sync_scene_plan_to_saved_speech(script_id: str, speech: str) -> dict[str, Any] | None:
+    """Mantém o Scene Plan como projeção da fala canônica recém-salva."""
+    stored = _scene_plan(script_id)
+    if not stored or not stored.get("scenes"):
+        return None
+    chunks = _split_speech_for_scene_count(speech, len(stored["scenes"]))
+    if not chunks:
+        return stored
+    scenes: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        source = stored["scenes"][min(index, len(stored["scenes"]) - 1)]
+        scenes.append(
+            {
+                **source,
+                "text": chunk,
+                "estimatedStart": 0,
+                "estimatedEnd": 0,
+            }
+        )
+    saved = _save_scene_plan(
+        script_id,
+        scenes,
+        transition_style=str(stored.get("transitionStyle") or "smooth"),
+    )
+    conn = _ai_db()
+    try:
+        conn.execute("DELETE FROM visual_plans WHERE script_id = ?", (script_id,))
+        conn.execute("DELETE FROM video_slide_renders WHERE script_id = ?", (script_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return saved
+
+
+def _scene_plan_synced_to_script(
+    script_id: str,
+    script: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    saved_script = script or _find_script(script_id)
+    plan = _refresh_scene_plan_avatar_bindings(script_id)
+    if not plan or not plan.get("scenes"):
+        return plan
+    canonical_speech = _canonical_saved_script_speech(saved_script)
+    planned_speech = " ".join(str(scene.get("text") or "") for scene in plan["scenes"])
+    normalize = lambda value: re.sub(r"\s+", " ", value).strip().casefold()
+    if canonical_speech and normalize(planned_speech) != normalize(canonical_speech):
+        return _sync_scene_plan_to_saved_speech(script_id, canonical_speech)
+    return plan
 
 
 VIDEO_VISUAL_DESIGN_SYSTEM_VERSION = "video-vertical-v1"
@@ -1621,7 +1746,12 @@ def _scene_job_batch_id(job: dict[str, Any]) -> str | None:
     return None
 
 
-def _scene_jobs_ready(script_id: str, scene_plan: dict[str, Any]) -> list[dict[str, Any]] | None:
+def _scene_jobs_ready(
+    script_id: str,
+    scene_plan: dict[str, Any],
+    *,
+    expected_final_speech_hash: str = "",
+) -> list[dict[str, Any]] | None:
     jobs = [job for job in _load_video_jobs() if job.get("scriptId") == script_id and job.get("isScene")]
     scenes = list(scene_plan.get("scenes") or [])
     expected_avatar_by_scene = {
@@ -1631,6 +1761,8 @@ def _scene_jobs_ready(script_id: str, scene_plan: dict[str, Any]) -> list[dict[s
     ready_by_batch: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for job in jobs:
         if job.get("status") != "pronto":
+            continue
+        if expected_final_speech_hash and str(job.get("finalSpeechHash") or "") != expected_final_speech_hash:
             continue
         scene_id = str(job.get("sceneId") or "")
         if scene_id not in expected_avatar_by_scene:
@@ -1701,29 +1833,33 @@ def _composed_video_file_response(job: dict[str, Any], *, download: bool) -> Fil
 
 
 def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool = False) -> dict[str, Any] | None:
-    scene_plan = _refresh_scene_plan_avatar_bindings(script_id)
+    script = _find_script(script_id)
+    scene_plan = _scene_plan_synced_to_script(script_id, script)
     if not scene_plan or not scene_plan.get("scenes"):
         if raise_when_not_ready:
             raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de compor o vídeo final.")
         return None
-    scene_jobs = _scene_jobs_ready(script_id, scene_plan)
+    editor_state = _script_editor_state(script_id, script)
+    scene_jobs = _scene_jobs_ready(
+        script_id,
+        scene_plan,
+        expected_final_speech_hash=str(editor_state.get("finalSpeechHash") or ""),
+    )
     if scene_jobs is None:
         if raise_when_not_ready:
             raise HTTPException(status_code=409, detail="Todas as cenas precisam estar prontas antes da composição final.")
         return None
-    visual_plan = _get_visual_plan(script_id)
     scene_count = len(scene_plan["scenes"])
-    if scene_count > 1 and (not visual_plan or not visual_plan.get("scenes")):
-        if raise_when_not_ready:
-            raise HTTPException(status_code=409, detail="Salve o Visual Plan antes de compor o vídeo final.")
-        return None
-    visual_plan = visual_plan or {"scenes": []}
+    transition_style = _clean_scene_transition_style(scene_plan.get("transitionStyle"))
+    visual_plan = {"scenes": []}
     production_profile = _production_profile(script_id) or {}
     music_track_id = str(production_profile.get("musicTrackId") or "").strip() or None
     music_track = _music_track(music_track_id)
     music_volume = float(production_profile.get("musicVolume") or 0.12)
     music_path = _music_track_path(music_track_id) if music_track else None
-    required_supports = _required_visual_support_count(scene_count)
+    # A troca de look agora é uma transição de vídeo. Cartelas intermediárias
+    # não entram mais na composição do fluxo por cenas.
+    required_supports = 0
     visual_by_scene = {
         str(item.get("sceneId")): item.get("visual")
         for item in visual_plan.get("scenes") or []
@@ -1737,8 +1873,8 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
             {
                 "scriptId": script_id,
                 "sources": source_ids,
-                "visualPlanUpdatedAt": visual_plan.get("updatedAt"),
                 "requiredSupportSlides": required_supports,
+                "transitionStyle": transition_style,
                 "musicTrackId": music_track_id,
                 "musicVolume": music_volume if music_track_id else None,
             },
@@ -1763,6 +1899,7 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
         "sourceSceneJobs": source_ids,
         "sceneCount": scene_count,
         "visualCount": required_supports,
+        "transitionStyle": transition_style,
         "isComposed": True,
     }
     job.update(
@@ -1775,6 +1912,7 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
             "sourceSceneJobs": source_ids,
             "sceneCount": scene_count,
             "visualCount": required_supports,
+            "transitionStyle": transition_style,
             "isComposed": True,
             "submissionState": "local_composing",
         }
@@ -1823,6 +1961,7 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
             output_path,
             background_music_path=music_path,
             background_music_volume=music_volume,
+            transition_style=transition_style,
         )
         final_duration = _probe_video_duration(output_path)
         job.update(
@@ -3765,6 +3904,7 @@ class ScenePlanSceneIn(BaseModel):
 
 class ScenePlanIn(BaseModel):
     scenes: list[ScenePlanSceneIn] = Field(min_length=1, max_length=30)
+    transitionStyle: Literal["smooth", "hard_cut", "dip_to_black"] = "smooth"
 
 
 class SceneDirectorIn(BaseModel):
@@ -6237,14 +6377,17 @@ def delete_avatar_set(avatar_set_id: str) -> dict:
 
 @app.get("/api/scripts/{script_id}/scene-plan")
 def get_script_scene_plan(script_id: str) -> dict:
-    _find_script(script_id)
-    return {"ok": True, "scenePlan": _refresh_scene_plan_avatar_bindings(script_id)}
+    return {"ok": True, "scenePlan": _scene_plan_synced_to_script(script_id)}
 
 
 @app.put("/api/scripts/{script_id}/scene-plan")
 def save_script_scene_plan(script_id: str, payload: ScenePlanIn) -> dict:
     _find_script(script_id)
-    plan = _save_scene_plan(script_id, [scene.model_dump() for scene in payload.scenes])
+    plan = _save_scene_plan(
+        script_id,
+        [scene.model_dump() for scene in payload.scenes],
+        transition_style=payload.transitionStyle,
+    )
     return {"ok": True, "scenePlan": plan}
 
 
@@ -6292,7 +6435,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
             final_confirmed=payload.confirmed,
         )
         script = authorization["script"]
-        scene_plan = _refresh_scene_plan_avatar_bindings(script_id)
+        scene_plan = _scene_plan_synced_to_script(script_id, script)
         profile = _production_profile(script_id)
         if not scene_plan or not profile or not profile.get("voiceId"):
             raise _paid_error(
@@ -6337,7 +6480,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 "optimizePronunciation": payload.optimizePronunciation,
                 "spokenText": request.spoken_text,
                 "sceneCount": generation.scene_count,
-                "cutPolicy": "hard_cut",
+                "cutPolicy": _clean_scene_transition_style(scene_plan.get("transitionStyle")),
                 "avatarSetId": profile.get("avatarSetId"),
             }
             reserved_job = {
@@ -11911,6 +12054,7 @@ def update_script(item_id: str, payload: ScriptIn) -> dict:
 
     item_id = payload.id or item_id
     with _paid_generation_lock(item_id):
+        previous_script = _find_script(item_id)
         row = [
             _FAMILIA.get(payload.categoria, "Educativo"), payload.tema, payload.titulo,
             payload.hook, payload.dorConflito, payload.explicacaoSimples, payload.virada,
@@ -11938,6 +12082,10 @@ def update_script(item_id: str, payload: ScriptIn) -> dict:
         _update_snapshot_row("roteiros", item_id, raw)
         saved_script = map_scripts([raw])[0]
         _script_editor_state(item_id, saved_script)
+        previous_speech = re.sub(r"\s+", " ", _canonical_saved_script_speech(previous_script)).strip()
+        saved_speech = re.sub(r"\s+", " ", _canonical_saved_script_speech(saved_script)).strip()
+        if previous_speech != saved_speech:
+            _sync_scene_plan_to_saved_speech(item_id, _canonical_saved_script_speech(saved_script))
     return {"ok": True, "script": saved_script}
 
 

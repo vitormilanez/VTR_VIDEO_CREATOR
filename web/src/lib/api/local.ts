@@ -782,9 +782,12 @@ export interface ScenePlanScene {
   estimatedEnd: number;
 }
 
+export type SceneTransitionStyle = "smooth" | "hard_cut" | "dip_to_black";
+
 export interface ScenePlan {
   scriptId: string;
   scenes: ScenePlanScene[];
+  transitionStyle: SceneTransitionStyle;
   updatedAt: string;
 }
 
@@ -1314,10 +1317,11 @@ export async function saveScenePlan(
     estimatedStart: number;
     estimatedEnd: number;
   }>,
+  transitionStyle: SceneTransitionStyle = "smooth",
 ): Promise<ScenePlan> {
   const response = await requestJson<{ ok: boolean; scenePlan: ScenePlan }>(
     `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan`,
-    { method: "PUT", body: JSON.stringify({ scenes }) },
+    { method: "PUT", body: JSON.stringify({ scenes, transitionStyle }) },
   );
   return response.scenePlan;
 }

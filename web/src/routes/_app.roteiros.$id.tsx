@@ -30,7 +30,6 @@ import {
   ProductionReadinessCard,
 } from "@/components/script-editor/production-readiness";
 import { ScenePlanEditor } from "@/components/script-editor/scene-plan-editor";
-import { VisualPlanDirector } from "@/components/script-editor/visual-plan-director";
 import { StoryModeEditor } from "@/components/script-editor/story-mode-editor";
 import {
   DEFAULT_OUTRO,
@@ -53,14 +52,10 @@ import {
   fetchScriptEditorState,
   fetchSceneGenerationPlan,
   fetchScenePlan,
-  fetchVideoSlideRender,
-  fetchVisualPlan,
-  generateVisualDirection,
   runScriptEditorAssist,
   saveProductionProfile,
   saveScriptEditorState,
   saveScript,
-  renderVideoSlides,
   submitSceneGeneration,
   type AvatarSet,
   type AvatarSetLook,
@@ -70,8 +65,6 @@ import {
   type GenerationMode,
   type ScenePlan,
   type SceneGenerationResult,
-  type VideoSlideRender,
-  type VisualPlan,
   type VoiceMood,
 } from "@/lib/api/local";
 import {
@@ -238,11 +231,6 @@ function RoteiroDetalhe() {
     null,
   );
   const [sceneGenerationPlanLoading, setSceneGenerationPlanLoading] = useState(false);
-  const [visualPlan, setVisualPlan] = useState<VisualPlan | null>(null);
-  const [visualPlanLoading, setVisualPlanLoading] = useState(true);
-  const [transitionSlideGenerating, setTransitionSlideGenerating] = useState(false);
-  const [videoSlideRender, setVideoSlideRender] = useState<VideoSlideRender | null>(null);
-  const [videoSlideRenderLoading, setVideoSlideRenderLoading] = useState(true);
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(
     initialCaptureDuration ?? 45,
@@ -300,6 +288,7 @@ function RoteiroDetalhe() {
   const editorRevisionRef = useRef(0);
   const editorRequestIdRef = useRef(0);
   const editorMountedRef = useRef(true);
+  const skipScriptHydrationSignatureRef = useRef<string | null>(null);
   const existingJobs = useMemo(
     () =>
       videoJobs
@@ -362,6 +351,11 @@ function RoteiroDetalhe() {
 
   useEffect(() => {
     if (script) {
+      const signature = editorScriptSignature(script);
+      if (skipScriptHydrationSignatureRef.current === signature) {
+        skipScriptHydrationSignatureRef.current = null;
+        return;
+      }
       editorRevisionRef.current += 1;
       setDraft(script);
       setTitleBeforeSuggestion(script.titulo);
@@ -519,16 +513,6 @@ function RoteiroDetalhe() {
       .then((plan) => setScenePlan(plan))
       .catch(() => toast.error("Nao consegui carregar o Scene Plan deste roteiro."))
       .finally(() => setScenePlanLoading(false));
-    setVisualPlanLoading(true);
-    fetchVisualPlan(id)
-      .then((plan) => setVisualPlan(plan))
-      .catch(() => toast.error("Nao consegui carregar a direção visual deste roteiro."))
-      .finally(() => setVisualPlanLoading(false));
-    setVideoSlideRenderLoading(true);
-    fetchVideoSlideRender(id)
-      .then((render) => setVideoSlideRender(render))
-      .catch(() => toast.error("Nao consegui carregar os previews visuais deste roteiro."))
-      .finally(() => setVideoSlideRenderLoading(false));
     const defaults = readStudioDefaults();
     if (defaults?.orientation) setOrientation(defaults.orientation);
     if (typeof defaults?.captions === "boolean") setCaptions(defaults.captions);
@@ -620,12 +604,6 @@ function RoteiroDetalhe() {
     heygenAgentMode ||
     avatarMode === "single" ||
     Boolean(avatarMode === "set" && sceneGenerationPlan);
-  const requiredVisualCount = scenePlan ? Math.max(0, scenePlan.scenes.length - 1) : 0;
-  const visualProductionReady =
-    heygenAgentMode ||
-    avatarMode === "single" ||
-    requiredVisualCount === 0 ||
-    Boolean(visualPlan && (videoSlideRender?.renderedCount ?? 0) >= requiredVisualCount);
   const selectedAvatarReady =
     heygenAgentMode || avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
   const sceneRoles = useMemo<AvatarSetRole[]>(
@@ -656,8 +634,7 @@ function RoteiroDetalhe() {
     paidVersionReady &&
     editorGenerationGate.allowed &&
     selectedAvatarReady &&
-    productionModeReady &&
-    visualProductionReady;
+    productionModeReady;
 
   function chooseAvatar(nextAvatarId: string) {
     setAvatarMode("single");
@@ -859,6 +836,49 @@ function RoteiroDetalhe() {
     }
   }
 
+  async function persistCurrentScript() {
+    if (!draft) throw new Error("Roteiro não carregado.");
+    const canonicalText = ensureNarrationOutro(displayText, outroText);
+    const requested = {
+      ...draft,
+      textoFalado: canonicalText,
+      outroText,
+    };
+    const serverSaved = await saveScript(requested);
+    if (normalizeScriptText(serverSaved.textoFalado || "") !== normalizeScriptText(canonicalText)) {
+      throw new Error("O servidor não confirmou a nova fala. O texto atual foi mantido no editor.");
+    }
+    const saved: Script = {
+      ...serverSaved,
+      textoFalado: canonicalText,
+      outroText,
+    };
+    skipScriptHydrationSignatureRef.current = editorScriptSignature(saved);
+    updateScript(saved.id, saved);
+    setDraft(saved);
+    setDisplayText(canonicalText);
+    setNarrationText(canonicalText);
+    setSpokenText("");
+    setPreviousAiScript(null);
+    editorRevisionRef.current += 1;
+
+    const [versionState, syncedScenePlan] = await Promise.all([
+      fetchScriptEditorState(saved.id),
+      fetchScenePlan(saved.id).catch(() => scenePlan),
+    ]);
+    setScenePlan(syncedScenePlan);
+    setHumanReviewApproved(versionState.humanReviewApproved);
+    const version = {
+      scriptRevision: versionState.scriptRevision,
+      finalSpeechHash: versionState.finalSpeechHash ?? "",
+      contractVersion: versionState.contractVersion,
+    };
+    setPaidScriptVersion(version);
+    setEditorSchemaValid(true);
+    setEditorTechnicalError(null);
+    return { saved, version };
+  }
+
   const complianceFields = {
     titulo: draft.titulo,
     hook: draft.hook,
@@ -893,15 +913,13 @@ function RoteiroDetalhe() {
                     ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
                     : !heygenAgentMode && avatarMode === "set" && !productionModeReady
                       ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
-                      : !heygenAgentMode && avatarMode === "set" && !visualProductionReady
-                        ? `Clique em "Fazer tudo com Claude" para gerar e renderizar ${requiredVisualCount} slide(s) de transição.`
-                        : !avatarId
-                          ? "Selecione um avatar pronto."
-                          : !voiceId
-                            ? "Selecione uma voz."
-                            : saving
-                              ? "Salvando roteiro."
-                              : null;
+                      : !avatarId
+                        ? "Selecione um avatar pronto."
+                        : !voiceId
+                          ? "Selecione uma voz."
+                          : saving
+                            ? "Salvando roteiro."
+                            : null;
   const productionChecklist = [
     {
       label: "Roteiro revisado",
@@ -968,23 +986,20 @@ function RoteiroDetalhe() {
               ? `${scenePlan.scenes.length} cena(s) salvas.`
               : 'Clique em "Fazer tudo com Claude".',
     },
-    {
-      label: "Slide de transição",
-      ready:
-        heygenAgentMode ||
-        avatarMode === "single" ||
-        requiredVisualCount === 0 ||
-        visualProductionReady,
-      detail: cinematicMode
-        ? "O Cinematic cria os apoios dentro do próprio vídeo."
-        : heygenAgentMode
-          ? "O HeyGen cria os visuais dentro do próprio vídeo."
-          : avatarMode === "single" || requiredVisualCount === 0
-            ? "Não obrigatório para este formato."
-            : visualProductionReady
-              ? `${requiredVisualCount} apoio(s) renderizado(s).`
-              : `Falta gerar/renderizar ${requiredVisualCount} slide(s) com Claude.`,
-    },
+    ...(!heygenAgentMode && avatarMode === "set" && scenePlan && scenePlan.scenes.length > 1
+      ? [
+          {
+            label: "Transição",
+            ready: true,
+            detail:
+              scenePlan.transitionStyle === "hard_cut"
+                ? "Corte seco entre os looks."
+                : scenePlan.transitionStyle === "dip_to_black"
+                  ? "Fade escuro entre os looks."
+                  : "Transição suave entre os looks.",
+          },
+        ]
+      : []),
     {
       label: "Duração",
       ready: durationAssessment.status !== "blocking",
@@ -1031,18 +1046,9 @@ function RoteiroDetalhe() {
       let scriptToSend = script;
       let versionToSend = paidScriptVersion;
       if (dirty) {
-        const saved = await saveScript({ ...draft, textoFalado: displayText, outroText });
-        updateScript(saved.id, saved);
-        setDraft(saved);
-        scriptToSend = saved;
-        const versionState = await fetchScriptEditorState(saved.id);
-        setHumanReviewApproved(versionState.humanReviewApproved);
-        versionToSend = {
-          scriptRevision: versionState.scriptRevision,
-          finalSpeechHash: versionState.finalSpeechHash ?? "",
-          contractVersion: versionState.contractVersion,
-        };
-        setPaidScriptVersion(versionToSend);
+        const persisted = await persistCurrentScript();
+        scriptToSend = persisted.saved;
+        versionToSend = persisted.version;
       }
       if (avatarMode === "set" && generationMode === "direct") {
         await saveProductionProfile(scriptToSend.id, {
@@ -1172,59 +1178,12 @@ function RoteiroDetalhe() {
     if (!draft) return;
     setSaving(true);
     try {
-      const saved = await saveScript({
-        ...draft,
-        textoFalado: displayText,
-        outroText,
-      });
-      updateScript(saved.id, saved);
-      setDraft(saved);
-      setNarrationText(displayText);
-      const versionState = await fetchScriptEditorState(saved.id);
-      setHumanReviewApproved(versionState.humanReviewApproved);
-      setPaidScriptVersion({
-        scriptRevision: versionState.scriptRevision,
-        finalSpeechHash: versionState.finalSpeechHash ?? "",
-        contractVersion: versionState.contractVersion,
-      });
-      setEditorSchemaValid(true);
-      setEditorTechnicalError(null);
-      toast.success("Roteiro salvo no Sheets.");
+      await persistCurrentScript();
+      toast.success("Roteiro salvo e sincronizado com as próximas fases.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel salvar o roteiro.");
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function gerarSlidesTransicao(savedPlan: ScenePlan) {
-    setTransitionSlideGenerating(true);
-    try {
-      const result = await generateVisualDirection(id, {
-        displayText: displayText || narrationText,
-        spokenText,
-        durationSeconds,
-        tone: performancePlan?.tone,
-        pace: performancePlan?.pace,
-        emotion: performancePlan?.emotion,
-      });
-      setVisualPlan(result.visualPlan);
-      const rendered = await renderVideoSlides(id);
-      setVideoSlideRender(rendered);
-      const normalizedPlan = await fetchVisualPlan(id);
-      if (normalizedPlan) setVisualPlan(normalizedPlan);
-      toast.success(
-        savedPlan.scenes.length > 2
-          ? "Slides de transição gerados e renderizados."
-          : "Slide de transição gerado e renderizado.",
-      );
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Nao foi possivel gerar slide de transição.",
-      );
-      throw error;
-    } finally {
-      setTransitionSlideGenerating(false);
     }
   }
 
@@ -1324,18 +1283,9 @@ function RoteiroDetalhe() {
       let scriptToSend = script;
       let versionToSend = paidScriptVersion;
       if (dirty) {
-        const saved = await saveScript({ ...draft, textoFalado: displayText, outroText });
-        updateScript(saved.id, saved);
-        setDraft(saved);
-        scriptToSend = saved;
-        const versionState = await fetchScriptEditorState(saved.id);
-        setHumanReviewApproved(versionState.humanReviewApproved);
-        versionToSend = {
-          scriptRevision: versionState.scriptRevision,
-          finalSpeechHash: versionState.finalSpeechHash ?? "",
-          contractVersion: versionState.contractVersion,
-        };
-        setPaidScriptVersion(versionToSend);
+        const persisted = await persistCurrentScript();
+        scriptToSend = persisted.saved;
+        versionToSend = persisted.version;
       }
       const job = await createHeyGenPreview(scriptToSend.id, {
         avatarId,
@@ -1996,7 +1946,7 @@ function RoteiroDetalhe() {
                       <Film className="h-4 w-4 text-primary" /> Produção guiada pelo app
                     </span>
                     <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-                      Usa cenas, trocas de look e slides de transição definidos aqui.
+                      Usa cenas, trocas de look e a transição escolhida aqui.
                     </span>
                   </button>
                   <button
@@ -2348,7 +2298,7 @@ function RoteiroDetalhe() {
                     ? "Briefing exclusivo do Cinematic. Ele não altera Scene Plan, slides ou o Video Agent comum."
                     : generationMode === "video_agent"
                       ? "O Video Agent comum cria a edição sem receber nenhuma direção cinematic."
-                      : "Depois de escolher duração e avatar, deixe o Claude organizar cenas, cortes de look e slide de transição."
+                      : "Depois de escolher duração e avatar, deixe o Claude organizar as cenas e escolha a transição entre os looks."
               }
             />
             <div className="mt-4">
@@ -2425,23 +2375,7 @@ function RoteiroDetalhe() {
                     durationSeconds={durationSeconds}
                     performancePlan={performancePlan}
                     availableRoles={sceneRoles}
-                    transitionSlideGenerating={transitionSlideGenerating}
                     onSaved={setScenePlan}
-                    onGenerateTransitionSlides={gerarSlidesTransicao}
-                  />
-                  <VisualPlanDirector
-                    scriptId={id}
-                    scenePlan={scenePlan}
-                    visualPlan={visualPlan}
-                    loading={visualPlanLoading}
-                    displayText={displayText || narrationText}
-                    spokenText={spokenText}
-                    durationSeconds={durationSeconds}
-                    performancePlan={performancePlan}
-                    onSaved={setVisualPlan}
-                    videoSlideRender={videoSlideRender}
-                    videoSlideRenderLoading={videoSlideRenderLoading}
-                    onRendered={setVideoSlideRender}
                   />
                   <Accordion type="single" collapsible className="mt-3">
                     <AccordionItem value="scene-generation-details">
@@ -2747,7 +2681,7 @@ function buildNarrationText(script: Script, outro = DEFAULT_OUTRO): string {
   // Se o roteiro ja veio com o texto falado gerado pela IA (fluxo com tom
   // editorial), usa esse texto pronto em vez de remontar as partes.
   if (script.textoFalado?.trim()) {
-    return normalizeNarrationOutro(script.textoFalado.trim(), outro);
+    return ensureNarrationOutro(script.textoFalado, outro);
   }
   const body = [
     script.hook,
@@ -2760,6 +2694,20 @@ function buildNarrationText(script: Script, outro = DEFAULT_OUTRO): string {
     .filter(Boolean)
     .join("\n\n");
   return normalizeNarrationOutro(body || outro, outro);
+}
+
+function ensureNarrationOutro(text: string, outro: string): string {
+  const cleanText = text.trim();
+  const cleanOutro = outro.replace(/\s+/g, " ").trim();
+  if (!cleanOutro || !cleanText) return cleanText || cleanOutro;
+  if (cleanText.toLocaleLowerCase("pt-BR").endsWith(cleanOutro.toLocaleLowerCase("pt-BR"))) {
+    return cleanText;
+  }
+  return `${cleanText}\n\n${cleanOutro}`;
+}
+
+function editorScriptSignature(script: Script): string {
+  return JSON.stringify(script);
 }
 
 function Preview({ label, text, palavras }: { label: string; text: string; palavras: string[] }) {

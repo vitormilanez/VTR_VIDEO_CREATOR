@@ -19,7 +19,30 @@ import {
   saveScenePlan,
   type AvatarSetRole,
   type ScenePlan,
+  type SceneTransitionStyle,
 } from "@/lib/api/local";
+
+const TRANSITION_OPTIONS: Array<{
+  value: SceneTransitionStyle;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "smooth",
+    label: "Suave",
+    description: "Dissolve rapidamente entre os dois looks.",
+  },
+  {
+    value: "hard_cut",
+    label: "Corte seco",
+    description: "Troca imediata, com mais ritmo e energia.",
+  },
+  {
+    value: "dip_to_black",
+    label: "Fade escuro",
+    description: "Passagem curta pelo preto para marcar a virada.",
+  },
+];
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -144,9 +167,7 @@ export function ScenePlanEditor({
   durationSeconds,
   performancePlan,
   availableRoles,
-  transitionSlideGenerating = false,
   onSaved,
-  onGenerateTransitionSlides,
 }: {
   scriptId: string;
   loading: boolean;
@@ -162,11 +183,10 @@ export function ScenePlanEditor({
     recommendedVoiceSpeed: number;
   } | null;
   availableRoles: AvatarSetRole[];
-  transitionSlideGenerating?: boolean;
   onSaved: (plan: ScenePlan) => void;
-  onGenerateTransitionSlides?: (plan: ScenePlan) => Promise<void>;
 }) {
   const [scenes, setScenes] = useState<EditableScene[]>([]);
+  const [transitionStyle, setTransitionStyle] = useState<SceneTransitionStyle>("smooth");
   const [saving, setSaving] = useState(false);
   const [directing, setDirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -179,6 +199,7 @@ export function ScenePlanEditor({
         ? scenePlanToEditableScenes(plan, availableRoles)
         : defaultSceneDraft(fallbackText, availableRoles),
     );
+    setTransitionStyle(plan?.transitionStyle || "smooth");
     setError(null);
   }, [availableRoles, fallbackText, loading, plan]);
 
@@ -275,7 +296,7 @@ export function ScenePlanEditor({
     setSaving(true);
     setError(null);
     try {
-      const saved = await saveScenePlan(scriptId, targetScenes);
+      const saved = await saveScenePlan(scriptId, targetScenes, transitionStyle);
       onSaved(saved);
       setScenes(scenePlanToEditableScenes(saved, availableRoles));
       if (showToast) toast.success("Scene Plan salvo.");
@@ -292,24 +313,6 @@ export function ScenePlanEditor({
 
   async function save() {
     await persistScenes(true);
-  }
-
-  async function generateTransitionSlides() {
-    if (!onGenerateTransitionSlides) return;
-    const saved = await persistScenes(false);
-    if (!saved) return;
-    setDirectionNotice(null);
-    setError(null);
-    try {
-      await onGenerateTransitionSlides(saved);
-      setDirectionNotice(
-        saved.scenes.length > 2
-          ? "Claude gerou os slides de transição. Revise a Direção visual dos apoios abaixo."
-          : "Claude gerou o slide de transição. Revise a Direção visual dos apoios abaixo.",
-      );
-    } catch {
-      setError("Nao foi possivel gerar o slide de transição com Claude.");
-    }
   }
 
   async function organizeEverythingWithClaude() {
@@ -337,12 +340,9 @@ export function ScenePlanEditor({
             }));
       const saved = await persistScenes(false, nextScenes);
       if (!saved) return;
-      if (onGenerateTransitionSlides && saved.scenes.length > 1) {
-        await onGenerateTransitionSlides(saved);
-      }
       setDirectionNotice(
         saved.scenes.length > 1
-          ? "Claude organizou as cenas, salvou o plano e preparou o slide de transição."
+          ? "Claude organizou as cenas e manteve a transição escolhida entre os looks."
           : "Claude organizou e salvou o plano de cenas.",
       );
     } catch (directionError) {
@@ -362,8 +362,8 @@ export function ScenePlanEditor({
         <div>
           <h4 className="text-xs font-semibold">Claude organiza o vídeo</h4>
           <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-            Você escolhe duração e avatar. O Claude divide a fala, alterna os looks e cria o slide
-            entre as cenas.
+            Você escolhe duração e avatar. O Claude divide a fala e alterna os looks sem inserir
+            cartela entre as cenas.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -372,12 +372,10 @@ export function ScenePlanEditor({
             size="sm"
             variant="secondary"
             onClick={() => void organizeEverythingWithClaude()}
-            disabled={loading || directing || transitionSlideGenerating}
+            disabled={loading || directing}
           >
             <Sparkles className="h-3.5 w-3.5" />{" "}
-            {directing || transitionSlideGenerating
-              ? "Claude organizando..."
-              : "Fazer tudo com Claude"}
+            {directing ? "Claude organizando..." : "Fazer tudo com Claude"}
           </Button>
           {scenes.length !== 2 && availableRoles.length >= 2 ? (
             <Button type="button" size="sm" variant="outline" onClick={useTwoScenes}>
@@ -391,9 +389,42 @@ export function ScenePlanEditor({
       </div>
       <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
         <span className="font-semibold text-foreground">Fluxo automático:</span> 2 cenas com
-        posições diferentes, 1 slide de transição renderizado e checklist final antes de enviar ao
-        HeyGen.
+        posições diferentes, transição direta entre os looks e checklist final antes de enviar ao
+        HeyGen. Nenhuma cartela intermediária é gerada.
       </div>
+      {scenes.length > 1 ? (
+        <fieldset className="space-y-2">
+          <legend className="text-xs font-semibold">Transição entre as cenas</legend>
+          <div
+            className="grid gap-2 sm:grid-cols-3"
+            role="radiogroup"
+            aria-label="Transição entre as cenas"
+          >
+            {TRANSITION_OPTIONS.map((option) => {
+              const selected = transitionStyle === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => setTransitionStyle(option.value)}
+                  className={`rounded-lg border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
+                    selected
+                      ? "border-primary bg-primary/5 shadow-sm"
+                      : "bg-background hover:border-primary/40"
+                  }`}
+                >
+                  <span className="block text-xs font-semibold">{option.label}</span>
+                  <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                    {option.description}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </fieldset>
+      ) : null}
       {loading ? (
         <p className="text-xs text-muted-foreground">Carregando Scene Plan...</p>
       ) : (
@@ -473,26 +504,16 @@ export function ScenePlanEditor({
                 </div>
               </div>
               {index < scenes.length - 1 ? (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2">
+                <div className="rounded-lg border border-dashed bg-muted/30 px-3 py-2">
                   <div>
-                    <div className="text-xs font-semibold text-status-info">
+                    <div className="text-xs font-semibold">
                       Transição Cena {index + 1} → Cena {index + 2}
                     </div>
                     <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-                      O Claude cria este slide para aparecer durante a fala, antes do próximo look
-                      entrar.
+                      {TRANSITION_OPTIONS.find((option) => option.value === transitionStyle)?.label}
+                      : troca direta de look, sem slide intermediário.
                     </p>
                   </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => void generateTransitionSlides()}
-                    disabled={saving || transitionSlideGenerating || !onGenerateTransitionSlides}
-                  >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    {transitionSlideGenerating ? "Claude gerando..." : "Gerar slide de transição"}
-                  </Button>
                 </div>
               ) : null}
             </div>
