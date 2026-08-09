@@ -134,3 +134,29 @@ Status: concluído.
 - planos v1 ativos são invalidados em vez de reutilizados silenciosamente;
 - editor permite revisar estratégia e prompt final antes de criar uma nova revisão;
 - nenhuma chamada Anthropic ou HeyGen foi executada na validação local.
+
+## Slice MVP-2 — Geração individual por shot
+
+Status: concluído.
+
+- cada card aprovado expõe somente “Gerar shot” ou “Refazer shot”, nunca geração em lote;
+- a reserva revalida Story Hash, Prompt Hash, Budget Hash, aprovação, capability e teto
+  de custo imediatamente antes do provider;
+- `cinematic_broll` envia ao Video Agent exatamente o `heygenPrompt` aprovado;
+- `avatar_anchor` usa Direct Video com apenas o trecho aprovado da fala e a identidade
+  já selecionada;
+- `local_transition` é renderizado com FFmpeg local e não consome job HeyGen;
+- gerações têm revisão, chave idempotente, custo estimado, job remoto, arquivo local,
+  thumbnail e estados persistentes;
+- repetição da mesma chave não duplica provider, e submissão incerta bloqueia uma nova
+  tentativa até verificação manual;
+- refazer um shot preserva os arquivos e revisões dos demais;
+- interface mostra status e preview por shot e mantém edição bloqueada somente depois
+  da aprovação do plano;
+- validação focada: 24 testes Python e typecheck do frontend aprovados, sem chamadas
+  reais a Anthropic ou HeyGen.
+
+## Próximos slices MVP
+
+- MVP-3 — compositor final com vídeo por shot, narração contínua, legendas e música;
+- MVP-4 — fixture medieval, testes P0 e validação final única da suíte completa.

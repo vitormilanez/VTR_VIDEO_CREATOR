@@ -576,6 +576,33 @@ export interface StoryShotRecord {
   };
   status: "review" | "approved" | string;
   shotRevision: number;
+  currentGenerationId?: string | null;
+  thumbnailPath?: string | null;
+  currentGeneration?: StoryShotGeneration | null;
+}
+
+export interface StoryShotGeneration {
+  id: string;
+  storyShotId: string;
+  storyVersionId: string;
+  shotRevision: number;
+  strategy: StoryPlanShot["strategy"];
+  provider: StoryPlanShot["providerStrategy"];
+  prompt: string;
+  spokenText: string;
+  avatarId: string | null;
+  durationSeconds: number;
+  continuity: Record<string, unknown>;
+  idempotencyKey: string;
+  providerJobId: string | null;
+  outputPath: string | null;
+  outputUrl: string | null;
+  status: "ready" | "generating" | "submitted" | "completed" | "failed" | "needs_regeneration";
+  retrySafe: boolean;
+  estimatedCostUsd: number | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface StoryBudgetIssue {
@@ -1148,6 +1175,50 @@ export async function approveStoryVersion(
       }),
     },
   );
+}
+
+export async function generateStoryShot(
+  version: StoryVersion,
+  shot: StoryShotRecord,
+  critique: StoryCritiqueRecord,
+  regenerate = false,
+): Promise<{ generation: StoryShotGeneration; deduplicated: boolean; ok: boolean }> {
+  const nextRevision = (shot.currentGeneration?.shotRevision ?? 0) + 1;
+  const response = await requestJson<{
+    generation: StoryShotGeneration;
+    deduplicated: boolean;
+    ok: boolean;
+  }>(`/api/story-shots/${encodeURIComponent(shot.id)}/generate`, {
+    method: "POST",
+    body: JSON.stringify({
+      expectedStoryHash: version.storyHash,
+      expectedPromptHash: shot.promptHash,
+      expectedBudgetHash: critique.budget.budgetHash,
+      idempotencyKey: `story-shot:${shot.id}:revision:${nextRevision}`,
+      regenerate,
+      confirmed: true,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(response.generation.error || "O provider não confirmou a geração do shot.");
+  }
+  return response;
+}
+
+export async function refreshStoryShot(generationId: string): Promise<StoryShotGeneration> {
+  const response = await requestJson<{ ok: boolean; generation: StoryShotGeneration }>(
+    `/api/story-shot-generations/${encodeURIComponent(generationId)}/refresh`,
+    { method: "POST" },
+  );
+  return response.generation;
+}
+
+export function storyShotMediaUrl(generation: StoryShotGeneration, thumbnail = false) {
+  const path = thumbnail
+    ? `/api/story-shot-generations/${encodeURIComponent(generation.id)}/thumbnail`
+    : generation.outputUrl ||
+      `/api/story-shot-generations/${encodeURIComponent(generation.id)}/file`;
+  return /^https?:\/\//.test(path) ? path : `${BASE}${path}`;
 }
 
 export async function fetchMusicTracks(): Promise<MusicTrack[]> {

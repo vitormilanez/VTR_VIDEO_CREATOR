@@ -38,7 +38,9 @@ import {
   critiqueStoryVersion,
   fetchHeyGenProviderCapabilities,
   fetchStoryProject,
+  generateStoryShot,
   planStory,
+  refreshStoryShot,
   reviseStoryVersion,
   saveStoryBrief,
   type HeyGenProviderCapabilities,
@@ -49,10 +51,12 @@ import {
   type StoryProject,
   type StoryShotRecord,
   type StoryVersion,
+  storyShotMediaUrl,
 } from "@/lib/api/local";
 import { cn } from "@/lib/utils";
 
-type RequestName = "save" | "plan" | "revise" | "critique" | "approve" | null;
+type RequestName =
+  "save" | "plan" | "revise" | "critique" | "approve" | "generate" | "refresh" | null;
 type ShotControls = StoryShotRecord["controls"];
 
 interface StorySnapshot {
@@ -759,25 +763,35 @@ function BibleCard({
 function ShotCard({
   shot,
   controls,
+  record,
   characterId,
   lookId,
   disabled,
+  generationDisabled,
   onShotChange,
   onControlsChange,
+  onGenerate,
+  onRefresh,
 }: {
   shot: StoryPlanShot;
   controls: ShotControls;
+  record?: StoryShotRecord;
   characterId: string | null;
   lookId: string | null;
   disabled: boolean;
+  generationDisabled: boolean;
   onShotChange: (shot: StoryPlanShot) => void;
   onControlsChange: (controls: ShotControls) => void;
+  onGenerate: (regenerate: boolean) => void;
+  onRefresh: () => void;
 }) {
   const lockItems = [
     ["lockIdentity", "Travar identidade"],
     ["lockWardrobe", "Travar figurino"],
     ["lockEnvironment", "Travar ambiente"],
   ] as const;
+  const generation = record?.currentGeneration;
+  const canGenerate = !generationDisabled && controls.approved && Boolean(record);
   function changeStrategy(strategy: StoryPlanShot["strategy"]) {
     const avatar = strategy === "avatar_anchor";
     const local = strategy === "local_transition";
@@ -817,6 +831,14 @@ function ShotCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-3 p-4 pt-0">
+        {generation?.status === "completed" ? (
+          <video
+            controls
+            preload="metadata"
+            className="aspect-[9/16] max-h-[420px] w-full rounded-lg bg-black object-contain"
+            src={storyShotMediaUrl(generation)}
+          />
+        ) : null}
         <div className="grid gap-3 sm:grid-cols-2">
           <BriefField label="Estratégia" htmlFor={`${shot.id}-strategy`}>
             <Select
@@ -913,17 +935,52 @@ function ShotCard({
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
           <p className="text-xs text-muted-foreground">
-            Custo estrutural: {shot.estimatedCost.heygenJobs} job(s) HeyGen
+            {shot.estimatedCost.heygenJobs
+              ? `HeyGen: ${shot.estimatedCost.heygenJobs} job · ${generation?.estimatedCostUsd == null ? "custo conforme taxa configurada" : money(generation.estimatedCostUsd)}`
+              : "Render local · zero crédito HeyGen"}
+            {generation ? ` · status: ${generation.status.replaceAll("_", " ")}` : " · pronto"}
           </p>
           <div className="flex gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              disabled
-              title="Geração isolada entra no próximo slice"
-            >
-              Gerar somente este shot
-            </Button>
+            {generation?.status === "generating" || generation?.status === "submitted" ? (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={generationDisabled}
+                onClick={onRefresh}
+              >
+                <RefreshCw /> Atualizar status
+              </Button>
+            ) : generation?.status === "completed" ||
+              generation?.status === "failed" ||
+              generation?.status === "needs_regeneration" ? (
+              <ConfirmAction
+                title={`Refazer ${shot.id}?`}
+                description="Somente este shot será gerado novamente. Os demais arquivos e aprovações serão preservados. Esta ação pode consumir 1 job HeyGen."
+                confirmLabel="Refazer shot"
+                onConfirm={() => onGenerate(true)}
+                trigger={
+                  <Button type="button" variant="outline" disabled={!canGenerate}>
+                    <RotateCcw /> Refazer shot
+                  </Button>
+                }
+              />
+            ) : (
+              <ConfirmAction
+                title={`Gerar somente ${shot.id}?`}
+                description={
+                  shot.estimatedCost.heygenJobs
+                    ? `Estratégia ${shot.strategy.replaceAll("_", " ")}. Esta ação cria 1 job HeyGen e usa o orçamento aprovado.`
+                    : "Esta transição será renderizada localmente e não usa créditos HeyGen."
+                }
+                confirmLabel="Gerar shot"
+                onConfirm={() => onGenerate(false)}
+                trigger={
+                  <Button type="button" variant="outline" disabled={!canGenerate}>
+                    Gerar shot
+                  </Button>
+                }
+              />
+            )}
             <Button
               type="button"
               variant={controls.approved ? "secondary" : "default"}
@@ -1262,6 +1319,28 @@ export function StoryModeEditor(props: StoryModeEditorProps) {
     );
   }
 
+  function generateShot(index: number, regenerate: boolean) {
+    const version = state.version;
+    const record = version?.shots?.[index];
+    const critiqueRecord = version?.activeCritique;
+    if (!version || !record || !critiqueRecord || !version.approved) return;
+    void run(
+      "generate",
+      () => generateStoryShot(version, record, critiqueRecord, regenerate),
+      () => void load(),
+    );
+  }
+
+  function refreshShot(index: number) {
+    const generation = state.version?.shots?.[index]?.currentGeneration;
+    if (!generation) return;
+    void run(
+      "refresh",
+      () => refreshStoryShot(generation.id),
+      () => void load(),
+    );
+  }
+
   if (state.phase === "loading") return <LoadingState />;
   if (state.phase === "error") {
     return (
@@ -1365,15 +1444,19 @@ export function StoryModeEditor(props: StoryModeEditorProps) {
                 key={shot.id}
                 shot={shot}
                 controls={state.reviews[index] ?? defaultControls()}
+                record={state.version?.shots?.[index]}
                 characterId={state.plan?.characterBible.characterId ?? null}
                 lookId={state.plan?.characterBible.lookId ?? null}
                 disabled={pendingDisabled || Boolean(state.version?.approved)}
+                generationDisabled={pendingDisabled || !Boolean(state.version?.approved)}
                 onShotChange={(nextShot) =>
                   dispatch({ type: "shot-change", index, shot: nextShot })
                 }
                 onControlsChange={(controls) =>
                   dispatch({ type: "review-change", index, controls })
                 }
+                onGenerate={(regenerate) => generateShot(index, regenerate)}
+                onRefresh={() => refreshShot(index)}
               />
             ))}
           </div>

@@ -112,6 +112,7 @@ from api.services.story_contract import (
     StoryContractError,
     canonical_hash as story_canonical_hash,
     shot_continuity_context,
+    speech_words,
     story_hash,
     validate_story_plan,
 )
@@ -176,6 +177,7 @@ PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
 PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
 VIDEO_SLIDE_OUTPUTS = ROOT / "data" / "video_slides"
 COMPOSED_VIDEO_OUTPUTS = PRODUCED_VIDEO_OUTPUTS / "composicoes"
+STORY_SHOT_OUTPUTS = PRODUCED_VIDEO_OUTPUTS / "story-shots"
 MUSIC_TRACKS_DIR = ROOT / "data" / "music_tracks"
 MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
 LOGGER = logging.getLogger("uvicorn.error")
@@ -462,10 +464,38 @@ def _ai_db() -> sqlite3.Connection:
             asset_path TEXT,
             regeneration_count INTEGER NOT NULL DEFAULT 0,
             quality_status TEXT,
+            current_generation_id TEXT,
+            thumbnail_path TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(story_version_id) REFERENCES story_versions(id),
             UNIQUE(story_version_id, shot_id)
+        );
+        CREATE TABLE IF NOT EXISTS story_shot_generations (
+            id TEXT PRIMARY KEY,
+            story_shot_id TEXT NOT NULL,
+            story_version_id TEXT NOT NULL,
+            shot_revision INTEGER NOT NULL,
+            strategy TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            spoken_text TEXT NOT NULL,
+            avatar_id TEXT,
+            duration_seconds REAL NOT NULL,
+            continuity_json TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            provider_job_id TEXT,
+            provider_response_json TEXT,
+            output_path TEXT,
+            output_url TEXT,
+            status TEXT NOT NULL,
+            retry_safe INTEGER NOT NULL DEFAULT 1,
+            estimated_cost_usd REAL,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(story_shot_id) REFERENCES story_shots(id),
+            FOREIGN KEY(story_version_id) REFERENCES story_versions(id)
         );
         """
     )
@@ -483,6 +513,15 @@ def _ai_db() -> sqlite3.Connection:
     ):
         try:
             conn.execute(f"ALTER TABLE production_profiles ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    for column, definition in (
+        ("current_generation_id", "TEXT"),
+        ("thumbnail_path", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE story_shots ADD COLUMN {column} {definition}")
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
@@ -3595,6 +3634,15 @@ class StoryPlanRevisionIn(BaseModel):
     idempotencyKey: str = Field(min_length=8, max_length=128)
 
 
+class StoryShotGenerateIn(BaseModel):
+    expectedStoryHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expectedPromptHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expectedBudgetHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    idempotencyKey: str = Field(min_length=8, max_length=128)
+    regenerate: bool = False
+    confirmed: Literal[True]
+
+
 class VideoCreateIn(BaseModel):
     scriptId: str
     avatarId: str | None = Field(default=None, max_length=160)
@@ -4088,9 +4136,53 @@ def _story_shot_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "assetPath": row["asset_path"],
         "regenerationCount": int(row["regeneration_count"]),
         "qualityStatus": row["quality_status"],
+        "currentGenerationId": row["current_generation_id"],
+        "thumbnailPath": row["thumbnail_path"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+
+
+def _story_generation_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "storyShotId": row["story_shot_id"],
+        "storyVersionId": row["story_version_id"],
+        "shotRevision": int(row["shot_revision"]),
+        "strategy": row["strategy"],
+        "provider": row["provider"],
+        "prompt": row["prompt"],
+        "spokenText": row["spoken_text"],
+        "avatarId": row["avatar_id"],
+        "durationSeconds": float(row["duration_seconds"]),
+        "continuity": json.loads(str(row["continuity_json"])),
+        "idempotencyKey": row["idempotency_key"],
+        "providerJobId": row["provider_job_id"],
+        "outputPath": row["output_path"],
+        "outputUrl": row["output_url"],
+        "status": row["status"],
+        "retrySafe": bool(row["retry_safe"]),
+        "estimatedCostUsd": row["estimated_cost_usd"],
+        "error": row["error"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _attach_story_generation(
+    conn: sqlite3.Connection, shot: dict[str, Any]
+) -> dict[str, Any]:
+    generation_id = shot.get("currentGenerationId")
+    if generation_id:
+        row = conn.execute(
+            "SELECT * FROM story_shot_generations WHERE id=?", (generation_id,)
+        ).fetchone()
+        shot["currentGeneration"] = _story_generation_from_row(row)
+    else:
+        shot["currentGeneration"] = None
+    return shot
 
 
 def _story_shots(version_id: str) -> list[dict[str, Any]]:
@@ -4100,7 +4192,9 @@ def _story_shots(version_id: str) -> list[dict[str, Any]]:
             "SELECT * FROM story_shots WHERE story_version_id = ? ORDER BY shot_order",
             (version_id,),
         ).fetchall()
-        return [_story_shot_from_row(row) for row in rows]
+        return [
+            _attach_story_generation(conn, _story_shot_from_row(row)) for row in rows
+        ]
     finally:
         conn.close()
 
@@ -4128,7 +4222,7 @@ def _story_project_from_row(
             )
         if active_version:
             active_version["shots"] = [
-                _story_shot_from_row(shot_row)
+                _attach_story_generation(conn, _story_shot_from_row(shot_row))
                 for shot_row in conn.execute(
                     "SELECT * FROM story_shots WHERE story_version_id = ? ORDER BY shot_order",
                     (active_version["id"],),
@@ -5126,7 +5220,9 @@ def _approve_story_version(
             "STORY_BIBLE_APPROVAL_REQUIRED",
             "Aprove a Story Bible antes de aprovar o plano completo.",
         )
-    pending_shots = [shot["shotId"] for shot in shots if shot["status"] != "approved"]
+    pending_shots = [
+        shot["shotId"] for shot in shots if not shot["controls"].get("approved")
+    ]
     if pending_shots:
         raise _story_error(
             422,
@@ -5209,7 +5305,7 @@ def _authorize_story_production(version_id: str) -> dict[str, Any]:
         )
     shots = _story_shots(version_id)
     if not version.get("storyBibleApproved") or any(
-        shot["status"] != "approved" for shot in shots
+        not shot["controls"].get("approved") for shot in shots
     ):
         raise _story_error(
             422,
@@ -5233,6 +5329,537 @@ def _authorize_story_production(version_id: str) -> dict[str, Any]:
             "O orçamento aprovado não corresponde mais ao plano e às taxas atuais.",
         )
     return {**context, "budget": budget, "approval": approval}
+
+
+def _story_generation(generation_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        return _story_generation_from_row(
+            conn.execute(
+                "SELECT * FROM story_shot_generations WHERE id=?", (generation_id,)
+            ).fetchone()
+        )
+    finally:
+        conn.close()
+
+
+def _set_story_generation(
+    generation_id: str,
+    *,
+    status: str,
+    provider_job_id: str | None = None,
+    provider_response: dict[str, Any] | None = None,
+    output_path: str | None = None,
+    output_url: str | None = None,
+    retry_safe: bool = True,
+    error: str | None = None,
+    thumbnail_path: str | None = None,
+) -> dict[str, Any]:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM story_shot_generations WHERE id=?", (generation_id,)
+        ).fetchone()
+        if not row:
+            raise RuntimeError("Geração de shot não encontrada.")
+        conn.execute(
+            """UPDATE story_shot_generations
+                  SET status=?, provider_job_id=COALESCE(?, provider_job_id),
+                      provider_response_json=COALESCE(?, provider_response_json),
+                      output_path=COALESCE(?, output_path), output_url=COALESCE(?, output_url),
+                      retry_safe=?, error=?, updated_at=?
+                WHERE id=?""",
+            (
+                status,
+                provider_job_id,
+                json.dumps(provider_response, ensure_ascii=False)
+                if provider_response is not None
+                else None,
+                output_path,
+                output_url,
+                int(retry_safe),
+                error,
+                _now(),
+                generation_id,
+            ),
+        )
+        shot_status = {
+            "generating": "generating",
+            "submitted": "generating",
+            "completed": "completed",
+            "failed": "failed",
+            "needs_regeneration": "needs_regeneration",
+        }.get(status, status)
+        conn.execute(
+            """UPDATE story_shots
+                  SET status=?, remote_job_id=COALESCE(?, remote_job_id),
+                      asset_path=COALESCE(?, asset_path),
+                      thumbnail_path=COALESCE(?, thumbnail_path), updated_at=?
+                WHERE id=?""",
+            (
+                shot_status,
+                provider_job_id,
+                output_path,
+                thumbnail_path,
+                _now(),
+                row["story_shot_id"],
+            ),
+        )
+        updated = conn.execute(
+            "SELECT * FROM story_shot_generations WHERE id=?", (generation_id,)
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    saved = _story_generation_from_row(updated)
+    if not saved:
+        raise RuntimeError("Não foi possível atualizar a geração do shot.")
+    return saved
+
+
+def _reserve_story_generation(
+    story_shot_id: str, payload: StoryShotGenerateIn
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    conn = _ai_db()
+    try:
+        shot_row = conn.execute(
+            "SELECT * FROM story_shots WHERE id=?", (story_shot_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not shot_row:
+        raise _story_error(404, "STORY_SHOT_NOT_FOUND", "Shot não encontrado.")
+    version_id = str(shot_row["story_version_id"])
+    authorization = _authorize_story_production(version_id)
+    if authorization["version"]["storyHash"] != payload.expectedStoryHash:
+        raise _story_error(
+            409, "STORY_VERSION_CONFLICT", "O storyboard mudou. Recarregue antes de gerar."
+        )
+    if authorization["approval"].get("budgetHash") != payload.expectedBudgetHash:
+        raise _story_error(
+            409, "STORY_BUDGET_CHANGED", "O orçamento aprovado mudou. Refaça a crítica."
+        )
+    with _paid_generation_lock(f"story-shot:{story_shot_id}"):
+        conn = _ai_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            shot_row = conn.execute(
+                "SELECT * FROM story_shots WHERE id=?", (story_shot_id,)
+            ).fetchone()
+            shot = _story_shot_from_row(shot_row)
+            if shot["promptHash"] != payload.expectedPromptHash:
+                raise _story_error(
+                    409, "STORY_SHOT_PROMPT_CHANGED", "O prompt do shot mudou. Recarregue a página."
+                )
+            if not shot["controls"].get("approved"):
+                raise _story_error(
+                    422, "STORY_SHOT_NOT_APPROVED", "Aprove o shot antes de gerar."
+                )
+            existing_key = conn.execute(
+                "SELECT * FROM story_shot_generations WHERE idempotency_key=?",
+                (payload.idempotencyKey,),
+            ).fetchone()
+            if existing_key:
+                if existing_key["story_shot_id"] != story_shot_id:
+                    raise _story_error(
+                        409,
+                        "STORY_IDEMPOTENCY_CONFLICT",
+                        "A chave de idempotência pertence a outro shot.",
+                    )
+                conn.rollback()
+                return authorization, _story_generation_from_row(existing_key), True
+            current = (
+                conn.execute(
+                    "SELECT * FROM story_shot_generations WHERE id=?",
+                    (shot.get("currentGenerationId"),),
+                ).fetchone()
+                if shot.get("currentGenerationId")
+                else None
+            )
+            if current and current["status"] in {"generating", "submitted"}:
+                raise _story_error(
+                    409,
+                    "STORY_SHOT_GENERATION_IN_PROGRESS",
+                    "Este shot já possui uma geração em andamento.",
+                )
+            if (
+                current
+                and current["status"] == "failed"
+                and not bool(current["retry_safe"])
+            ):
+                raise _story_error(
+                    409,
+                    "STORY_SHOT_SUBMISSION_UNCERTAIN",
+                    "A submissão anterior ficou incerta. Verifique o provider antes de refazer para evitar cobrança duplicada.",
+                )
+            if current and current["status"] == "completed" and not payload.regenerate:
+                conn.rollback()
+                return authorization, _story_generation_from_row(current), True
+            previous_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM story_shot_generations WHERE story_shot_id=?",
+                    (story_shot_id,),
+                ).fetchone()[0]
+            )
+            if previous_count and not payload.regenerate:
+                raise _story_error(
+                    422,
+                    "STORY_SHOT_REGENERATION_CONFIRMATION_REQUIRED",
+                    "Use Refazer shot para criar uma nova revisão somente deste shot.",
+                )
+            max_regenerations = int(authorization["brief"]["maxRegenerationsPerShot"])
+            if max(0, previous_count - 1) >= max_regenerations and previous_count:
+                raise _story_error(
+                    422,
+                    "STORY_SHOT_REGENERATION_LIMIT",
+                    "O shot atingiu o limite de regenerações aprovado no orçamento.",
+                )
+            prompt = str(
+                shot["controls"].get("promptOverride") or shot["prompt"].get("heygenPrompt") or ""
+            ).strip()
+            if len(prompt) < 40:
+                raise _story_error(
+                    422, "STORY_SHOT_PROMPT_INVALID", "O prompt final do HeyGen está incompleto."
+                )
+            strategy = str(shot["prompt"].get("strategy") or "")
+            provider = str(shot["provider"])
+            expected_provider = {
+                "avatar_anchor": "direct_video",
+                "cinematic_broll": "video_agent",
+                "local_transition": "local_compositor",
+            }.get(strategy)
+            if provider != expected_provider or provider not in authorization["providerContext"][
+                "providerStrategies"
+            ]:
+                raise _story_error(
+                    422,
+                    "STORY_SHOT_CAPABILITY_UNAVAILABLE",
+                    "A estratégia do shot não está disponível nas capabilities atuais.",
+                )
+            budget = authorization["budget"]
+            paid = provider != "local_compositor"
+            used_jobs = int(
+                conn.execute(
+                    """SELECT COUNT(*) FROM story_shot_generations
+                        WHERE story_version_id=? AND provider!='local_compositor'""",
+                    (version_id,),
+                ).fetchone()[0]
+            )
+            if paid and used_jobs + 1 > int(budget["worstCaseHeyGenJobs"]):
+                raise _story_error(
+                    422, "STORY_BUDGET_EXCEEDED", "Este shot ultrapassaria os jobs aprovados."
+                )
+            rate = budget["providerRatesUsd"].get(provider)
+            estimated_cost = float(rate) if paid and rate is not None else 0.0
+            used_cost = float(
+                conn.execute(
+                    """SELECT COALESCE(SUM(estimated_cost_usd), 0)
+                         FROM story_shot_generations WHERE story_version_id=?""",
+                    (version_id,),
+                ).fetchone()[0]
+            )
+            max_budget = budget.get("maxBudgetUsd")
+            if max_budget is not None and used_cost + estimated_cost > float(max_budget) + 1e-9:
+                raise _story_error(
+                    422, "STORY_BUDGET_EXCEEDED", "Este shot ultrapassaria o orçamento aprovado."
+                )
+            words = speech_words(authorization["source"]["speech"])
+            speech_range = shot["prompt"]["speech"]
+            spoken_text = " ".join(
+                words[
+                    int(speech_range["startWordIndex"]) : int(speech_range["endWordIndex"])
+                ]
+            )
+            avatar_id = (
+                str(
+                    (shot["prompt"].get("character") or {}).get("lookId")
+                    or authorization["brief"].get("lookId")
+                    or ""
+                )
+                if strategy == "avatar_anchor"
+                else ""
+            )
+            generation_id = "story-generation-" + hashlib.sha256(
+                payload.idempotencyKey.encode("utf-8")
+            ).hexdigest()[:20]
+            revision = previous_count + 1
+            now = _now()
+            conn.execute(
+                """INSERT INTO story_shot_generations(
+                       id, story_shot_id, story_version_id, shot_revision,
+                       strategy, provider, prompt, spoken_text, avatar_id,
+                       duration_seconds, continuity_json, idempotency_key,
+                       status, retry_safe, estimated_cost_usd, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating', 1, ?, ?, ?)""",
+                (
+                    generation_id,
+                    story_shot_id,
+                    version_id,
+                    revision,
+                    strategy,
+                    provider,
+                    prompt,
+                    spoken_text,
+                    avatar_id or None,
+                    float(shot["prompt"]["durationSeconds"]),
+                    json.dumps(
+                        shot_continuity_context(authorization["version"]["plan"], shot["shotId"]),
+                        ensure_ascii=False,
+                    ),
+                    payload.idempotencyKey,
+                    estimated_cost,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """UPDATE story_shots
+                      SET status='generating', current_generation_id=?,
+                          shot_revision=?, regeneration_count=?, updated_at=?
+                    WHERE id=?""",
+                (
+                    generation_id,
+                    revision,
+                    max(0, revision - 1),
+                    now,
+                    story_shot_id,
+                ),
+            )
+            created = conn.execute(
+                "SELECT * FROM story_shot_generations WHERE id=?", (generation_id,)
+            ).fetchone()
+            conn.commit()
+            return authorization, _story_generation_from_row(created), False
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _run_story_ffmpeg(args: list[str], *, timeout: int = 180) -> None:
+    process = subprocess.run(
+        args, capture_output=True, text=True, timeout=timeout, check=False
+    )
+    if process.returncode != 0:
+        raise RuntimeError((process.stderr or process.stdout or "Falha no FFmpeg.")[-1200:])
+
+
+def _render_story_transition(generation: dict[str, Any]) -> Path:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("FFmpeg não encontrado para a transição local.")
+    destination = STORY_SHOT_OUTPUTS / generation["storyVersionId"] / f"{generation['id']}.mp4"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    duration = float(generation["durationSeconds"])
+    _run_story_ffmpeg(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=#102633:s=1080x1920:d={duration:.3f}:r=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-vf",
+            f"fade=t=in:st=0:d=0.25,fade=t=out:st={max(0.0, duration - 0.25):.3f}:d=0.25",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(destination),
+        ]
+    )
+    return destination
+
+
+def _story_provider_submit(
+    authorization: dict[str, Any], generation: dict[str, Any]
+) -> dict[str, Any]:
+    command = _heygen_cli()
+    if generation["strategy"] == "cinematic_broll":
+        args = video_agent_create_args(
+            authorization["providerContext"]["capabilities"],
+            prompt=generation["prompt"],
+            avatar_id=None,
+            voice_id=None,
+            orientation=(
+                "landscape" if authorization["brief"].get("orientation") == "landscape" else "portrait"
+            ),
+            style_id=None,
+            brand_kit_id=None,
+            mode="generate",
+        )
+        return _run_heygen_json(command, args, timeout=60)
+    profile = _production_profile(authorization["project"]["scriptId"]) or {}
+    voice_id = str(profile.get("voiceId") or "")
+    if not generation.get("avatarId") or not voice_id:
+        raise _story_error(
+            422,
+            "STORY_AVATAR_CONFIGURATION_REQUIRED",
+            "Selecione avatar e voz antes de gerar um avatar anchor.",
+        )
+    direct_payload = _direct_video_payload(
+        script=authorization["source"]["script"],
+        narration_text=generation["spokenText"],
+        avatar_id=str(generation["avatarId"]),
+        voice_id=voice_id,
+        orientation=(
+            "landscape" if authorization["brief"].get("orientation") == "landscape" else "portrait"
+        ),
+        speech_mode="natural",
+        voice_mood="confident",
+        captions=False,
+        optimize_pronunciation=True,
+    )
+    return _run_heygen_json(command, ["video", "create"], payload=direct_payload, timeout=60)
+
+
+@app.post("/api/story-shots/{story_shot_id}/generate")
+def generate_story_shot(story_shot_id: str, payload: StoryShotGenerateIn) -> dict:
+    authorization, generation, duplicate = _reserve_story_generation(story_shot_id, payload)
+    if duplicate:
+        return {"ok": True, "generation": generation, "deduplicated": True}
+    if generation["strategy"] == "local_transition":
+        try:
+            output = _render_story_transition(generation)
+            relative = str(output.relative_to(ROOT))
+            completed = _set_story_generation(
+                generation["id"], status="completed", output_path=relative,
+                output_url=f"/api/story-shot-generations/{generation['id']}/file",
+            )
+            return {"ok": True, "generation": completed, "deduplicated": False}
+        except Exception as exc:
+            failed = _set_story_generation(
+                generation["id"], status="failed", error=str(exc)[-500:]
+            )
+            return {"ok": False, "generation": failed, "deduplicated": False}
+    try:
+        response = _story_provider_submit(authorization, generation)
+        provider_job_id = _find_value(
+            response, "session_id", "sessionId", "video_id", "videoId", "id"
+        )
+        if not provider_job_id:
+            raise RuntimeError("O provider não retornou identificador do shot.")
+        submitted = _set_story_generation(
+            generation["id"], status="submitted", provider_job_id=str(provider_job_id),
+            provider_response=response,
+        )
+        return {"ok": True, "generation": submitted, "deduplicated": False}
+    except Exception as exc:
+        failed = _set_story_generation(
+            generation["id"], status="failed", retry_safe=False,
+            error=_safe_video_provider_error(exc),
+        )
+        return {"ok": False, "generation": failed, "deduplicated": False}
+
+
+def _story_generation_output(generation: dict[str, Any], remote_url: str) -> tuple[str, str]:
+    parsed = urlparse(remote_url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (
+        hostname == "heygen.ai" or hostname.endswith(".heygen.ai")
+    ):
+        raise _story_error(409, "STORY_OUTPUT_URL_INVALID", "URL de vídeo do provider inválido.")
+    output = STORY_SHOT_OUTPUTS / generation["storyVersionId"] / f"{generation['id']}.mp4"
+    thumbnail = output.with_suffix(".jpg")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(".part")
+    try:
+        with requests.get(remote_url, stream=True, timeout=(15, 300)) as response:
+            response.raise_for_status()
+            with temporary.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+        temporary.replace(output)
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            _run_story_ffmpeg(
+                [ffmpeg, "-y", "-ss", "0.1", "-i", str(output), "-frames:v", "1", str(thumbnail)],
+                timeout=60,
+            )
+    except (OSError, requests.RequestException):
+        temporary.unlink(missing_ok=True)
+        raise _story_error(502, "STORY_OUTPUT_DOWNLOAD_FAILED", "Falha ao salvar o shot.")
+    return str(output.relative_to(ROOT)), str(thumbnail.relative_to(ROOT)) if thumbnail.is_file() else ""
+
+
+@app.post("/api/story-shot-generations/{generation_id}/refresh")
+def refresh_story_shot_generation(generation_id: str) -> dict:
+    generation = _story_generation(generation_id)
+    if not generation:
+        raise _story_error(404, "STORY_GENERATION_NOT_FOUND", "Geração não encontrada.")
+    if generation["status"] in {"completed", "failed", "needs_regeneration"}:
+        return {"ok": True, "generation": generation}
+    remote_id = str(generation.get("providerJobId") or "")
+    if not remote_id:
+        raise _story_error(409, "STORY_PROVIDER_JOB_MISSING", "Shot sem job remoto.")
+    command = _heygen_cli()
+    args = (
+        ["video", "get", remote_id]
+        if generation["strategy"] == "avatar_anchor"
+        else ["video-agent", "get", remote_id]
+    )
+    response = _run_heygen_json(command, args, timeout=45)
+    status, _progress = _job_status(response)
+    video_url = _find_value(response, "video_url", "videoUrl")
+    video_id = _find_value(response, "video_id", "videoId")
+    if video_id and not video_url:
+        details = _run_heygen_json(command, ["video", "get", str(video_id)], timeout=45)
+        video_url = _find_value(details, "video_url", "videoUrl")
+        response = {**response, "videoDetails": details}
+    if status == "erro":
+        updated = _set_story_generation(
+            generation_id, status="needs_regeneration", provider_response=response,
+            error="O provider não concluiu este shot.",
+        )
+    elif status == "pronto" and video_url:
+        output_path, thumbnail_path = _story_generation_output(generation, str(video_url))
+        updated = _set_story_generation(
+            generation_id, status="completed", provider_response=response,
+            output_path=output_path,
+            output_url=f"/api/story-shot-generations/{generation_id}/file",
+            thumbnail_path=thumbnail_path or None,
+        )
+    else:
+        updated = _set_story_generation(
+            generation_id, status="submitted", provider_response=response
+        )
+    return {"ok": True, "generation": updated}
+
+
+@app.get("/api/story-shot-generations/{generation_id}/file")
+def story_shot_generation_file(generation_id: str) -> FileResponse:
+    generation = _story_generation(generation_id)
+    path = _local_output_path(generation.get("outputPath") if generation else None)
+    if not path:
+        raise HTTPException(status_code=404, detail="Arquivo do shot não encontrado.")
+    return FileResponse(path, media_type="video/mp4")
+
+
+@app.get("/api/story-shot-generations/{generation_id}/thumbnail")
+def story_shot_generation_thumbnail(generation_id: str) -> FileResponse:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            """SELECT shot.thumbnail_path FROM story_shot_generations generation
+                 JOIN story_shots shot ON shot.id=generation.story_shot_id
+                WHERE generation.id=?""",
+            (generation_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    path = _local_output_path(row["thumbnail_path"] if row else None)
+    if not path:
+        raise HTTPException(status_code=404, detail="Thumbnail não encontrada.")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @app.post("/api/story-versions/{version_id}/approve")
