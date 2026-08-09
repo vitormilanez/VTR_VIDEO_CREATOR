@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from api.services.script_editor import duration_limits
 from integrations.portuguese_br import prepare_script_for_heygen_voice
 
 
@@ -94,30 +95,13 @@ PERFORMANCE_SCHEMA = {
 
 
 def duration_word_limits(duration_seconds: int) -> tuple[int, int]:
-    return {
-        10: (18, 24),
-        15: (25, 36),
-        30: (55, 72),
-        45: (85, 108),
-        60: (115, 144),
-    }.get(duration_seconds, (85, 108))
+    """Faixa de geração do perfil central, sem usar o limite rígido como meta."""
+    return duration_limits(duration_seconds)
 
 
 def video_agent_word_limits(duration_seconds: int) -> tuple[int, int]:
-    """Faixa conservadora para o Video Agent.
-
-    O Agent adiciona pausas, cortes e interacoes visuais. Por isso a mesma
-    quantidade de palavras usada na geracao direta costuma produzir um video
-    mais longo. Esta faixa deixa espaco para essa edicao sem adicionar nenhuma
-    instrucao extra ao prompt enviado ao HeyGen.
-    """
-    return {
-        10: (16, 21),
-        15: (22, 30),
-        30: (45, 62),
-        45: (68, 84),
-        60: (90, 108),
-    }.get(duration_seconds, (68, 84))
+    """Todos os modos usam o mesmo perfil central de fala e duração."""
+    return duration_limits(duration_seconds)
 
 
 def speech_preset(mode: str) -> dict[str, Any]:

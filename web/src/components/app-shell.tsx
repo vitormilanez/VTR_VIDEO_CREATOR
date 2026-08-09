@@ -157,7 +157,7 @@ export function AppShell({
               {actions}
             </div>
           </header>
-          <main className="flex-1 overflow-x-hidden p-4 md:p-6">{children}</main>
+          <main className="flex-1 overflow-x-clip p-4 md:p-6">{children}</main>
         </div>
       </div>
     </SidebarProvider>

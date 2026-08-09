@@ -28,7 +28,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -76,6 +78,21 @@ from api.services.script_performance import (
     video_agent_word_limits,
     voice_mood_direction,
     voice_settings,
+)
+from api.services.script_editor import (
+    DEFAULT_SPEECH_PROFILE,
+    EDITOR_OUTPUT_SCHEMA,
+    MEDICAL_EDITORIAL_PROMPT_VERSION,
+    SCRIPT_EDITOR_CONTRACT,
+    build_editor_prompt,
+    duration_assessment,
+    editor_cache_payload,
+    evaluate_generation_gate,
+    medical_review_status,
+    normalize_editor_output,
+    normalize_text as normalize_editor_text,
+    post_validate_editor_output,
+    title_alignment,
 )
 from api.services.video_generation import (
     DIRECT_VIDEO_DURATIONS,
@@ -215,7 +232,14 @@ def _ai_db() -> sqlite3.Connection:
     conn = sqlite3.connect(OPERATIONAL_DB, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError as exc:
+        # Another request may be enabling WAL while this connection opens.
+        # The busy timeout protects the actual reads/writes, so this startup
+        # race is safe to ignore without masking unrelated SQLite failures.
+        if "database is locked" not in str(exc).lower():
+            raise
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS ai_usage (
@@ -234,6 +258,18 @@ def _ai_db() -> sqlite3.Connection:
             operation TEXT NOT NULL,
             response_json TEXT NOT NULL,
             created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS script_editor_states (
+            script_id TEXT PRIMARY KEY,
+            duration_seconds INTEGER NOT NULL DEFAULT 45,
+            human_review_approved INTEGER NOT NULL DEFAULT 0,
+            title_choice TEXT NOT NULL DEFAULT 'current',
+            suggested_title TEXT,
+            schema_valid INTEGER NOT NULL DEFAULT 1,
+            technical_error TEXT,
+            previous_script TEXT,
+            last_result_json TEXT,
+            updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS production_profiles (
             script_id TEXT PRIMARY KEY,
@@ -300,6 +336,131 @@ def _ai_db() -> sqlite3.Connection:
                 raise
     conn.commit()
     return conn
+
+
+def _script_editor_state(
+    script_id: str,
+    script: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            """SELECT script_id, duration_seconds, human_review_approved, title_choice,
+                      suggested_title, schema_valid, technical_error, previous_script,
+                      last_result_json, updated_at
+               FROM script_editor_states WHERE script_id = ?""",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        # Compatibilidade: roteiros historicamente marcados como Pronto já
+        # passaram pela revisão clínica do fluxo anterior.
+        legacy_approved = bool(script and script.get("status") == "aprovado_clinicamente")
+        return {
+            "scriptId": script_id,
+            "durationSeconds": 45,
+            "humanReviewApproved": legacy_approved,
+            "titleChoice": "current",
+            "suggestedTitle": None,
+            "schemaValid": True,
+            "technicalError": None,
+            "previousScript": None,
+            "lastResult": None,
+            "updatedAt": None,
+            "legacyFallback": True,
+        }
+    try:
+        last_result = json.loads(str(row["last_result_json"])) if row["last_result_json"] else None
+    except json.JSONDecodeError:
+        last_result = None
+    return {
+        "scriptId": row["script_id"],
+        "durationSeconds": int(row["duration_seconds"]),
+        "humanReviewApproved": bool(row["human_review_approved"]),
+        "titleChoice": row["title_choice"] or "current",
+        "suggestedTitle": row["suggested_title"],
+        "schemaValid": bool(row["schema_valid"]),
+        "technicalError": row["technical_error"],
+        "previousScript": row["previous_script"],
+        "lastResult": last_result,
+        "updatedAt": row["updated_at"],
+        "legacyFallback": False,
+    }
+
+
+def _save_script_editor_state(state: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "scriptId": str(state["scriptId"]),
+        "durationSeconds": int(state.get("durationSeconds") or 45),
+        "humanReviewApproved": bool(state.get("humanReviewApproved")),
+        "titleChoice": str(state.get("titleChoice") or "current"),
+        "suggestedTitle": state.get("suggestedTitle"),
+        "schemaValid": bool(state.get("schemaValid", True)),
+        "technicalError": state.get("technicalError"),
+        "previousScript": state.get("previousScript"),
+        "lastResult": state.get("lastResult"),
+        "updatedAt": _now(),
+    }
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """INSERT INTO script_editor_states(
+                   script_id, duration_seconds, human_review_approved, title_choice,
+                   suggested_title, schema_valid, technical_error, previous_script,
+                   last_result_json, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(script_id) DO UPDATE SET
+                   duration_seconds=excluded.duration_seconds,
+                   human_review_approved=excluded.human_review_approved,
+                   title_choice=excluded.title_choice,
+                   suggested_title=excluded.suggested_title,
+                   schema_valid=excluded.schema_valid,
+                   technical_error=excluded.technical_error,
+                   previous_script=excluded.previous_script,
+                   last_result_json=excluded.last_result_json,
+                   updated_at=excluded.updated_at""",
+            (
+                normalized["scriptId"], normalized["durationSeconds"],
+                int(normalized["humanReviewApproved"]), normalized["titleChoice"],
+                normalized["suggestedTitle"], int(normalized["schemaValid"]),
+                normalized["technicalError"], normalized["previousScript"],
+                json.dumps(normalized["lastResult"], ensure_ascii=False)
+                if normalized["lastResult"] is not None else None,
+                normalized["updatedAt"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {**normalized, "legacyFallback": False}
+
+
+def _resolved_medical_review_status(
+    script: dict[str, Any],
+    editor_state: dict[str, Any],
+    requested_status: str | None = None,
+) -> str:
+    """Resolve revisão sem permitir que um alerta persistido seja rebaixado."""
+    approved = bool(editor_state.get("humanReviewApproved"))
+    if approved:
+        return "approved"
+    last_result = editor_state.get("lastResult")
+    persisted_required = bool(
+        isinstance(last_result, dict)
+        and (
+            last_result.get("medicalReviewStatus") == "required"
+            or bool((last_result.get("medicalSafety") or {}).get("requiresHumanReview"))
+        )
+    )
+    if persisted_required or requested_status == "required":
+        return "required"
+    risk_status = medical_review_status(str(script.get("risco") or "medio"), approved=False)
+    if risk_status == "required":
+        return "required"
+    if requested_status == "recommended" or risk_status == "recommended":
+        return "recommended"
+    return "not_required"
 
 
 def _production_profile(script_id: str) -> dict[str, Any] | None:
@@ -2857,6 +3018,12 @@ class VideoCreateIn(BaseModel):
     cinematicPrompt: str | None = Field(default=None, max_length=2000)
     outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+    medicalReviewStatus: Literal["not_required", "recommended", "required", "approved"] | None = None
+    humanReviewApproved: bool = False
+    aiOperationInFlight: bool = False
+    aiSchemaValid: bool = True
+    editorTechnicalError: str | None = Field(default=None, max_length=500)
+    finalConfirmed: bool = True
 
 
 class VideoPreviewCreateIn(BaseModel):
@@ -2872,6 +3039,7 @@ class VideoPreviewCreateIn(BaseModel):
     displayText: str = Field(min_length=10, max_length=6000)
     spokenText: str | None = Field(default=None, max_length=6000)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+    finalConfirmed: bool = True
 
 
 class SceneVideoConfirmIn(BaseModel):
@@ -2897,6 +3065,17 @@ class ProductionProfileIn(BaseModel):
     musicTrackId: str | None = Field(default=None, max_length=80)
     musicVolume: float = Field(default=0.12, ge=0.03, le=0.25)
     cinematicPrompt: str = Field(default="", max_length=2000)
+
+
+class ScriptEditorStateIn(BaseModel):
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+    humanReviewApproved: bool = False
+    titleChoice: Literal["current", "suggested"] = "current"
+    suggestedTitle: str | None = Field(default=None, max_length=500)
+    schemaValid: bool = True
+    technicalError: str | None = Field(default=None, max_length=500)
+    previousScript: str | None = Field(default=None, max_length=6000)
+    lastResult: dict[str, Any] | None = None
 
 
 class AvatarLookIn(BaseModel):
@@ -3068,6 +3247,19 @@ def get_script_production_profile(script_id: str) -> dict:
     return {"ok": True, "profile": _production_profile(script_id)}
 
 
+@app.get("/api/scripts/{script_id}/editor-state")
+def get_script_editor_state(script_id: str) -> dict:
+    script = _find_script(script_id)
+    return {"ok": True, "state": _script_editor_state(script_id, script)}
+
+
+@app.put("/api/scripts/{script_id}/editor-state")
+def save_script_editor_state(script_id: str, payload: ScriptEditorStateIn) -> dict:
+    _find_script(script_id)
+    state = _save_script_editor_state({"scriptId": script_id, **payload.model_dump()})
+    return {"ok": True, "state": state}
+
+
 @app.get("/api/music-tracks")
 def list_music_tracks() -> dict:
     """Lista faixas locais disponíveis para a mixagem final, sem custo externo."""
@@ -3195,8 +3387,24 @@ def get_scene_generation_plan(
 def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dict:
     """Submete uma chamada HeyGen por cena somente após confirmação explícita."""
     script = _find_script(script_id)
-    if script.get("status") != "aprovado_clinicamente":
-        raise HTTPException(status_code=409, detail="O roteiro precisa estar marcado como Pronto antes da geração paga.")
+    editor_state = _script_editor_state(script_id, script)
+    approved = bool(editor_state.get("humanReviewApproved"))
+    review_status = _resolved_medical_review_status(script, editor_state)
+    final_speech = str(script.get("textoFalado") or "").strip() or _script_text(script)
+    gate = evaluate_generation_gate(
+        speech=final_speech,
+        duration_seconds=payload.durationSeconds,
+        ai_operation_in_flight=False,
+        schema_valid=bool(editor_state.get("schemaValid", True)),
+        technical_error=editor_state.get("technicalError"),
+        medical_review=review_status,
+        human_review_approved=approved,
+        script_status=str(script.get("status") or ""),
+        final_saved=True,
+        final_confirmed=payload.confirmed,
+    )
+    if not gate.allowed:
+        raise HTTPException(status_code=422, detail=gate.reason)
     scene_plan = _scene_plan(script_id)
     profile = _production_profile(script_id)
     if not scene_plan or not profile or not profile.get("voiceId"):
@@ -3654,6 +3862,339 @@ VERSÃO DO PROMPT: {VISUAL_DIRECTOR_PROMPT_VERSION}"""
     return response
 
 
+class ScriptEditorAssistIn(BaseModel):
+    operation: Literal["medical_rewrite", "fit_duration"]
+    scriptId: str | None = Field(default=None, max_length=200)
+    text: str = Field(min_length=1, max_length=6000)
+    title: str = Field(default="", max_length=500)
+    sourceText: str = Field(default="", max_length=20000)
+    contextText: str = Field(default="", max_length=20000)
+    medicalCautions: str = Field(default="", max_length=3000)
+    riskLevel: str = Field(default="medio", max_length=80)
+    claims: list[str] = Field(default_factory=list, max_length=50)
+    glossary: list[str] = Field(default_factory=list, max_length=50)
+    cta: str = Field(default="", max_length=500)
+    durationSeconds: Literal[10, 15, 30, 45, 60] = 45
+    speechProfileId: str = Field(default=DEFAULT_SPEECH_PROFILE.id, max_length=100)
+    editorialProfileId: str = Field(
+        default=SCRIPT_EDITOR_CONTRACT["editorialProfile"]["id"],
+        max_length=100,
+    )
+    humanReviewApproved: bool = False
+
+
+_SCRIPT_EDITOR_INFLIGHT: dict[str, Future[dict[str, Any]]] = {}
+_SCRIPT_EDITOR_INFLIGHT_LOCK = threading.Lock()
+
+
+def _script_editor_model_call(
+    client: Any,
+    *,
+    model: str,
+    system: str,
+    user: str,
+) -> tuple[Any, Any]:
+    message = client.messages.create(
+        model=model,
+        max_tokens=1600,
+        system=system,
+        output_config={"format": {"type": "json_schema", "schema": EDITOR_OUTPUT_SCHEMA}},
+        messages=[{"role": "user", "content": user}],
+    )
+    raw_text = "".join(getattr(block, "text", "") for block in message.content)
+    return message, json.loads(raw_text)
+
+
+def _safe_script_editor_response(
+    payload: ScriptEditorAssistIn,
+    *,
+    provider: str,
+    model: str,
+    retry_count: int,
+    reason: str,
+) -> dict[str, Any]:
+    current = payload.text.strip()
+    fallback = {
+        "operation": payload.operation,
+        "script": current,
+        "summaryOfChanges": [],
+        "titleAlignment": title_alignment(payload.title, current),
+        "medicalSafety": {
+            "meaningPreserved": True,
+            "newClaimsAdded": False,
+            "unsupportedPersonalExperienceAdded": False,
+            "requiresHumanReview": True,
+            "reasons": [reason],
+        },
+        "warnings": [
+            "A resposta da IA não pôde ser aplicada com segurança. O texto anterior foi mantido."
+        ],
+    }
+    validated = post_validate_editor_output(
+        fallback,
+        title=payload.title,
+        current_script=current,
+        allowed_context="\n".join(
+            [payload.text, payload.sourceText, payload.contextText, payload.medicalCautions]
+            + payload.claims
+            + payload.glossary
+        ),
+        duration_seconds=payload.durationSeconds,
+        risk_level=payload.riskLevel,
+        human_review_approved=payload.humanReviewApproved,
+    )
+    return {
+        "ok": False,
+        **validated,
+        "provider": provider,
+        "model": model,
+        "promptVersion": MEDICAL_EDITORIAL_PROMPT_VERSION,
+        "cacheHit": False,
+        "retryCount": retry_count,
+        "schemaValid": False,
+        "technicalError": reason,
+        "previousScript": current,
+    }
+
+
+def _run_script_editor_assist(
+    payload: ScriptEditorAssistIn,
+    *,
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="A edição com IA não está configurada. O texto atual foi preservado.",
+        )
+    import anthropic
+
+    body = payload.model_dump()
+    system, user = build_editor_prompt(body)
+    allowed_context = "\n".join(
+        [payload.text, payload.sourceText, payload.contextText, payload.medicalCautions]
+        + payload.claims
+        + payload.glossary
+    )
+    client = anthropic.Anthropic()
+    retry_count = 0
+    last_reason = "A resposta não passou na validação estruturada."
+    for attempt in range(2):
+        request_user = user
+        if attempt:
+            request_user += (
+                "\n\nCORREÇÃO ÚNICA OBRIGATÓRIA: a resposta anterior foi rejeitada. "
+                f"Motivo: {last_reason} Corrija o JSON e todas as regras sem inventar conteúdo."
+            )
+        try:
+            message, raw = _script_editor_model_call(
+                client,
+                model=model,
+                system=system,
+                user=request_user,
+            )
+            _record_anthropic_usage(
+                "scripts.editor_assist" if attempt == 0 else "scripts.editor_assist.repair",
+                model,
+                message,
+            )
+            normalized = normalize_editor_output(raw, payload.operation)
+            validated = post_validate_editor_output(
+                normalized,
+                title=payload.title,
+                current_script=payload.text,
+                allowed_context=allowed_context,
+                duration_seconds=payload.durationSeconds,
+                risk_level=payload.riskLevel,
+                human_review_approved=payload.humanReviewApproved,
+            )
+            if (
+                payload.operation == "fit_duration"
+                and validated["durationAssessment"]["status"] == "blocking"
+            ):
+                last_reason = (
+                    "A fala ajustada ainda ultrapassa o limite rígido local de duração. "
+                    "Reduza redundâncias e respeite a faixa de geração."
+                )
+                if attempt == 0:
+                    retry_count = 1
+                    continue
+                return _safe_script_editor_response(
+                    payload,
+                    provider=provider,
+                    model=model,
+                    retry_count=1,
+                    reason=last_reason,
+                )
+            return {
+                "ok": True,
+                **validated,
+                "provider": provider,
+                "model": model,
+                "promptVersion": MEDICAL_EDITORIAL_PROMPT_VERSION,
+                "cacheHit": False,
+                "retryCount": retry_count,
+                "schemaValid": True,
+                "previousScript": payload.text,
+            }
+        except (json.JSONDecodeError, ValueError, TypeError, KeyError) as exc:
+            last_reason = str(exc)[:300] or "JSON inválido."
+            if attempt == 0:
+                retry_count = 1
+                continue
+            return _safe_script_editor_response(
+                payload,
+                provider=provider,
+                model=model,
+                retry_count=1,
+                reason=last_reason,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="A IA não respondeu agora. O texto atual foi preservado; tente novamente.",
+            ) from exc
+    return _safe_script_editor_response(
+        payload,
+        provider=provider,
+        model=model,
+        retry_count=1,
+        reason=last_reason,
+    )
+
+
+@app.post("/api/scripts/editor-assist")
+def script_editor_assist(payload: ScriptEditorAssistIn) -> dict:
+    """Executa revisão médica ou ajuste de duração sem persistir a fala automaticamente."""
+    started = time.perf_counter()
+    input_assessment = duration_assessment(payload.text, payload.durationSeconds)
+    model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+    provider = "anthropic"
+    body = payload.model_dump()
+
+    if (
+        payload.operation == "fit_duration"
+        and input_assessment.generationMinWords
+        <= input_assessment.wordCount
+        <= input_assessment.generationMaxWords
+    ):
+        no_op_output = {
+            "operation": payload.operation,
+            "script": payload.text.strip(),
+            "summaryOfChanges": [],
+            "titleAlignment": title_alignment(payload.title, payload.text),
+            "medicalSafety": {
+                "meaningPreserved": True,
+                "newClaimsAdded": False,
+                "unsupportedPersonalExperienceAdded": False,
+                "requiresHumanReview": False,
+                "reasons": [],
+            },
+            "warnings": [],
+        }
+        validated = post_validate_editor_output(
+            no_op_output,
+            title=payload.title,
+            current_script=payload.text,
+            allowed_context=payload.text,
+            duration_seconds=payload.durationSeconds,
+            risk_level=payload.riskLevel,
+            human_review_approved=payload.humanReviewApproved,
+        )
+        response = {
+            "ok": True,
+            **validated,
+            "provider": "local",
+            "model": "deterministic",
+            "promptVersion": MEDICAL_EDITORIAL_PROMPT_VERSION,
+            "cacheHit": False,
+            "retryCount": 0,
+            "noOp": True,
+            "message": f"O texto já está adequado para {payload.durationSeconds}s; nenhuma chamada de IA foi feita.",
+            "schemaValid": True,
+            "previousScript": payload.text,
+        }
+        LOGGER.info(
+            "script_editor operation=%s preset=%s input_words=%s output_words=%s input_status=%s output_status=%s prompt_version=%s provider=%s model=%s cache_hit=false retry=0 latency_ms=%s",
+            payload.operation, payload.durationSeconds, input_assessment.wordCount,
+            validated["durationAssessment"]["wordCount"], input_assessment.status,
+            validated["durationAssessment"]["status"], MEDICAL_EDITORIAL_PROMPT_VERSION,
+            "local", "deterministic", round((time.perf_counter() - started) * 1000),
+        )
+        return response
+
+    cache_payload = editor_cache_payload(body, provider=provider, model=model)
+    request_key = _ai_cache_key("scripts.editor_assist", cache_payload)
+    owner = False
+    with _SCRIPT_EDITOR_INFLIGHT_LOCK:
+        future = _SCRIPT_EDITOR_INFLIGHT.get(request_key)
+        if future is None:
+            future = Future()
+            _SCRIPT_EDITOR_INFLIGHT[request_key] = future
+            owner = True
+    if not owner:
+        try:
+            response = future.result(timeout=120)
+        except FutureTimeoutError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Uma edição idêntica ainda está em andamento. Aguarde alguns segundos.",
+            ) from exc
+        return {**response, "deduplicated": True}
+
+    try:
+        cached = _ai_cache_get("scripts.editor_assist", cache_payload)
+        if cached:
+            response = {**cached, "cacheHit": True, "deduplicated": False}
+            future.set_result(response)
+            LOGGER.info(
+                "script_editor operation=%s preset=%s input_words=%s output_words=%s input_status=%s output_status=%s prompt_version=%s provider=%s model=%s cache_hit=true retry=%s latency_ms=%s",
+                payload.operation, payload.durationSeconds, input_assessment.wordCount,
+                response.get("durationAssessment", {}).get("wordCount"), input_assessment.status,
+                response.get("durationAssessment", {}).get("status"), MEDICAL_EDITORIAL_PROMPT_VERSION,
+                provider, model, response.get("retryCount", 0),
+                round((time.perf_counter() - started) * 1000),
+            )
+            return response
+
+        response = _run_script_editor_assist(payload, provider=provider, model=model)
+        if response.get("schemaValid"):
+            _ai_cache_put("scripts.editor_assist", cache_payload, response)
+        if payload.scriptId:
+            existing_state = _script_editor_state(payload.scriptId)
+            _save_script_editor_state(
+                {
+                    **existing_state,
+                    "scriptId": payload.scriptId,
+                    "durationSeconds": payload.durationSeconds,
+                    "humanReviewApproved": payload.humanReviewApproved,
+                    "schemaValid": bool(response.get("schemaValid")),
+                    "technicalError": response.get("technicalError"),
+                    "previousScript": payload.text,
+                    "suggestedTitle": response.get("titleAlignment", {}).get("suggestedTitle"),
+                    "lastResult": response,
+                }
+            )
+        future.set_result(response)
+        LOGGER.info(
+            "script_editor operation=%s preset=%s input_words=%s output_words=%s input_status=%s output_status=%s medical_review=%s title_alignment=%s prompt_version=%s provider=%s model=%s cache_hit=false retry=%s latency_ms=%s",
+            payload.operation, payload.durationSeconds, input_assessment.wordCount,
+            response.get("durationAssessment", {}).get("wordCount"), input_assessment.status,
+            response.get("durationAssessment", {}).get("status"), response.get("medicalReviewStatus"),
+            response.get("titleAlignment", {}).get("status"), MEDICAL_EDITORIAL_PROMPT_VERSION,
+            provider, model, response.get("retryCount", 0),
+            round((time.perf_counter() - started) * 1000),
+        )
+        return response
+    except BaseException as exc:
+        future.set_exception(exc)
+        raise
+    finally:
+        with _SCRIPT_EDITOR_INFLIGHT_LOCK:
+            _SCRIPT_EDITOR_INFLIGHT.pop(request_key, None)
+
+
 class NaturalizeScriptIn(BaseModel):
     text: str = Field(min_length=20, max_length=6000)
     medicalCautions: str = Field(default="", max_length=2000)
@@ -3705,8 +4246,7 @@ def _repair_script_narration(script: dict[str, Any], payload: GenerateScriptIn) 
     """Recompõe uma fala curta usando o conteúdo estruturado já retornado pelo Claude."""
     original = str(script.get("textoFalado") or "").strip()
     candidate = _fit_text_to_duration(original, payload.durationSeconds, payload.outro)
-    issues = _narration_quality_issues(candidate, payload.durationSeconds, payload.outro)
-    if not any("Texto muito curto" in issue for issue in issues):
+    if duration_assessment(candidate, payload.durationSeconds).wordCount >= _duration_word_limits(payload.durationSeconds)[0]:
         return candidate, candidate != original
 
     parts = [
@@ -3720,8 +4260,7 @@ def _repair_script_narration(script: dict[str, Any], payload: GenerateScriptIn) 
     expanded = " ".join(part.strip() for part in parts if part.strip())
     candidate = _fit_text_to_duration(expanded, payload.durationSeconds, payload.outro)
     for padding in _SAFE_NARRATION_PADDING:
-        issues = _narration_quality_issues(candidate, payload.durationSeconds, payload.outro)
-        if not any("Texto muito curto" in issue for issue in issues):
+        if duration_assessment(candidate, payload.durationSeconds).wordCount >= _duration_word_limits(payload.durationSeconds)[0]:
             break
         candidate = _fit_text_to_duration(
             f"{candidate} {padding}", payload.durationSeconds, payload.outro
@@ -4231,6 +4770,45 @@ def create_video(payload: VideoCreateIn) -> dict:
             )
     script = _find_script(payload.scriptId)
     final_display_text, final_spoken_text = _finalize_video_texts(payload, script)
+    editor_state = _script_editor_state(payload.scriptId, script)
+    human_review_approved = bool(
+        payload.humanReviewApproved or editor_state.get("humanReviewApproved")
+    )
+    gate_editor_state = {
+        **editor_state,
+        "humanReviewApproved": human_review_approved,
+    }
+    review_status = _resolved_medical_review_status(
+        script,
+        gate_editor_state,
+        payload.medicalReviewStatus,
+    )
+    persisted_speech = normalize_editor_text(str(script.get("textoFalado") or ""))
+    final_saved = not persisted_speech or persisted_speech == normalize_editor_text(final_display_text)
+    gate = evaluate_generation_gate(
+        speech=final_display_text,
+        duration_seconds=payload.durationSeconds,
+        ai_operation_in_flight=payload.aiOperationInFlight,
+        schema_valid=bool(payload.aiSchemaValid and editor_state.get("schemaValid", True)),
+        technical_error=payload.editorTechnicalError or editor_state.get("technicalError"),
+        medical_review=review_status,
+        human_review_approved=human_review_approved,
+        script_status=str(script.get("status") or ""),
+        final_saved=final_saved,
+        final_confirmed=payload.finalConfirmed,
+    )
+    LOGGER.info(
+        "generation_gate script_id=%s preset=%s words=%s duration_status=%s medical_review=%s allowed=%s reason_code=%s",
+        payload.scriptId,
+        payload.durationSeconds,
+        duration_assessment(final_display_text, payload.durationSeconds).wordCount,
+        duration_assessment(final_display_text, payload.durationSeconds).status,
+        review_status,
+        gate.allowed,
+        gate.reasons[0]["code"] if gate.reasons else "none",
+    )
+    if not gate.allowed:
+        raise HTTPException(status_code=422, detail=gate.reason)
     idempotency_key = payload.idempotencyKey or _production_configuration_key(
         payload, final_display_text, final_spoken_text
     )
@@ -4492,6 +5070,27 @@ def _create_video_job(
 def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
     """Gera uma previa tecnica de 10s sempre pelo Direct Avatar."""
     now = _now()
+    script = _find_script(payload.scriptId)
+    editor_state = _script_editor_state(payload.scriptId, script)
+    approved = bool(editor_state.get("humanReviewApproved"))
+    review_status = _resolved_medical_review_status(script, editor_state)
+    selected_duration = int(editor_state.get("durationSeconds") or 45)
+    persisted_speech = normalize_editor_text(str(script.get("textoFalado") or ""))
+    final_saved = not persisted_speech or persisted_speech == normalize_editor_text(payload.displayText)
+    gate = evaluate_generation_gate(
+        speech=payload.displayText,
+        duration_seconds=selected_duration,
+        ai_operation_in_flight=False,
+        schema_valid=bool(editor_state.get("schemaValid", True)),
+        technical_error=editor_state.get("technicalError"),
+        medical_review=review_status,
+        human_review_approved=approved,
+        script_status=str(script.get("status") or ""),
+        final_saved=final_saved,
+        final_confirmed=payload.finalConfirmed,
+    )
+    if not gate.allowed:
+        raise HTTPException(status_code=422, detail=gate.reason)
     preview_display_text, preview_spoken_text = _finalize_preview_texts(payload)
     idempotency_key = payload.idempotencyKey or _preview_configuration_key(
         payload, preview_display_text, preview_spoken_text
@@ -4530,12 +5129,6 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
 
     try:
         command = _heygen_cli()
-        script = _find_script(payload.scriptId)
-        if script.get("status") != "aprovado_clinicamente":
-            raise HTTPException(
-                status_code=409,
-                detail="O roteiro precisa estar marcado como Pronto antes da prévia paga.",
-            )
         _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
         ready_looks = [look for look in private_looks if look.get("status") == "completed"]
         allowed_avatar_ids = {look.get("id") for look in ready_looks}
@@ -5041,7 +5634,9 @@ def post_production_preview(job_id: str, download: bool = False) -> FileResponse
 
 
 class LocalVideoKitCreateIn(BaseModel):
-    uploadId: str = Field(min_length=8, max_length=100)
+    uploadId: str | None = Field(default=None, min_length=8, max_length=100)
+    videoJobId: str | None = Field(default=None, min_length=1, max_length=160)
+    sourceKitJobId: str | None = Field(default=None, min_length=1, max_length=160)
     sourceName: str = Field(default="video-local.mp4", min_length=1, max_length=300)
     name: str = Field(default="Dr. Guilherme Martins", min_length=1, max_length=80)
     role: str = Field(default="Médico", min_length=1, max_length=90)
@@ -5057,6 +5652,18 @@ class LocalVideoKitCreateIn(BaseModel):
     site: str = Field(default="@drguilhermemartins", min_length=1, max_length=80)
     accent: str = Field(default="#c8e05a", pattern=r"^#[0-9a-fA-F]{6}$")
     sectionStartSeconds: float | None = Field(default=None, ge=3, le=7200)
+    sectionDurationSeconds: float | None = Field(default=3, ge=0.5, le=120)
+    sectionTransition: Literal["none", "fade", "slide_up"] | None = "fade"
+    musicTrackId: str | None = Field(default=None, max_length=80)
+    musicVolume: float = Field(default=0.12, ge=0.03, le=0.25)
+    includeCaptions: bool = True
+    captionStyle: Literal["dynamic", "clean", "editorial"] = "dynamic"
+    captionPosition: Literal["safe_bottom", "center", "upper"] = "safe_bottom"
+    highlightKeywords: bool = True
+    duckMusicDuringSpeech: bool = True
+    motionPreset: Literal["none", "subtle", "social"] = "subtle"
+    enhanceVoice: bool = True
+    outroTailSeconds: float = Field(default=10, ge=0, le=120)
     includeOpening: bool = True
     includeLowerThird: bool = True
     includeSection: bool = True
@@ -5154,12 +5761,15 @@ def _launch_local_video_kit(job_id: str) -> None:
         try:
             source = ROOT / str(job["sourcePath"])
             output = ROOT / str(job["outputPath"])
+            config = dict(job["config"])
+            music_path = _music_track_path(config.get("musicTrackId"))
             manifest = render_local_kit_video(
                 source,
                 output,
                 _local_video_kit_job_path(job_id).parent,
-                dict(job["config"]),
+                config,
                 project_root=ROOT,
+                music_path=music_path,
                 on_progress=update,
             )
             current = _get_local_video_kit_job(job_id) or job
@@ -5192,9 +5802,37 @@ def _launch_local_video_kit(job_id: str) -> None:
 def create_local_video_kit(payload: LocalVideoKitCreateIn) -> dict:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise HTTPException(status_code=503, detail="FFmpeg não está instalado.")
-    source = LOCAL_VIDEO_KIT_UPLOADS / f"{payload.uploadId}.mp4"
-    if not source.is_file():
-        raise HTTPException(status_code=404, detail="O vídeo enviado não foi encontrado.")
+    selected_sources = sum(bool(value) for value in (payload.uploadId, payload.videoJobId, payload.sourceKitJobId))
+    if selected_sources != 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Escolha um arquivo local, um vídeo pronto da produção ou um kit salvo.",
+        )
+
+    if payload.videoJobId:
+        video_job = _job_store().get("video", payload.videoJobId)
+        if not video_job:
+            raise HTTPException(status_code=404, detail="O vídeo da produção não foi encontrado.")
+        if video_job.get("status") != "pronto":
+            raise HTTPException(status_code=409, detail="O vídeo da produção ainda não está pronto.")
+        source = _local_output_path(video_job.get("outputPath"))
+        if not source:
+            source = LOCAL_VIDEO_KIT_UPLOADS / f"kit-import-{uuid.uuid4().hex[:16]}.mp4"
+            _copy_or_download_video(video_job, source)
+    elif payload.sourceKitJobId:
+        source_job = _get_local_video_kit_job(payload.sourceKitJobId)
+        if not source_job:
+            raise HTTPException(status_code=404, detail="O kit salvo não foi encontrado.")
+        if source_job.get("status") != "pronto":
+            raise HTTPException(status_code=409, detail="O kit salvo ainda não está pronto.")
+        source = _local_output_path(source_job.get("sourcePath"))
+        if not source:
+            raise HTTPException(status_code=404, detail="O vídeo original do kit salvo não foi encontrado.")
+    else:
+        source = LOCAL_VIDEO_KIT_UPLOADS / f"{payload.uploadId}.mp4"
+        if not source.is_file():
+            raise HTTPException(status_code=404, detail="O vídeo enviado não foi encontrado.")
+
     job_id = f"kit-{uuid.uuid4().hex[:16]}"
     safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", _norm(Path(payload.sourceName).stem)).strip("-")
     output = LOCAL_VIDEO_KIT_OUTPUTS / f"{safe_name or 'video-local'}--kit-grafico--{job_id}.mp4"
@@ -5206,8 +5844,10 @@ def create_local_video_kit(payload: LocalVideoKitCreateIn) -> dict:
         "etapa": "Preparando edição local",
         "sourceName": payload.sourceName,
         "sourcePath": str(source.relative_to(ROOT)),
+        "sourceVideoJobId": payload.videoJobId,
+        "sourceKitJobId": payload.sourceKitJobId,
         "outputPath": str(output.relative_to(ROOT)),
-        "config": payload.model_dump(exclude={"uploadId", "sourceName"}),
+        "config": payload.model_dump(exclude={"uploadId", "videoJobId", "sourceKitJobId", "sourceName"}),
         "externalCreditsUsed": False,
         "criadoEm": now,
         "atualizadoEm": now,
@@ -5228,6 +5868,35 @@ def get_local_video_kit(job_id: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="Edição local não encontrada.")
     return {"job": job}
+
+
+@app.post("/api/local-video-kit/{job_id}/retry")
+def retry_local_video_kit(job_id: str) -> dict:
+    """Retoma um render interrompido sem criar outro job para a interface."""
+    job = _get_local_video_kit_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Edição local não encontrada.")
+    source = _local_output_path(job.get("sourcePath"))
+    if not source:
+        raise HTTPException(status_code=404, detail="Vídeo original não encontrado.")
+    if job.get("status") in {"fila", "processando"}:
+        try:
+            updated_at = datetime.fromisoformat(str(job.get("atualizadoEm") or ""))
+            age_seconds = (datetime.now(timezone.utc) - updated_at).total_seconds()
+        except ValueError:
+            age_seconds = 61
+        if age_seconds < 60:
+            raise HTTPException(status_code=409, detail="A edição local ainda está processando.")
+    job.update(
+        status="fila",
+        progresso=2,
+        etapa="Retomando edição local",
+        atualizadoEm=_now(),
+    )
+    job.pop("erro", None)
+    _save_local_video_kit_job(job)
+    _launch_local_video_kit(job_id)
+    return {"ok": True, "job": job}
 
 
 @app.get("/api/local-video-kit/{job_id}/source")
@@ -8108,6 +8777,7 @@ def _delete_script_local_data(script_id: str) -> dict[str, Any]:
     try:
         conn.execute("BEGIN IMMEDIATE")
         for table in (
+            "script_editor_states",
             "production_profiles",
             "scene_plans",
             "visual_plans",
@@ -8272,12 +8942,9 @@ def _narration_quality_issues(
         elif not normalized.lower().endswith(selected_outro.lower()):
             issues.append("Encerramento escolhido precisa ser a ultima frase")
 
-    word_count = len([word for word in re.split(r"\s+", normalized) if word])
-    minimum_words, maximum_words = _duration_word_limits(duration_seconds)
-    if word_count < minimum_words:
-        issues.append(f"Texto muito curto para {duration_seconds}s")
-    if word_count > maximum_words:
-        issues.append(f"Texto muito longo para {duration_seconds}s ({word_count} palavras; maximo {maximum_words})")
+    assessment = duration_assessment(normalized, duration_seconds)
+    if assessment.status == "blocking":
+        issues.append(assessment.message)
 
     return list(dict.fromkeys(issues))
 
@@ -8308,13 +8975,8 @@ def _has_repeated_narrative_sentence(text: str) -> bool:
 
 
 def _video_agent_narration_quality_issues(text: str, duration_seconds: int) -> list[str]:
-    word_count = len([word for word in re.split(r"\s+", text.strip()) if word])
-    _minimum_words, maximum_words = video_agent_word_limits(duration_seconds)
+    """Valida apenas problemas próprios do modo; duração pertence ao gate central."""
     issues: list[str] = []
-    if word_count > maximum_words:
-        issues.append(
-            f"Texto longo para o HeyGen Video Agent em {duration_seconds}s ({word_count} palavras; maximo {maximum_words})"
-        )
     if _has_repeated_narrative_sentence(text):
         issues.append("A fala repete a mesma informacao em mais de uma frase")
     return issues
@@ -8340,8 +9002,6 @@ def _validate_final_narration(
         for issue in _narration_quality_issues(final_text, duration_seconds, selected_outro)
         if not issue.startswith("Texto muito curto")
     ]
-    if generation_mode in {"video_agent", "cinematic"}:
-        quality_issues.extend(_video_agent_narration_quality_issues(final_text, duration_seconds))
     if quality_issues:
         reasons = "; ".join(quality_issues)
         raise HTTPException(
@@ -8818,7 +9478,7 @@ def get_pack_photo_asset(asset_id: str) -> FileResponse:
     path = ROOT / asset["cachedAssetPath"]
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Arquivo da foto do Pack nao encontrado.")
-    return FileResponse(path)
+    return FileResponse(path, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/packs/generate")
@@ -9055,6 +9715,9 @@ def update_pack_carousel_layout(
 
     slide["layoutId"] = payload.layout
     slide["layout"] = payload.layout
+    # Mantém o alias legado sincronizado para que uma leitura posterior não
+    # recupere o layout anterior.
+    pack["slides"] = carousel
     pack["designPlan"] = _pack_design_plan(pack)
     _save_visual_pack(script_id, pack)
     return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
@@ -9096,6 +9759,9 @@ def update_pack_carousel_photo(
         fields = dict(slide.get("fields") or empty_fields())
         fields["photoId"] = ""
         slide["fields"] = fields
+    # ``carousel`` é a lista canônica editada pela interface; ``slides`` ainda
+    # existe para compatibilidade com Packs antigos e precisa refletir a troca.
+    pack["slides"] = carousel
     pack["designPlan"] = _pack_design_plan(pack)
     _save_visual_pack(script_id, pack)
     return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}

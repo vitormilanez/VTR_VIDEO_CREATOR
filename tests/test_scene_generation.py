@@ -54,12 +54,18 @@ class SceneGenerationTests(unittest.TestCase):
 
     def test_paid_submission_stops_before_provider_when_script_is_not_approved(self) -> None:
         payload = server.SceneVideoConfirmIn(confirmed=True)
-        with patch.object(server, "_find_script", return_value={"id": "script-1", "status": "rascunho"}), patch.object(
+        script = {
+            "id": "script-1",
+            "status": "rascunho",
+            "textoFalado": " ".join(f"palavra{index}" for index in range(100)),
+        }
+        with patch.object(server, "_find_script", return_value=script), patch.object(
             server, "_heygen_cli"
         ) as heygen_cli:
             with self.assertRaises(server.HTTPException) as raised:
                 server.submit_scene_generation("script-1", payload)
-        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("Pronto", raised.exception.detail)
         heygen_cli.assert_not_called()
 
 

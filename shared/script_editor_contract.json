@@ -1,0 +1,18 @@
+{
+  "contractVersion": "2.0.0",
+  "durationPresets": [10, 15, 30, 45, 60],
+  "wordPattern": "[0-9A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-’'][0-9A-Za-zÀ-ÖØ-öø-ÿ]+)*",
+  "speechProfile": {
+    "id": "pt-br-medical-default",
+    "language": "pt-BR",
+    "wordsPerMinute": 144,
+    "tolerancePercent": 0.07,
+    "generationTargetMinPercent": 0.88,
+    "generationTargetMaxPercent": 0.94
+  },
+  "editorialProfile": {
+    "id": "pt-br-medical-editorial",
+    "language": "pt-BR",
+    "promptVersion": "2.0.0"
+  }
+}

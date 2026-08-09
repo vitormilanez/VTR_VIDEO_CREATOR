@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from api.pack_design import (
     PACK_LAYOUTS,
     PACK_SCHEMA_VERSION,
+    PHOTO_LIBRARY,
     empty_fields,
     normalize_slide,
     pack_slides,
@@ -104,10 +107,71 @@ def test_sample_pack_follows_closed_contract() -> None:
     assert validate_pack_contract(sample_pack()) == []
 
 
+def test_photo_library_ids_point_to_their_visual_content() -> None:
+    assert PHOTO_LIBRARY["wide-office"]["file"].endswith("vine8178.jpg")
+    assert PHOTO_LIBRARY["seated-side"]["file"].endswith("vine8172.jpg")
+    assert PHOTO_LIBRARY["seated-lean"]["file"].endswith("vine8163.jpg")
+    assert PHOTO_LIBRARY["seated-arm"]["file"].endswith("vine8150.jpg")
+    assert PHOTO_LIBRARY["seated-front"]["file"].endswith("vine8142.jpg")
+    assert PHOTO_LIBRARY["portrait-closeup"]["file"].endswith("vine8121.jpg")
+
+
+def test_normalize_slide_refreshes_stale_photo_path_from_canonical_library() -> None:
+    normalized = normalize_slide(
+        {
+            "layoutId": "hero_photo",
+            "fields": _fields(headline="Capa", photoId="wide-office"),
+            "photoAsset": {
+                "id": "wide-office",
+                "cachedAssetPath": "data/pack_assets/photos/vine8121.jpg",
+            },
+        },
+        0,
+    )
+
+    assert normalized["photoAsset"]["cachedAssetPath"].endswith("vine8178.jpg")
+
+
+def test_pack_slides_prefers_edited_carousel_over_legacy_alias() -> None:
+    current = [{"fields": {"photoId": "wide-office"}}]
+    legacy = [{"fields": {"photoId": "seated-front"}}]
+
+    assert pack_slides({"carousel": current, "slides": legacy}) is current
+
+
+def test_photo_update_synchronizes_carousel_and_legacy_alias(monkeypatch) -> None:
+    from api import server
+
+    pack = sample_pack()
+    pack["carousel"] = deepcopy(pack["carousel"])
+    pack["slides"] = deepcopy(pack["slides"])
+    asset = {
+        "id": "wide-office",
+        "name": "Consultório amplo",
+        "cachedAssetPath": "data/pack_assets/photos/vine8178.jpg",
+        "facePointX": 0.5,
+        "facePointY": 0.4,
+        "brightness": 1.0,
+    }
+    monkeypatch.setattr(server, "_find_script", lambda _script_id: {})
+    monkeypatch.setattr(server, "_get_visual_pack", lambda _script_id: pack)
+    monkeypatch.setattr(server, "_pack_photo_asset", lambda _asset_id: asset)
+    monkeypatch.setattr(server, "_save_visual_pack", lambda _script_id, value: value)
+
+    response = server.update_pack_carousel_photo(
+        "s-test",
+        0,
+        server.PackSlidePhotoIn(photoAssetId="wide-office"),
+    )
+
+    assert response["pack"]["carousel"][0]["fields"]["photoId"] == "wide-office"
+    assert response["pack"]["slides"] == response["pack"]["carousel"]
+
+
 def test_contract_rejects_extra_slide_and_long_headline() -> None:
     pack = sample_pack()
-    pack["slides"] = [*pack["slides"], pack["slides"][-1]]
-    pack["slides"][0]["fields"]["headline"] = "Uma manchete longa demais para caber com leitura simples no primeiro slide"
+    pack["carousel"] = [*pack["carousel"], pack["carousel"][-1]]
+    pack["carousel"][0]["fields"]["headline"] = "Uma manchete longa demais para caber com leitura simples no primeiro slide"
 
     errors = validate_pack_contract(pack)
 

@@ -60,7 +60,7 @@ DARK_LAYOUTS = {"hero_photo", "big_statement", "three_points", "photo_overlay", 
 # 55 MB de fotografias no Git.
 PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
     "wide-office": {
-        "file": "data/pack_assets/photos/vine8121.jpg",
+        "file": "data/pack_assets/photos/vine8178.jpg",
         "name": "Consultorio aberto",
         "description": "plano aberto no consultorio, bom para capa com respiro",
         "facePointX": 0.48,
@@ -68,7 +68,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.42,
     },
     "seated-side": {
-        "file": "data/pack_assets/photos/vine8142.jpg",
+        "file": "data/pack_assets/photos/vine8172.jpg",
         "name": "Sentado de lado",
         "description": "sentado de perfil, espaco lateral para texto",
         "facePointX": 0.46,
@@ -76,7 +76,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.36,
     },
     "seated-lean": {
-        "file": "data/pack_assets/photos/vine8150.jpg",
+        "file": "data/pack_assets/photos/vine8163.jpg",
         "name": "Sentado inclinado",
         "description": "sentado inclinado, corpo inteiro e olhar direto",
         "facePointX": 0.44,
@@ -84,7 +84,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.34,
     },
     "seated-arm": {
-        "file": "data/pack_assets/photos/vine8163.jpg",
+        "file": "data/pack_assets/photos/vine8150.jpg",
         "name": "Sentado com braco apoiado",
         "description": "retrato vertical com postura clinica e fundo limpo",
         "facePointX": 0.52,
@@ -92,7 +92,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.39,
     },
     "seated-front": {
-        "file": "data/pack_assets/photos/vine8172.jpg",
+        "file": "data/pack_assets/photos/vine8142.jpg",
         "name": "Sentado de frente",
         "description": "corpo inteiro de frente, ideal para capa e CTA",
         "facePointX": 0.44,
@@ -100,7 +100,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.31,
     },
     "portrait-closeup": {
-        "file": "data/pack_assets/photos/vine8178.jpg",
+        "file": "data/pack_assets/photos/vine8121.jpg",
         "name": "Retrato proximo",
         "description": "close-up do rosto, ideal para citacao medica",
         "facePointX": 0.52,
@@ -213,6 +213,10 @@ def normalize_slide(slide: dict[str, Any], index: int = 0) -> dict[str, Any]:
     photo = slide.get("photoAsset") if isinstance(slide.get("photoAsset"), dict) else None
     if photo and photo.get("id") in PHOTO_LIBRARY:
         fields["photoId"] = str(photo["id"])
+        # O ID semântico é estável; o caminho pode ter sido salvo por uma
+        # versão com o mapeamento das fotos trocado. Reidrata sempre a partir
+        # da biblioteca canônica para migrar Packs existentes.
+        photo = photo_asset(fields["photoId"])
     elif fields["photoId"] in PHOTO_LIBRARY:
         photo = photo_asset(fields["photoId"])
 
@@ -293,8 +297,11 @@ def _has_item_content(value: Any) -> bool:
 
 
 def pack_slides(pack: dict[str, Any]) -> list[Any]:
-    """Retorna a lista de slides preenchida, independentemente do alias usado."""
-    candidates = [pack.get("slides"), pack.get("carousel")]
+    """Retorna a lista canônica do carrossel, aceitando o alias legado ``slides``."""
+    # A interface edita ``carousel``. Quando um Pack antigo contém os dois
+    # campos, priorizar ``slides`` restaura silenciosamente fotos e layouts
+    # antigos na próxima leitura.
+    candidates = [pack.get("carousel"), pack.get("slides")]
     for candidate in candidates:
         if isinstance(candidate, list) and candidate:
             return candidate

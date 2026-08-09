@@ -65,7 +65,7 @@ export function ProducaoPage() {
       title="Producao de videos"
       actions={
         <Button asChild size="sm" variant="secondary">
-          <Link to="/kit-local">
+          <Link to="/kit-local" search={{ videoJobId: undefined, sourceName: undefined }}>
             <Layers3 className="mr-1.5 h-4 w-4" /> Aplicar kit local
           </Link>
         </Button>

@@ -3,6 +3,12 @@
 import type { HydratePayload } from "../store";
 import type { AppSettings, CalendarPost, EditorialTone, Idea, Script, Trend } from "../mock-data";
 import type { VideoJob } from "../mock-data";
+import type {
+  DurationPreset,
+  EditorAssistResult,
+  EditorOperation,
+  MedicalReviewStatus,
+} from "../script-editor";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
 
@@ -519,7 +525,8 @@ export interface SceneDirectionSuggestion {
   reason: string;
 }
 
-export type VideoVisualType = "none" | "full_slide" | "overlay" | "statistic" | "comparison" | "quote";
+export type VideoVisualType =
+  "none" | "full_slide" | "overlay" | "statistic" | "comparison" | "quote";
 export type VideoVisualLayout =
   | "hero_photo"
   | "photo_split"
@@ -769,10 +776,9 @@ export async function fetchMusicTracks(): Promise<MusicTrack[]> {
 }
 
 export async function fetchAvatarSets(): Promise<AvatarSet[]> {
-  const response = await requestJson<{ ok: boolean; avatarSets: AvatarSet[] }>(
-    "/api/avatar-sets",
-    { method: "GET" },
-  );
+  const response = await requestJson<{ ok: boolean; avatarSets: AvatarSet[] }>("/api/avatar-sets", {
+    method: "GET",
+  });
   return response.avatarSets;
 }
 
@@ -1161,6 +1167,12 @@ export async function createHeyGenVideo(
     cinematicPrompt?: string;
     outroText?: string;
     idempotencyKey?: string;
+    medicalReviewStatus?: MedicalReviewStatus;
+    humanReviewApproved?: boolean;
+    aiOperationInFlight?: boolean;
+    aiSchemaValid?: boolean;
+    editorTechnicalError?: string | null;
+    finalConfirmed?: boolean;
   },
 ): Promise<VideoJob> {
   const baseKey = stableProductionKey("video", {
@@ -1177,6 +1189,70 @@ export async function createHeyGenVideo(
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel enviar ao HeyGen."));
   return ((await res.json()) as { job: VideoJob }).job;
+}
+
+export interface ScriptEditorAssistInput {
+  operation: EditorOperation;
+  scriptId?: string;
+  text: string;
+  title: string;
+  sourceText?: string;
+  contextText?: string;
+  medicalCautions?: string;
+  riskLevel?: string;
+  claims?: string[];
+  glossary?: string[];
+  cta?: string;
+  durationSeconds: DurationPreset;
+  speechProfileId?: string;
+  editorialProfileId?: string;
+  humanReviewApproved?: boolean;
+}
+
+export interface ScriptEditorState {
+  scriptId: string;
+  durationSeconds: DurationPreset;
+  humanReviewApproved: boolean;
+  titleChoice: "current" | "suggested";
+  suggestedTitle?: string | null;
+  schemaValid: boolean;
+  technicalError?: string | null;
+  previousScript?: string | null;
+  lastResult?: EditorAssistResult | null;
+  updatedAt?: string | null;
+  legacyFallback?: boolean;
+}
+
+const editorAssistInFlight = new Map<string, Promise<EditorAssistResult>>();
+
+export function runScriptEditorAssist(input: ScriptEditorAssistInput): Promise<EditorAssistResult> {
+  const key = JSON.stringify(input);
+  const existing = editorAssistInFlight.get(key);
+  if (existing) return existing;
+  const request = postJson<EditorAssistResult>("/api/scripts/editor-assist", input).finally(() => {
+    editorAssistInFlight.delete(key);
+  });
+  editorAssistInFlight.set(key, request);
+  return request;
+}
+
+export async function fetchScriptEditorState(scriptId: string): Promise<ScriptEditorState> {
+  const response = await requestJson<{ ok: boolean; state: ScriptEditorState }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/editor-state`,
+    { method: "GET" },
+  );
+  return response.state;
+}
+
+export async function saveScriptEditorState(
+  scriptId: string,
+  state: Omit<ScriptEditorState, "scriptId" | "updatedAt" | "legacyFallback">,
+): Promise<ScriptEditorState> {
+  const response = await requestJson<{ ok: boolean; state: ScriptEditorState }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/editor-state`,
+    { method: "PUT", body: JSON.stringify(state) },
+  );
+  return response.state;
 }
 
 export async function naturalizeScript(input: {
@@ -1231,6 +1307,7 @@ export async function createHeyGenPreview(
     displayText: string;
     spokenText?: string;
     idempotencyKey?: string;
+    finalConfirmed?: boolean;
   },
 ): Promise<VideoJob> {
   const idempotencyKey =
@@ -1252,6 +1329,10 @@ export async function createHeyGenPreview(
 
 export function videoDownloadUrl(jobId: string): string {
   return `${BASE}/api/videos/${encodeURIComponent(jobId)}/download`;
+}
+
+export function videoFileUrl(jobId: string): string {
+  return `${BASE}/api/videos/${encodeURIComponent(jobId)}/file`;
 }
 
 export type PostProductionStatus =
@@ -1367,13 +1448,15 @@ export async function updatePostProductionEvents(
   jobId: string,
   events: Array<
     Pick<VisualTimelineEvent, "id"> &
-      Partial<Pick<VisualTimelineEvent, "enabled" | "visualText" | "reviewStatus" | "interactionType">>
+      Partial<
+        Pick<VisualTimelineEvent, "enabled" | "visualText" | "reviewStatus" | "interactionType">
+      >
   >,
 ): Promise<{ job: PostProductionJob; timeline: PostProductionArtifacts["timeline"] }> {
-  return requestJson(
-    `/api/post-production/${encodeURIComponent(jobId)}/events`,
-    { method: "PATCH", body: JSON.stringify({ events }) },
-  );
+  return requestJson(`/api/post-production/${encodeURIComponent(jobId)}/events`, {
+    method: "PATCH",
+    body: JSON.stringify({ events }),
+  });
 }
 
 export async function runPostProductionPreflight(
@@ -1413,6 +1496,18 @@ export interface LocalVideoKitConfig {
   site: string;
   accent: string;
   sectionStartSeconds?: number | null;
+  sectionDurationSeconds?: number | null;
+  sectionTransition?: "none" | "fade" | "slide_up" | null;
+  musicTrackId?: string | null;
+  musicVolume?: number;
+  includeCaptions: boolean;
+  captionStyle: "dynamic" | "clean" | "editorial";
+  captionPosition: "safe_bottom" | "center" | "upper";
+  highlightKeywords: boolean;
+  duckMusicDuringSpeech: boolean;
+  motionPreset: "none" | "subtle" | "social";
+  enhanceVoice: boolean;
+  outroTailSeconds?: number;
   includeOpening: boolean;
   includeLowerThird: boolean;
   includeSection: boolean;
@@ -1426,6 +1521,7 @@ export interface LocalVideoKitJob {
   etapa: string;
   sourceName: string;
   sourcePath: string;
+  sourceVideoJobId?: string | null;
   outputPath: string;
   coverPath?: string;
   config: LocalVideoKitConfig;
@@ -1454,14 +1550,19 @@ export async function uploadLocalVideoKitSource(
 }
 
 export async function createLocalVideoKit(input: {
-  uploadId: string;
+  uploadId?: string;
+  videoJobId?: string;
+  sourceKitJobId?: string;
   sourceName: string;
   config: LocalVideoKitConfig;
 }): Promise<LocalVideoKitJob> {
-  const response = await postJson<{ ok: boolean; job: LocalVideoKitJob }>(
-    "/api/local-video-kit",
-    { uploadId: input.uploadId, sourceName: input.sourceName, ...input.config },
-  );
+  const response = await postJson<{ ok: boolean; job: LocalVideoKitJob }>("/api/local-video-kit", {
+    uploadId: input.uploadId,
+    videoJobId: input.videoJobId,
+    sourceKitJobId: input.sourceKitJobId,
+    sourceName: input.sourceName,
+    ...input.config,
+  });
   return response.job;
 }
 
@@ -1603,7 +1704,9 @@ export function cutFileUrl(projectId: string, filename: string, download = false
   }`;
 }
 
-export async function refreshHeyGenVideo(jobId: string): Promise<{ job: VideoJob; composedJob?: VideoJob | null }> {
+export async function refreshHeyGenVideo(
+  jobId: string,
+): Promise<{ job: VideoJob; composedJob?: VideoJob | null }> {
   const res = await fetch(`${BASE}/api/videos/${jobId}/refresh`, { method: "POST" });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel consultar o HeyGen."));
   return (await res.json()) as { job: VideoJob; composedJob?: VideoJob | null };

@@ -1,3 +1,5 @@
+import { assessScriptDuration, type DurationPreset } from "./script-editor";
+
 export const DEFAULT_OUTRO = "Me siga para mais dicas, e obrigado.";
 const LEGACY_CAPTURE_OUTRO = "Veja o contexto no perfil.";
 
@@ -44,17 +46,8 @@ export function narrationQualityIssues(
     }
   }
 
-  const wordCount = normalized.split(/\s+/).filter(Boolean).length;
-  const minimumWords = minimumWordsForDuration(durationSeconds);
-  if (wordCount < minimumWords) {
-    issues.push(`Texto muito curto para ${durationSeconds}s. Ajuste ou escolha uma duracao menor.`);
-  }
-  const maximumWords = maximumWordsForDuration(durationSeconds);
-  if (wordCount > maximumWords) {
-    issues.push(
-      `Texto muito longo para ${durationSeconds}s (${wordCount} palavras). Encurte para no máximo ${maximumWords}.`,
-    );
-  }
+  const assessment = assessScriptDuration(text, durationSeconds as DurationPreset);
+  if (assessment.status === "blocking") issues.push(assessment.message);
 
   return Array.from(new Set(issues));
 }
@@ -70,27 +63,68 @@ export function videoAgentMaximumWordsForDuration(durationSeconds: number): numb
 
 export function videoAgentNarrationQualityIssues(text: string, durationSeconds: number): string[] {
   const normalized = text.replace(/\s+/g, " ").trim();
-  const words = normalized.split(/\s+/).filter(Boolean).length;
-  const maximumWords = videoAgentMaximumWordsForDuration(durationSeconds);
   const issues: string[] = [];
-  if (words > maximumWords) {
-    issues.push(
-      `Texto longo para o HeyGen Video Agent em ${durationSeconds}s (${words} palavras). Encurte para no máximo ${maximumWords}.`,
-    );
-  }
   const stopWords = new Set([
-    "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e", "em", "esse", "esta",
-    "este", "é", "o", "os", "na", "nas", "no", "nos", "ou", "para", "por", "que", "se", "sua", "um",
-    "uma", "mais", "menos", "muito", "tambem", "pode", "podem", "ser", "sao", "tem", "têm",
+    "a",
+    "ao",
+    "aos",
+    "as",
+    "com",
+    "da",
+    "das",
+    "de",
+    "do",
+    "dos",
+    "e",
+    "em",
+    "esse",
+    "esta",
+    "este",
+    "é",
+    "o",
+    "os",
+    "na",
+    "nas",
+    "no",
+    "nos",
+    "ou",
+    "para",
+    "por",
+    "que",
+    "se",
+    "sua",
+    "um",
+    "uma",
+    "mais",
+    "menos",
+    "muito",
+    "tambem",
+    "pode",
+    "podem",
+    "ser",
+    "sao",
+    "tem",
+    "têm",
   ]);
   const sentences = normalized.toLowerCase().match(/[^.!?…]+[.!?…]*/g) ?? [];
   const sets = sentences
-    .map((sentence) => new Set((sentence.match(/[a-záàâãéêíóôõúç]{4,}/g) ?? []).filter((word) => !stopWords.has(word))))
+    .map(
+      (sentence) =>
+        new Set(
+          (sentence.match(/[a-záàâãéêíóôõúç]{4,}/g) ?? []).filter((word) => !stopWords.has(word)),
+        ),
+    )
     .filter((words) => words.size >= 4);
-  if (sets.some((current, index) => sets.slice(0, index).some((previous) => {
-    const overlap = [...current].filter((word) => previous.has(word)).length / Math.min(current.size, previous.size);
-    return overlap >= 0.5;
-  }))) {
+  if (
+    sets.some((current, index) =>
+      sets.slice(0, index).some((previous) => {
+        const overlap =
+          [...current].filter((word) => previous.has(word)).length /
+          Math.min(current.size, previous.size);
+        return overlap >= 0.5;
+      }),
+    )
+  ) {
     issues.push("A fala repete a mesma informação em mais de uma frase.");
   }
   return issues;
@@ -128,19 +162,11 @@ export function removeNarrationOutro(text: string, outro = ""): string {
 }
 
 export function minimumWordsForDuration(durationSeconds: number): number {
-  if (durationSeconds <= 10) return 18;
-  if (durationSeconds <= 15) return 25;
-  if (durationSeconds <= 30) return 55;
-  if (durationSeconds <= 45) return 85;
-  return 115;
+  return assessScriptDuration("", durationSeconds as DurationPreset).generationMinWords;
 }
 
 export function maximumWordsForDuration(durationSeconds: number): number {
-  if (durationSeconds <= 10) return 24;
-  if (durationSeconds <= 15) return 36;
-  if (durationSeconds <= 30) return 72;
-  if (durationSeconds <= 45) return 108;
-  return 144;
+  return assessScriptDuration("", durationSeconds as DurationPreset).generationMaxWords;
 }
 
 function escapeRegExp(value: string): string {

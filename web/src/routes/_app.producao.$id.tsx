@@ -56,6 +56,7 @@ import {
   ExternalLink,
   Film,
   Instagram,
+  Layers3,
   Loader2,
   Save,
   Sparkles,
@@ -314,6 +315,19 @@ function VideoDetalhe() {
                 <Download className="mr-1 h-4 w-4" />
                 {job.isComposed ? "Baixar vídeo final" : "Baixar vídeo"}
               </a>
+            </Button>
+          ) : null}
+          {job.status === "pronto" && job.videoUrl ? (
+            <Button size="sm" variant="secondary" asChild>
+              <Link
+                to="/kit-local"
+                search={{
+                  videoJobId: job.id,
+                  sourceName: script?.titulo ?? `Video ${job.id}`,
+                }}
+              >
+                <Layers3 className="mr-1 h-4 w-4" /> Editar localmente
+              </Link>
             </Button>
           ) : null}
           {job.status === "pronto" && job.videoUrl ? (
@@ -713,7 +727,6 @@ function PostProductionPanel({
   onReportChange: (value: PreflightReport | null) => void;
   onBusyChange: (value: boolean) => void;
 }) {
-  const canReview = Boolean(artifacts);
 
   async function saveEvents() {
     if (!artifacts) return;
@@ -816,7 +829,7 @@ function PostProductionPanel({
       <Progress value={job.progresso} className="mt-3" />
       {job.erro ? <p className="mt-3 rounded bg-destructive/10 p-2 text-xs text-destructive">{job.erro}</p> : null}
 
-      {canReview ? (
+      {artifacts ? (
         <>
           <div className="mt-4 rounded-lg bg-muted/40 p-3">
             <div className="text-xs font-semibold">Transcrição</div>

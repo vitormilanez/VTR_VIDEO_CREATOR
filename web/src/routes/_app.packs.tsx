@@ -284,11 +284,18 @@ function PacksPage() {
   }
 
   async function choosePhoto(slideIndex: number, photoAssetId: string) {
-    if (!script || !pack || photoIdOf(pack.carousel[slideIndex]) === photoAssetId) return;
+    if (
+      !script ||
+      !pack ||
+      savingPhotoIndex !== null ||
+      photoIdOf(pack.carousel[slideIndex]) === photoAssetId
+    )
+      return;
     const previousPack = pack;
     const selectedAsset = photoAssets.find((asset) => asset.id === photoAssetId);
     if (!selectedAsset) return;
     setSavingPhotoIndex(slideIndex);
+    const notice = toast.loading(`Atualizando a foto do slide ${slideIndex + 1}...`);
     setPack({
       ...pack,
       carousel: pack.carousel.map((slide, index) =>
@@ -312,10 +319,25 @@ function PacksPage() {
     try {
       const response = await updatePackCarouselPhoto(script.id, slideIndex, photoAssetId);
       setPack(response.pack);
-      toast.success(`Foto do slide ${slideIndex + 1} atualizada.`);
+      try {
+        const exported = await exportPack(script, response.pack);
+        toast.success(
+          `Foto do slide ${slideIndex + 1} atualizada e ${exported.images} PNGs regenerados.`,
+          { id: notice },
+        );
+      } catch (error) {
+        toast.error(
+          `A foto foi salva, mas os PNGs não foram regenerados: ${
+            error instanceof Error ? error.message : "erro na exportação"
+          }`,
+          { id: notice, duration: 9000 },
+        );
+      }
     } catch (error) {
       setPack(previousPack);
-      toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a foto.");
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a foto.", {
+        id: notice,
+      });
     } finally {
       setSavingPhotoIndex(null);
     }
@@ -540,7 +562,7 @@ function PacksPage() {
                               <Select
                                 value={photoIdOf(slide)}
                                 onValueChange={(value) => choosePhoto(index, value)}
-                                disabled={savingPhotoIndex === index || photoAssets.length === 0}
+                                disabled={savingPhotoIndex !== null || photoAssets.length === 0}
                               >
                                 <SelectTrigger
                                   className="h-9 min-w-0 flex-1 text-xs"

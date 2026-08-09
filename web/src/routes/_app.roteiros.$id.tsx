@@ -8,7 +8,6 @@ import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import {
   DEFAULT_OUTRO,
-  maximumWordsForDuration,
   narrationQualityIssues,
   normalizeNarrationOutro,
   removeNarrationOutro,
@@ -25,15 +24,17 @@ import {
   fetchHeyGenCatalog,
   fetchMusicTracks,
   fetchProductionProfile,
+  fetchScriptEditorState,
   fetchSceneGenerationPlan,
   fetchScenePlan,
   fetchVideoSlideRender,
   fetchVisualPlan,
   generateSceneDirection,
   generateVisualDirection,
-  naturalizeScript,
+  runScriptEditorAssist,
   saveAvatarSet,
   saveProductionProfile,
+  saveScriptEditorState,
   saveScript,
   saveScenePlan,
   renderVideoSlides,
@@ -53,6 +54,17 @@ import {
   type VisualPlan,
   type VoiceMood,
 } from "@/lib/api/local";
+import {
+  DURATION_PRESETS,
+  assessScriptDuration,
+  durationStatusLabel,
+  evaluateGenerationGate,
+  medicalReviewForRisk,
+  normalizeScriptText,
+  type EditorAssistResult,
+  type EditorOperation,
+  type MedicalReviewStatus,
+} from "@/lib/script-editor";
 import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -211,7 +223,9 @@ function RoteiroDetalhe() {
   const [editingAvatarSet, setEditingAvatarSet] = useState<AvatarSet | null>(null);
   const [scenePlan, setScenePlan] = useState<ScenePlan | null>(null);
   const [scenePlanLoading, setScenePlanLoading] = useState(true);
-  const [sceneGenerationPlan, setSceneGenerationPlan] = useState<SceneGenerationResult | null>(null);
+  const [sceneGenerationPlan, setSceneGenerationPlan] = useState<SceneGenerationResult | null>(
+    null,
+  );
   const [sceneGenerationPlanLoading, setSceneGenerationPlanLoading] = useState(false);
   const [visualPlan, setVisualPlan] = useState<VisualPlan | null>(null);
   const [visualPlanLoading, setVisualPlanLoading] = useState(true);
@@ -253,7 +267,18 @@ function RoteiroDetalhe() {
     recommendedVoiceSpeed: number;
   } | null>(null);
   const [naturalizing, setNaturalizing] = useState(false);
+  const [activeEditorOperation, setActiveEditorOperation] = useState<EditorOperation | null>(null);
+  const [lastEditorResult, setLastEditorResult] = useState<EditorAssistResult | null>(null);
+  const [previousAiScript, setPreviousAiScript] = useState<string | null>(null);
+  const [editorTechnicalError, setEditorTechnicalError] = useState<string | null>(null);
+  const [editorSchemaValid, setEditorSchemaValid] = useState(true);
+  const [humanReviewApproved, setHumanReviewApproved] = useState(false);
+  const [titleChoice, setTitleChoice] = useState<"current" | "suggested">("current");
+  const [titleBeforeSuggestion, setTitleBeforeSuggestion] = useState(script?.titulo ?? "");
+  const [editorStateLoaded, setEditorStateLoaded] = useState(false);
   const lastSavedProfileKey = useRef("");
+  const lastSavedEditorStateKey = useRef("");
+  const sendPromiseRef = useRef<Promise<void> | null>(null);
   const existingJobs = useMemo(
     () =>
       videoJobs
@@ -274,41 +299,90 @@ function RoteiroDetalhe() {
   );
   const latestJob = existingJobs[0];
   const latestPreview = previewJobs[0];
-  const qualityIssues = useMemo(() => {
-    const base = narrationQualityIssues(
-      displayText,
-      durationSeconds,
-      ctaMode === "manual" ? outroText : "",
-    );
-    return heygenAgentMode
-      ? [...new Set([...base, ...videoAgentNarrationQualityIssues(displayText, durationSeconds)])]
-      : base;
-  }, [ctaMode, displayText, durationSeconds, heygenAgentMode, outroText]);
-  const blockingQualityIssues = useMemo(
-    () => qualityIssues.filter((issue) => !issue.startsWith("Texto muito curto")),
-    [qualityIssues],
+  const durationAssessment = useMemo(
+    () => assessScriptDuration(displayText, durationSeconds),
+    [displayText, durationSeconds],
   );
+  const technicalQualityIssues = useMemo(
+    () =>
+      narrationQualityIssues(displayText, durationSeconds, ctaMode === "manual" ? outroText : ""),
+    [ctaMode, displayText, durationSeconds, outroText],
+  );
+  const qualityIssues = useMemo(() => {
+    const editorial = heygenAgentMode
+      ? videoAgentNarrationQualityIssues(displayText, durationSeconds)
+      : [];
+    return [...new Set([...technicalQualityIssues, ...editorial])];
+  }, [displayText, durationSeconds, heygenAgentMode, technicalQualityIssues]);
+  const blockingQualityIssues = technicalQualityIssues;
   const hasHighCreditConsumption = durationSeconds >= 45;
   const approvalReady = draft?.status === "aprovado_clinicamente";
-  const narrationWords = displayText.trim().split(/\s+/).filter(Boolean).length;
-  const estimatedSpeechSeconds = Math.max(1, Math.round(narrationWords / 2.4));
+  const narrationWords = durationAssessment.wordCount;
+  const estimatedSpeechSeconds = Math.max(0, Math.round(durationAssessment.estimatedSeconds));
+  const baseMedicalReviewStatus = medicalReviewForRisk(
+    draft?.risco ?? "medio",
+    humanReviewApproved,
+  );
+  const medicalReviewStatus: MedicalReviewStatus = humanReviewApproved
+    ? "approved"
+    : lastEditorResult?.medicalSafety.requiresHumanReview
+      ? "required"
+      : baseMedicalReviewStatus;
 
   useEffect(() => {
     if (script) {
       setDraft(script);
+      setTitleBeforeSuggestion(script.titulo);
       const savedCaptureDuration = captureHookDuration(script);
       const savedOutro = savedCaptureDuration === 10 ? "" : script.outroText || DEFAULT_OUTRO;
       setOutroText(savedOutro);
       const initialText = buildNarrationText(script, savedOutro);
       setNarrationText(initialText);
       setDisplayText(initialText);
-      setSpokenText(initialText);
+      setSpokenText("");
       if (savedCaptureDuration !== null) {
         setDurationSeconds(savedCaptureDuration);
         setSpeechMode("direto");
       }
     }
   }, [script]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEditorStateLoaded(false);
+    fetchScriptEditorState(id)
+      .then((state) => {
+        if (cancelled) return;
+        if (!(state.legacyFallback && initialCaptureDuration !== null)) {
+          setDurationSeconds(state.durationSeconds);
+        }
+        setHumanReviewApproved(state.humanReviewApproved);
+        setTitleChoice(state.titleChoice);
+        setLastEditorResult(state.lastResult ?? null);
+        setPreviousAiScript(state.previousScript ?? null);
+        setEditorSchemaValid(state.schemaValid);
+        setEditorTechnicalError(state.technicalError ?? null);
+        lastSavedEditorStateKey.current = JSON.stringify({
+          durationSeconds: state.durationSeconds,
+          humanReviewApproved: state.humanReviewApproved,
+          titleChoice: state.titleChoice,
+          suggestedTitle: state.suggestedTitle ?? null,
+          schemaValid: state.schemaValid,
+          technicalError: state.technicalError ?? null,
+          previousScript: state.previousScript ?? null,
+          lastResult: state.lastResult ?? null,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setEditorTechnicalError("Não foi possível carregar o estado do editor.");
+      })
+      .finally(() => {
+        if (!cancelled) setEditorStateLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, initialCaptureDuration]);
 
   useEffect(() => {
     let cancelled = false;
@@ -421,7 +495,7 @@ function RoteiroDetalhe() {
     const defaults = readStudioDefaults();
     if (defaults?.orientation) setOrientation(defaults.orientation);
     if (typeof defaults?.captions === "boolean") setCaptions(defaults.captions);
-  }, []);
+  }, [id]);
 
   useEffect(() => {
     if (!scenePlan) {
@@ -443,8 +517,35 @@ function RoteiroDetalhe() {
     return () => {
       cancelled = true;
     };
-  }, [avatarMode, avatarSetId, id, orientation, primaryAvatarId, profileLoaded, scenePlan?.updatedAt, speechMode, voiceId, voiceMood]);
-  const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(script), [draft, script]);
+  }, [
+    avatarMode,
+    avatarSetId,
+    id,
+    orientation,
+    primaryAvatarId,
+    profileLoaded,
+    scenePlan,
+    speechMode,
+    voiceId,
+    voiceMood,
+  ]);
+  const savedDisplayText = useMemo(
+    () =>
+      script
+        ? buildNarrationText(
+            script,
+            captureHookDuration(script) === 10 ? "" : script.outroText || DEFAULT_OUTRO,
+          )
+        : "",
+    [script],
+  );
+  const speechDirty =
+    normalizeScriptText(displayText) !== normalizeScriptText(savedDisplayText) ||
+    (script?.outroText || DEFAULT_OUTRO) !== outroText;
+  const dirty = useMemo(
+    () => JSON.stringify(draft) !== JSON.stringify(script) || speechDirty,
+    [draft, script, speechDirty],
+  );
   const selectedAvatar = useMemo(
     () => catalog?.avatars.find((avatar) => avatar.id === avatarId),
     [avatarId, catalog?.avatars],
@@ -470,29 +571,48 @@ function RoteiroDetalhe() {
           look,
           avatar: catalog?.avatars.find((candidate) => candidate.id === look.avatarId),
         }))
-        .filter(
-          (item): item is { look: AvatarSetLook; avatar: HeyGenCatalog["avatars"][number] } =>
-            Boolean(item.avatar),
+        .filter((item): item is { look: AvatarSetLook; avatar: HeyGenCatalog["avatars"][number] } =>
+          Boolean(item.avatar),
         ) || [],
     [catalog?.avatars, selectedAvatarSet],
   );
-  const avatarSetReady = Boolean(selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId);
+  const avatarSetReady = Boolean(
+    selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId,
+  );
   const productionModeReady =
-    heygenAgentMode || avatarMode === "single" || Boolean(avatarMode === "set" && sceneGenerationPlan);
+    heygenAgentMode ||
+    avatarMode === "single" ||
+    Boolean(avatarMode === "set" && sceneGenerationPlan);
   const requiredVisualCount = scenePlan ? Math.max(0, scenePlan.scenes.length - 1) : 0;
   const visualProductionReady =
     heygenAgentMode ||
     avatarMode === "single" ||
     requiredVisualCount === 0 ||
     Boolean(visualPlan && (videoSlideRender?.renderedCount ?? 0) >= requiredVisualCount);
-  const selectedAvatarReady = heygenAgentMode || avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
+  const selectedAvatarReady =
+    heygenAgentMode || avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
   const sceneRoles = useMemo<AvatarSetRole[]>(
-    () =>
-      selectedAvatarSet?.looks.map((look) => look.role) || ["primary"],
+    () => selectedAvatarSet?.looks.map((look) => look.role) || ["primary"],
     [selectedAvatarSet],
   );
+  const editorGenerationGate = evaluateGenerationGate({
+    speech: displayText,
+    durationSeconds,
+    aiOperationInFlight: naturalizing,
+    schemaValid: editorSchemaValid,
+    technicalError: editorTechnicalError,
+    medicalReviewStatus,
+    humanReviewApproved,
+    scriptStatus: draft?.status ?? "aguardando_validacao",
+    finalSaved: !dirty,
+    // O modal de confirmação cobre esta etapa; o backend recebe o valor explícito.
+    finalConfirmed: true,
+  });
   const canSendToProduction =
-    blockingQualityIssues.length === 0 && approvalReady && selectedAvatarReady && productionModeReady && visualProductionReady;
+    editorGenerationGate.allowed &&
+    selectedAvatarReady &&
+    productionModeReady &&
+    visualProductionReady;
 
   function chooseAvatar(nextAvatarId: string) {
     setAvatarMode("single");
@@ -524,7 +644,8 @@ function RoteiroDetalhe() {
   }, [generationMode, selectedAvatar]);
 
   useEffect(() => {
-    if (!profileLoaded || !avatarId || !voiceId || (avatarMode === "set" && !avatarSetReady)) return;
+    if (!profileLoaded || !avatarId || !voiceId || (avatarMode === "set" && !avatarSetReady))
+      return;
     const key = [
       avatarId,
       voiceId,
@@ -571,7 +692,56 @@ function RoteiroDetalhe() {
         .catch(() => toast.error("Nao consegui salvar o perfil de producao."));
     }, 500);
     return () => window.clearTimeout(timeout);
-  }, [avatarId, avatarMode, avatarSetId, avatarSetReady, cinematicPrompt, generationMode, id, musicTrackId, musicVolume, primaryAvatarId, profileLoaded, speechMode, voiceId, voiceMood]);
+  }, [
+    avatarId,
+    avatarMode,
+    avatarSetId,
+    avatarSetReady,
+    cinematicPrompt,
+    generationMode,
+    id,
+    musicTrackId,
+    musicVolume,
+    primaryAvatarId,
+    profileLoaded,
+    speechMode,
+    voiceId,
+    voiceMood,
+  ]);
+
+  useEffect(() => {
+    if (!editorStateLoaded) return;
+    const state = {
+      durationSeconds,
+      humanReviewApproved,
+      titleChoice,
+      suggestedTitle: lastEditorResult?.titleAlignment.suggestedTitle ?? null,
+      schemaValid: editorSchemaValid,
+      technicalError: editorTechnicalError,
+      previousScript: previousAiScript,
+      lastResult: lastEditorResult,
+    };
+    const key = JSON.stringify(state);
+    if (key === lastSavedEditorStateKey.current) return;
+    const timeout = window.setTimeout(() => {
+      saveScriptEditorState(id, state)
+        .then(() => {
+          lastSavedEditorStateKey.current = key;
+        })
+        .catch(() => toast.error("Não consegui salvar o histórico do editor."));
+    }, 450);
+    return () => window.clearTimeout(timeout);
+  }, [
+    durationSeconds,
+    editorSchemaValid,
+    editorStateLoaded,
+    editorTechnicalError,
+    humanReviewApproved,
+    id,
+    lastEditorResult,
+    previousAiScript,
+    titleChoice,
+  ]);
 
   async function handleAvatarSetSaved(saved: AvatarSet) {
     setAvatarSets((current) => {
@@ -586,7 +756,9 @@ function RoteiroDetalhe() {
   async function handleDeleteAvatarSet(avatarSetToDelete: AvatarSet) {
     try {
       await deleteAvatarSet(avatarSetToDelete.id);
-      setAvatarSets((current) => current.filter((avatarSet) => avatarSet.id !== avatarSetToDelete.id));
+      setAvatarSets((current) =>
+        current.filter((avatarSet) => avatarSet.id !== avatarSetToDelete.id),
+      );
       if (avatarSetId === avatarSetToDelete.id) {
         setAvatarMode("single");
         setAvatarSetId(null);
@@ -594,7 +766,9 @@ function RoteiroDetalhe() {
       }
       toast.success("Avatar Set excluído.");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Nao foi possivel excluir o Avatar Set.");
+      toast.error(
+        error instanceof Error ? error.message : "Nao foi possivel excluir o Avatar Set.",
+      );
     }
   }
 
@@ -617,16 +791,19 @@ function RoteiroDetalhe() {
 
   function setProductionDuration(nextDuration: 10 | 15 | 30 | 45 | 60) {
     setDurationSeconds(nextDuration);
+    setLastEditorResult(null);
+    setEditorSchemaValid(true);
+    setEditorTechnicalError(null);
     if (nextDuration === 10) {
       setDisplayText((current) => removeNarrationOutro(current, outroText));
-      setSpokenText((current) => removeNarrationOutro(current, outroText));
+      setSpokenText("");
       setNarrationText((current) => removeNarrationOutro(current, outroText));
       setOutroText("");
       setSpeechMode("direto");
     } else if (!outroText.trim()) {
       setOutroText(DEFAULT_OUTRO);
       setDisplayText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
-      setSpokenText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
+      setSpokenText("");
       setNarrationText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
     }
   }
@@ -645,38 +822,36 @@ function RoteiroDetalhe() {
     criadoEm: draft.criadoEm,
     validadoEm: draft.validadoEm,
   });
-  const productionBlockedReason = blockingQualityIssues[0]
-    ? `Revise a fala final: ${blockingQualityIssues[0]}`
-    : dirty
-      ? "Salve o roteiro antes de enviar."
-      : !approvalReady
-        ? 'Conclua a revisão e altere o status do roteiro para "Pronto".'
-        : catalogLoading
-          ? "Carregando avatares e vozes da HeyGen."
-          : !profileLoaded
-            ? "Carregando perfil de producao do roteiro."
-            : cinematicMode && !cinematicPrompt.trim()
-              ? "Escreva a direção cinematic antes de enviar este modo."
-            : avatarMode === "set" && !selectedAvatarSet
-              ? "Selecione um Avatar Set."
-              : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
-                ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
-                : !heygenAgentMode && avatarMode === "set" && !productionModeReady
-                  ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
-                  : !heygenAgentMode && avatarMode === "set" && !visualProductionReady
-                    ? `Clique em "Fazer tudo com Claude" para gerar e renderizar ${requiredVisualCount} slide(s) de transição.`
+  const productionBlockedReason = !editorGenerationGate.allowed
+    ? editorGenerationGate.reason
+    : catalogLoading
+      ? "Carregando avatares e vozes da HeyGen."
+      : !profileLoaded
+        ? "Carregando perfil de producao do roteiro."
+        : cinematicMode && !cinematicPrompt.trim()
+          ? "Escreva a direção cinematic antes de enviar este modo."
+          : avatarMode === "set" && !selectedAvatarSet
+            ? "Selecione um Avatar Set."
+            : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
+              ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
+              : !heygenAgentMode && avatarMode === "set" && !productionModeReady
+                ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
+                : !heygenAgentMode && avatarMode === "set" && !visualProductionReady
+                  ? `Clique em "Fazer tudo com Claude" para gerar e renderizar ${requiredVisualCount} slide(s) de transição.`
                   : !avatarId
                     ? "Selecione um avatar pronto."
-              : !voiceId
-                ? "Selecione uma voz."
-                : saving
-                  ? "Salvando roteiro."
-                  : null;
+                    : !voiceId
+                      ? "Selecione uma voz."
+                      : saving
+                        ? "Salvando roteiro."
+                        : null;
   const productionChecklist = [
     {
       label: "Roteiro revisado",
       ready: approvalReady,
-      detail: approvalReady ? "Status Pronto" : 'Mude o status para "Pronto" em Roteiro → Ver contexto.',
+      detail: approvalReady
+        ? "Status Pronto"
+        : 'Mude o status para "Pronto" em Roteiro → Ver contexto.',
     },
     {
       label: "Roteiro salvo",
@@ -713,63 +888,79 @@ function RoteiroDetalhe() {
       : []),
     {
       label: "Cenas",
-      ready: heygenAgentMode || avatarMode === "single" || Boolean(scenePlan && scenePlan.scenes.length >= 1),
-      detail:
-        cinematicMode
-          ? "O Cinematic cria a encenação sem usar o Scene Plan antigo."
-          : heygenAgentMode
+      ready:
+        heygenAgentMode ||
+        avatarMode === "single" ||
+        Boolean(scenePlan && scenePlan.scenes.length >= 1),
+      detail: cinematicMode
+        ? "O Cinematic cria a encenação sem usar o Scene Plan antigo."
+        : heygenAgentMode
           ? "O HeyGen Video Agent decide a estrutura visual e os cortes."
           : avatarMode === "single"
-          ? "Look único não precisa de plano de cenas."
-          : scenePlan
-            ? `${scenePlan.scenes.length} cena(s) salvas.`
-            : 'Clique em "Fazer tudo com Claude".',
+            ? "Look único não precisa de plano de cenas."
+            : scenePlan
+              ? `${scenePlan.scenes.length} cena(s) salvas.`
+              : 'Clique em "Fazer tudo com Claude".',
     },
     {
       label: "Slide de transição",
-      ready: heygenAgentMode || avatarMode === "single" || requiredVisualCount === 0 || visualProductionReady,
-      detail:
-        cinematicMode
-          ? "O Cinematic cria os apoios dentro do próprio vídeo."
-          : heygenAgentMode
+      ready:
+        heygenAgentMode ||
+        avatarMode === "single" ||
+        requiredVisualCount === 0 ||
+        visualProductionReady,
+      detail: cinematicMode
+        ? "O Cinematic cria os apoios dentro do próprio vídeo."
+        : heygenAgentMode
           ? "O HeyGen cria os visuais dentro do próprio vídeo."
           : avatarMode === "single" || requiredVisualCount === 0
-          ? "Não obrigatório para este formato."
-          : visualProductionReady
-            ? `${requiredVisualCount} apoio(s) renderizado(s).`
-            : `Falta gerar/renderizar ${requiredVisualCount} slide(s) com Claude.`,
+            ? "Não obrigatório para este formato."
+            : visualProductionReady
+              ? `${requiredVisualCount} apoio(s) renderizado(s).`
+              : `Falta gerar/renderizar ${requiredVisualCount} slide(s) com Claude.`,
     },
     {
-      label: "Compliance da fala",
-      ready: blockingQualityIssues.length === 0,
-      detail: blockingQualityIssues[0] || "Sem bloqueios.",
+      label: "Duração",
+      ready: durationAssessment.status !== "blocking",
+      detail: durationAssessment.message,
+    },
+    {
+      label: "Revisão médica",
+      ready: medicalReviewStatus !== "required",
+      detail:
+        medicalReviewStatus === "approved"
+          ? "Revisão médica aprovada."
+          : medicalReviewStatus === "required"
+            ? "Revisão obrigatória ainda não aprovada."
+            : medicalReviewStatus === "recommended"
+              ? "Revisão recomendada, sem bloquear a duração."
+              : "Revisão médica não obrigatória.",
+    },
+    {
+      label: "Validação técnica",
+      ready: editorSchemaValid && !editorTechnicalError && blockingQualityIssues.length === 0,
+      detail: editorTechnicalError || blockingQualityIssues[0] || "Schema e texto final válidos.",
     },
   ];
 
-  async function enviarProducao(forceNewVersion = false) {
+  async function enviarProducaoCore(forceNewVersion = false) {
     if (!draft || !script) return;
     if (avatarMode === "set" && generationMode === "direct" && !sceneGenerationPlan) {
       toast.error("Salve o Scene Plan antes de gerar o vídeo por cenas.");
       return;
     }
     if (productionBlockedReason || !canSendToProduction) {
-      toast.error(
-        blockingQualityIssues[0]
-          ? `Revise o texto falado antes de enviar: ${blockingQualityIssues[0]}`
-          : productionBlockedReason || 'Conclua a revisão e altere o status do roteiro para "Pronto".',
-      );
+      toast.error(productionBlockedReason || "Conclua o checklist antes de gerar o vídeo.");
       return;
     }
     setSending(true);
     const notice = toast.loading(
-      forceNewVersion
-        ? "Enviando a nova versão ao HeyGen..."
-        : "Enviando o vídeo ao HeyGen...",
+      forceNewVersion ? "Enviando a nova versão ao HeyGen..." : "Enviando o vídeo ao HeyGen...",
     );
     try {
       let scriptToSend = script;
       if (dirty) {
-        const saved = await saveScript(draft);
+        const saved = await saveScript({ ...draft, textoFalado: displayText, outroText });
         updateScript(saved.id, saved);
         setDraft(saved);
         scriptToSend = saved;
@@ -806,9 +997,15 @@ function RoteiroDetalhe() {
         forceNewVersion,
         narrationText: displayText,
         displayText,
-        spokenText,
+        spokenText: spokenText || undefined,
         cinematicPrompt: cinematicMode ? cinematicPrompt : undefined,
         outroText: ctaMode === "manual" ? outroText : "",
+        medicalReviewStatus,
+        humanReviewApproved,
+        aiOperationInFlight: naturalizing,
+        aiSchemaValid: editorSchemaValid,
+        editorTechnicalError,
+        finalConfirmed: true,
       });
       addVideoJob(job);
       toast.success(
@@ -827,6 +1024,15 @@ function RoteiroDetalhe() {
     } finally {
       setSending(false);
     }
+  }
+
+  function enviarProducao(forceNewVersion = false): Promise<void> {
+    if (sendPromiseRef.current) return sendPromiseRef.current;
+    const request = enviarProducaoCore(forceNewVersion).finally(() => {
+      sendPromiseRef.current = null;
+    });
+    sendPromiseRef.current = request;
+    return request;
   }
 
   async function aplicarTrilhaNoVideoFinal() {
@@ -853,7 +1059,11 @@ function RoteiroDetalhe() {
       toast.success("Trilha mixada localmente no vídeo final. A fala foi preservada.");
       navigate({ to: "/producao/$id", params: { id: job.id } });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Ainda não foi possível mixar a trilha no vídeo final.");
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Ainda não foi possível mixar a trilha no vídeo final.",
+      );
     } finally {
       setMixingMusic(false);
     }
@@ -863,9 +1073,16 @@ function RoteiroDetalhe() {
     if (!draft) return;
     setSaving(true);
     try {
-      const saved = await saveScript(draft);
+      const saved = await saveScript({
+        ...draft,
+        textoFalado: displayText,
+        outroText,
+      });
       updateScript(saved.id, saved);
       setDraft(saved);
+      setNarrationText(displayText);
+      setEditorSchemaValid(true);
+      setEditorTechnicalError(null);
       toast.success("Roteiro salvo no Sheets.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel salvar o roteiro.");
@@ -896,46 +1113,83 @@ function RoteiroDetalhe() {
           : "Slide de transição gerado e renderizado.",
       );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar slide de transição.");
+      toast.error(
+        error instanceof Error ? error.message : "Nao foi possivel gerar slide de transição.",
+      );
       throw error;
     } finally {
       setTransitionSlideGenerating(false);
     }
   }
 
-  async function naturalizarFala() {
-    if (!draft || !narrationText.trim()) return;
+  async function executarEditorComIa(operation: EditorOperation) {
+    if (!draft || !displayText.trim() || naturalizing) return;
+    const previousScript = displayText;
     setNaturalizing(true);
+    setActiveEditorOperation(operation);
+    setEditorTechnicalError(null);
     try {
-      const naturalized = await naturalizeScript({
-        text: displayText || narrationText,
-        medicalCautions: draft.cuidadosMedicos,
-        durationSeconds,
-        outro: ctaMode === "manual" ? outroText : "",
-        ctaMode,
-        manualCta: outroText,
-        recentCtas: videoJobs
-          .map((job) => String(job.productionSettings?.outroText || ""))
+      const result = await runScriptEditorAssist({
+        operation,
+        scriptId: id,
+        text: displayText,
+        title: draft.titulo,
+        sourceText: "",
+        contextText: [
+          `Tema: ${draft.tema}`,
+          `Hook aprovado: ${draft.hook}`,
+          `Dor ou conflito: ${draft.dorConflito}`,
+          `Explicação: ${draft.explicacaoSimples}`,
+          `Virada: ${draft.virada}`,
+          `CTA: ${draft.cta}`,
+          draft.link ? `Fonte: ${draft.link}` : "",
+        ]
           .filter(Boolean)
-          .slice(0, 5),
-        generationMode,
+          .join("\n"),
+        medicalCautions: draft.cuidadosMedicos,
+        riskLevel: draft.risco,
+        claims: [],
+        glossary: [],
+        cta: ctaMode === "manual" ? outroText : draft.cta,
+        durationSeconds,
+        humanReviewApproved,
       });
-      setDisplayText(naturalized.displayText);
-      setNarrationText(naturalized.displayText);
-      setSpokenText(naturalized.spokenText);
-      if (naturalized.cta && ctaMode === "auto") setOutroText(naturalized.cta);
-      if (naturalized.recommendedSpeechMode) setSpeechMode(naturalized.recommendedSpeechMode);
-      setPerformancePlan({
-        tone: naturalized.tone,
-        pace: naturalized.pace,
-        emotion: naturalized.emotion,
-        recommendedVoiceSpeed: naturalized.recommendedVoiceSpeed,
-      });
-      toast.success("Texto naturalizado. Revise a fala antes de enviar.");
+      setLastEditorResult(result);
+      setEditorSchemaValid(result.schemaValid);
+      setEditorTechnicalError(
+        result.schemaValid ? null : result.technicalError || "Saída de IA inválida.",
+      );
+      if (!result.schemaValid) {
+        toast.error(result.warnings[0] || "A resposta não pôde ser aplicada. O texto foi mantido.");
+        return;
+      }
+      if (result.noOp) {
+        toast.info(result.message || `O texto já está adequado para ${durationSeconds}s.`);
+        return;
+      }
+      setPreviousAiScript(previousScript);
+      setDisplayText(result.script);
+      setNarrationText(result.script);
+      // Vazio faz o backend gerar a versão fonética segura a partir da grafia correta.
+      setSpokenText("");
+      if (result.medicalSafety.requiresHumanReview) setHumanReviewApproved(false);
+      if (result.titleAlignment.status === "possible_mismatch") setTitleChoice("current");
+      toast.success(
+        operation === "medical_rewrite"
+          ? "Revisão editorial concluída. Confira as mudanças antes de salvar."
+          : `Fala ajustada para ${durationSeconds}s. Confira antes de salvar.`,
+      );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Não foi possível naturalizar o texto.");
+      setEditorSchemaValid(false);
+      setEditorTechnicalError(
+        error instanceof Error ? error.message : "Não foi possível concluir a edição com IA.",
+      );
+      toast.error(
+        error instanceof Error ? error.message : "Não foi possível concluir a edição com IA.",
+      );
     } finally {
       setNaturalizing(false);
+      setActiveEditorOperation(null);
     }
   }
 
@@ -949,7 +1203,7 @@ function RoteiroDetalhe() {
     try {
       let scriptToSend = script;
       if (dirty) {
-        const saved = await saveScript(draft);
+        const saved = await saveScript({ ...draft, textoFalado: displayText, outroText });
         updateScript(saved.id, saved);
         setDraft(saved);
         scriptToSend = saved;
@@ -963,7 +1217,8 @@ function RoteiroDetalhe() {
         captions,
         optimizePronunciation,
         displayText,
-        spokenText,
+        spokenText: spokenText || undefined,
+        finalConfirmed: true,
       });
       addVideoJob(job);
       toast.success("Prévia técnica Direct Avatar enviada ao HeyGen.");
@@ -1003,8 +1258,14 @@ function RoteiroDetalhe() {
                 </Link>
               </Button>
               {avatarMode === "set" && musicTrackId ? (
-                <Button size="sm" variant="secondary" disabled={mixingMusic} onClick={() => void aplicarTrilhaNoVideoFinal()}>
-                  <Volume2 className="mr-1 h-4 w-4" /> {mixingMusic ? "Mixando trilha..." : "Aplicar trilha"}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={mixingMusic}
+                  onClick={() => void aplicarTrilhaNoVideoFinal()}
+                >
+                  <Volume2 className="mr-1 h-4 w-4" />{" "}
+                  {mixingMusic ? "Mixando trilha..." : "Aplicar trilha"}
                 </Button>
               ) : null}
               <ConfirmAction
@@ -1029,7 +1290,12 @@ function RoteiroDetalhe() {
                         : "Gerar outra versão deste roteiro"
                     }
                     disabled={
-                      saving || sending || Boolean(productionBlockedReason) || !selectedAvatarReady || !voiceId || !canSendToProduction
+                      saving ||
+                      sending ||
+                      Boolean(productionBlockedReason) ||
+                      !selectedAvatarReady ||
+                      !voiceId ||
+                      !canSendToProduction
                     }
                   >
                     {sending ? (
@@ -1058,11 +1324,7 @@ function RoteiroDetalhe() {
                     size="sm"
                     variant="secondary"
                     disabled={
-                      saving ||
-                      previewing ||
-                      !selectedAvatarReady ||
-                      !voiceId ||
-                      !approvalReady
+                      saving || previewing || !selectedAvatarReady || !voiceId || !approvalReady
                     }
                   >
                     <Film className="mr-1 h-4 w-4" /> Gerar prévia
@@ -1088,7 +1350,12 @@ function RoteiroDetalhe() {
                         : "Enviar roteiro ao HeyGen"
                     }
                     disabled={
-                      saving || sending || Boolean(productionBlockedReason) || !selectedAvatarReady || !voiceId || !canSendToProduction
+                      saving ||
+                      sending ||
+                      Boolean(productionBlockedReason) ||
+                      !selectedAvatarReady ||
+                      !voiceId ||
+                      !canSendToProduction
                     }
                   >
                     {sending ? (
@@ -1144,7 +1411,7 @@ function RoteiroDetalhe() {
                       Texto que o avatar deve falar. Use a grafia correta para legenda e revisão.
                     </p>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap justify-end gap-2">
                     <Button
                       type="button"
                       size="sm"
@@ -1156,31 +1423,71 @@ function RoteiroDetalhe() {
                         );
                         setNarrationText(restored);
                         setDisplayText(restored);
-                        setSpokenText(restored);
+                        setSpokenText("");
+                        setEditorSchemaValid(true);
+                        setEditorTechnicalError(null);
                       }}
                     >
                       <RotateCcw className="mr-1 h-4 w-4" />
                       Restaurar
+                    </Button>
+                    {previousAiScript ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          const current = displayText;
+                          setDisplayText(previousAiScript);
+                          setNarrationText(previousAiScript);
+                          setSpokenText("");
+                          setPreviousAiScript(current);
+                          setEditorSchemaValid(true);
+                          setEditorTechnicalError(null);
+                        }}
+                      >
+                        <History className="mr-1 h-4 w-4" />
+                        Desfazer IA
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={naturalizing || displayText.trim().length < 20}
+                      onClick={() => void executarEditorComIa("medical_rewrite")}
+                    >
+                      {naturalizing && activeEditorOperation === "medical_rewrite" ? (
+                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="mr-1 h-4 w-4" />
+                      )}
+                      {naturalizing && activeEditorOperation === "medical_rewrite"
+                        ? "Revisando..."
+                        : "Revisar com IA"}
                     </Button>
                     <Button
                       type="button"
                       size="sm"
                       variant="secondary"
                       disabled={naturalizing || displayText.trim().length < 20}
-                      onClick={() => void naturalizarFala()}
+                      onClick={() => void executarEditorComIa("fit_duration")}
                     >
-                      <Sparkles className="mr-1 h-4 w-4" />
-                      {naturalizing
+                      {naturalizing && activeEditorOperation === "fit_duration" ? (
+                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Captions className="mr-1 h-4 w-4" />
+                      )}
+                      {naturalizing && activeEditorOperation === "fit_duration"
                         ? "Ajustando..."
-                        : cinematicMode
-                          ? `Otimizar para Cinematic (${durationSeconds}s)`
-                        : heygenAgentMode
-                          ? `Otimizar para Video Agent (${durationSeconds}s)`
-                        : narrationWords > maximumWordsForDuration(durationSeconds)
-                          ? `Encurtar para ${durationSeconds}s com Claude`
-                          : "Melhorar com Claude"}
+                        : `Ajustar para ${durationSeconds}s`}
                     </Button>
-                    <Button type="button" size="sm" onClick={salvarRoteiro} disabled={!dirty || saving}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={salvarRoteiro}
+                      disabled={!dirty || saving}
+                    >
                       <Save className="mr-1 h-4 w-4" />
                       Salvar
                     </Button>
@@ -1193,30 +1500,82 @@ function RoteiroDetalhe() {
                   onChange={(event) => {
                     setDisplayText(event.target.value);
                     setNarrationText(event.target.value);
+                    setSpokenText("");
+                    setEditorSchemaValid(true);
+                    setEditorTechnicalError(null);
+                    setLastEditorResult(null);
                   }}
-                  className="leading-6"
+                  aria-describedby="script-duration-feedback"
+                  className="min-h-56 leading-6"
                 />
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                  <span>
-                    {narrationWords} palavras · ~{estimatedSpeechSeconds}s
-                  </span>
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                  <div
+                    className="flex flex-wrap items-center gap-1.5"
+                    role="group"
+                    aria-label="Duração da fala"
+                  >
+                    {DURATION_PRESETS.map((seconds) => (
+                      <button
+                        key={seconds}
+                        type="button"
+                        aria-pressed={durationSeconds === seconds}
+                        onClick={() => setProductionDuration(seconds)}
+                        className={cn(
+                          "min-h-9 cursor-pointer rounded-full border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                          durationSeconds === seconds
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : "bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground",
+                        )}
+                      >
+                        {seconds}s
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <span>
+                      {narrationWords} palavras · {durationAssessment.estimatedSecondsDisplay}
+                    </span>
+                    <span>
+                      Meta {durationAssessment.targetWords} · margem{" "}
+                      {durationAssessment.hardLimitWords}
+                    </span>
+                  </div>
                   <span
                     className={cn(
-                      "rounded-full px-2.5 py-1 font-medium",
-                      blockingQualityIssues.length
-                        ? "bg-status-warn/10 text-status-warn-foreground"
-                        : qualityIssues.length
-                          ? "bg-status-info/10 text-status-info-foreground"
+                      "rounded-full px-2.5 py-1 text-xs font-semibold",
+                      durationAssessment.status === "blocking"
+                        ? "bg-status-danger/10 text-status-danger"
+                        : durationAssessment.status === "warning"
+                          ? "bg-status-warn/15 text-status-warn-foreground"
                           : "bg-status-success/10 text-status-success-foreground",
                     )}
                   >
-                    {blockingQualityIssues.length
-                      ? "Revisão necessária"
-                      : qualityIssues.length
-                        ? "Aviso de duração"
-                        : "✓ Conteúdo seguro"}
+                    {durationStatusLabel(durationAssessment.status)}
                   </span>
                 </div>
+                <div
+                  id="script-duration-feedback"
+                  className={cn(
+                    "mt-2 rounded-lg border px-3 py-2 text-xs leading-5",
+                    durationAssessment.status === "blocking"
+                      ? "border-status-danger/30 bg-status-danger/10 text-status-danger"
+                      : durationAssessment.status === "warning"
+                        ? "border-status-warn/30 bg-status-warn/10 text-status-warn-foreground"
+                        : "border-status-success/25 bg-status-success/5 text-foreground",
+                  )}
+                >
+                  {durationAssessment.message}
+                  <span className="ml-1 text-muted-foreground">
+                    A IA mira {durationAssessment.generationMinWords}–
+                    {durationAssessment.generationMaxWords} palavras sem preencher todo o limite.
+                  </span>
+                </div>
+                {editorTechnicalError ? (
+                  <div className="mt-2 rounded-lg border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+                    {editorTechnicalError} O texto anterior foi mantido; revise manualmente ou tente
+                    novamente.
+                  </div>
+                ) : null}
                 {qualityIssues.length > 0 ? (
                   <div
                     className={`mt-2 rounded-md border px-3 py-2 text-[11px] leading-4 ${
@@ -1229,12 +1588,8 @@ function RoteiroDetalhe() {
                       <div className="flex items-center gap-1.5 font-semibold">
                         <TriangleAlert className="h-3.5 w-3.5" />
                         {blockingQualityIssues.length
-                          ? cinematicMode
-                            ? "Ajuste a fala antes de enviar ao Cinematic"
-                          : heygenAgentMode
-                            ? "Ajuste a fala antes de enviar ao Video Agent"
-                            : "Revise antes de enviar ao HeyGen"
-                          : "Aviso antes do envio"}
+                          ? "Validação técnica necessária"
+                          : "Sugestão editorial"}
                       </div>
                       {qualityIssues.some((issue) => issue.includes("frase final")) ? (
                         <Button
@@ -1242,9 +1597,14 @@ function RoteiroDetalhe() {
                           size="sm"
                           variant="secondary"
                           className="h-7 px-2 text-[11px]"
-                          onClick={() =>
-                            setDisplayText(normalizeNarrationOutro(displayText, outroText))
-                          }
+                          onClick={() => {
+                            const corrected = normalizeNarrationOutro(displayText, outroText);
+                            setDisplayText(corrected);
+                            setNarrationText(corrected);
+                            setSpokenText("");
+                            setEditorSchemaValid(true);
+                            setEditorTechnicalError(null);
+                          }}
                         >
                           Corrigir encerramento
                         </Button>
@@ -1257,13 +1617,136 @@ function RoteiroDetalhe() {
                         </li>
                       ))}
                     </ul>
-                    {heygenAgentMode ? (
-                      <p className="mt-2">
-                        {cinematicMode ? "O Cinematic" : "O Video Agent"} cria pausas e interações;
-                        por isso a fala precisa ser mais curta para respeitar a duração escolhida.
-                      </p>
-                    ) : null}
                   </div>
+                ) : null}
+                {lastEditorResult?.titleAlignment.status === "possible_mismatch" ? (
+                  <div className="mt-3 rounded-xl border border-status-warn/30 bg-status-warn/5 p-3">
+                    <div className="flex items-start gap-2">
+                      <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-status-warn-foreground" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-semibold">Possível desalinhamento de título</p>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                          {lastEditorResult.titleAlignment.reason}
+                        </p>
+                        {lastEditorResult.titleAlignment.suggestedTitle ? (
+                          <p className="mt-2 rounded-md bg-background px-3 py-2 text-sm font-medium">
+                            {lastEditorResult.titleAlignment.suggestedTitle}
+                          </p>
+                        ) : null}
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={titleChoice === "suggested" ? "default" : "secondary"}
+                            disabled={!lastEditorResult.titleAlignment.suggestedTitle}
+                            onClick={() => {
+                              const suggested = lastEditorResult.titleAlignment.suggestedTitle;
+                              if (suggested) {
+                                if (titleChoice === "current")
+                                  setTitleBeforeSuggestion(draft.titulo);
+                                set("titulo", suggested);
+                                setTitleChoice("suggested");
+                              }
+                            }}
+                          >
+                            Usar título sugerido
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              if (titleChoice === "suggested") set("titulo", titleBeforeSuggestion);
+                              setTitleChoice("current");
+                            }}
+                          >
+                            Manter título atual
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+                <div
+                  className={cn(
+                    "mt-3 flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center sm:justify-between",
+                    medicalReviewStatus === "required"
+                      ? "border-status-danger/30 bg-status-danger/5"
+                      : "bg-muted/20",
+                  )}
+                >
+                  <div>
+                    <p className="text-xs font-semibold">Revisão médica</p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {medicalReviewStatus === "approved"
+                        ? "Aprovação humana registrada para esta versão editorial."
+                        : medicalReviewStatus === "required"
+                          ? "Obrigatória pelo risco alto. A duração pode estar ideal e ainda assim exigir esta aprovação."
+                          : medicalReviewStatus === "recommended"
+                            ? "Recomendada pelo risco do tema, sem transformar aviso de duração em erro médico."
+                            : "Não obrigatória para o nível de risco atual."}
+                    </p>
+                  </div>
+                  {medicalReviewStatus !== "not_required" ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={humanReviewApproved ? "secondary" : "default"}
+                      onClick={() => setHumanReviewApproved((approved) => !approved)}
+                    >
+                      <ShieldCheck className="mr-1 h-4 w-4" />
+                      {humanReviewApproved ? "Reabrir revisão" : "Aprovar revisão médica"}
+                    </Button>
+                  ) : null}
+                </div>
+                {lastEditorResult ? (
+                  <details className="mt-3 rounded-xl border bg-muted/10 p-3">
+                    <summary className="cursor-pointer text-xs font-semibold">
+                      Checks de qualidade explicáveis ({lastEditorResult.qualityChecks.length})
+                    </summary>
+                    {lastEditorResult.summaryOfChanges.length ? (
+                      <ul className="mt-3 space-y-1 pl-5 text-xs text-muted-foreground">
+                        {lastEditorResult.summaryOfChanges.map((change) => (
+                          <li key={change} className="list-disc">
+                            {change}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      {lastEditorResult.qualityChecks.map((check) => (
+                        <div key={check.id} className="rounded-lg border bg-background p-2.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold">{check.label}</span>
+                            <span
+                              className={cn(
+                                "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                                check.status === "blocking"
+                                  ? "bg-status-danger/10 text-status-danger"
+                                  : check.status === "warning"
+                                    ? "bg-status-warn/15 text-status-warn-foreground"
+                                    : check.status === "pass" || check.status === "ideal"
+                                      ? "bg-status-success/10 text-status-success-foreground"
+                                      : "bg-status-info/10 text-status-info-foreground",
+                              )}
+                            >
+                              {check.status}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                            {check.detail}
+                          </p>
+                          <p className="mt-1 text-[10px] text-muted-foreground">
+                            {check.source === "deterministic"
+                              ? "Regra local"
+                              : check.source === "policy"
+                                ? "Política editorial"
+                                : "Análise de IA + validação local"}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 ) : null}
               </div>
               <Accordion type="single" collapsible>
@@ -1275,29 +1758,61 @@ function RoteiroDetalhe() {
                         <Input value={draft.tema} onChange={(e) => set("tema", e.target.value)} />
                       </Field>
                       <Field label="Hook">
-                        <Textarea rows={2} value={draft.hook} onChange={(e) => set("hook", e.target.value)} />
+                        <Textarea
+                          rows={2}
+                          value={draft.hook}
+                          onChange={(e) => set("hook", e.target.value)}
+                        />
                       </Field>
                       <Field label="Dor / conflito">
-                        <Textarea rows={2} value={draft.dorConflito} onChange={(e) => set("dorConflito", e.target.value)} />
+                        <Textarea
+                          rows={2}
+                          value={draft.dorConflito}
+                          onChange={(e) => set("dorConflito", e.target.value)}
+                        />
                       </Field>
                       <Field label="Explicação simples">
-                        <Textarea rows={3} value={draft.explicacaoSimples} onChange={(e) => set("explicacaoSimples", e.target.value)} />
+                        <Textarea
+                          rows={3}
+                          value={draft.explicacaoSimples}
+                          onChange={(e) => set("explicacaoSimples", e.target.value)}
+                        />
                       </Field>
                       <Field label="Virada / provocação">
-                        <Textarea rows={3} value={draft.virada} onChange={(e) => set("virada", e.target.value)} />
+                        <Textarea
+                          rows={3}
+                          value={draft.virada}
+                          onChange={(e) => set("virada", e.target.value)}
+                        />
                       </Field>
                       <Field label="Encerramento">
-                        <Textarea rows={2} value={draft.cta} onChange={(e) => set("cta", e.target.value)} />
+                        <Textarea
+                          rows={2}
+                          value={draft.cta}
+                          onChange={(e) => set("cta", e.target.value)}
+                        />
                       </Field>
                       <Field label="Cuidados médicos">
-                        <Textarea rows={2} value={draft.cuidadosMedicos} onChange={(e) => set("cuidadosMedicos", e.target.value)} />
+                        <Textarea
+                          rows={2}
+                          value={draft.cuidadosMedicos}
+                          onChange={(e) => set("cuidadosMedicos", e.target.value)}
+                        />
                       </Field>
                       <Field label="Formato">
-                        <Input value={draft.formatoSugerido} onChange={(e) => set("formatoSugerido", e.target.value)} />
+                        <Input
+                          value={draft.formatoSugerido}
+                          onChange={(e) => set("formatoSugerido", e.target.value)}
+                        />
                       </Field>
                       <Field label="Prioridade">
-                        <Select value={draft.prioridade} onValueChange={(v) => set("prioridade", v as Prioridade)}>
-                          <SelectTrigger><SelectValue /></SelectTrigger>
+                        <Select
+                          value={draft.prioridade}
+                          onValueChange={(v) => set("prioridade", v as Prioridade)}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="alta">Alta</SelectItem>
                             <SelectItem value="media">Media</SelectItem>
@@ -1306,8 +1821,13 @@ function RoteiroDetalhe() {
                         </Select>
                       </Field>
                       <Field label="Status">
-                        <Select value={draft.status} onValueChange={(v) => set("status", v as ScriptStatus)}>
-                          <SelectTrigger><SelectValue /></SelectTrigger>
+                        <Select
+                          value={draft.status}
+                          onValueChange={(v) => set("status", v as ScriptStatus)}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="aguardando_validacao">Rascunho</SelectItem>
                             <SelectItem value="em_revisao">Em edição</SelectItem>
@@ -1365,7 +1885,8 @@ function RoteiroDetalhe() {
                     }}
                     className={cn(
                       "rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40",
-                      avatarMode === "single" && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                      avatarMode === "single" &&
+                        "border-primary bg-primary/5 ring-1 ring-primary/30",
                     )}
                   >
                     <span className="block text-xs font-semibold">Look único</span>
@@ -1444,7 +1965,8 @@ function RoteiroDetalhe() {
                 <div>
                   <Label className="text-xs">Humor da voz</Label>
                   <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    Escolha a emoção da fala. “Confiante” é o padrão para evitar uma voz triste ou melancólica.
+                    Escolha a emoção da fala. “Confiante” é o padrão para evitar uma voz triste ou
+                    melancólica.
                   </p>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
@@ -1491,7 +2013,8 @@ function RoteiroDetalhe() {
                     onClick={() => setGenerationMode("direct")}
                     className={cn(
                       "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
-                      generationMode === "direct" && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                      generationMode === "direct" &&
+                        "border-primary bg-primary/5 ring-1 ring-primary/30",
                     )}
                   >
                     <span className="flex items-center gap-2 text-xs font-semibold">
@@ -1507,7 +2030,8 @@ function RoteiroDetalhe() {
                     onClick={() => setGenerationMode("video_agent")}
                     className={cn(
                       "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
-                      generationMode === "video_agent" && "border-primary bg-primary/5 ring-1 ring-primary/30",
+                      generationMode === "video_agent" &&
+                        "border-primary bg-primary/5 ring-1 ring-primary/30",
                     )}
                   >
                     <span className="flex items-center gap-2 text-xs font-semibold">
@@ -1539,15 +2063,15 @@ function RoteiroDetalhe() {
                   <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                     <span className="font-semibold text-foreground">Modo autônomo do HeyGen.</span>{" "}
                     Enviamos fala aprovada, avatar, voz, humor, duração e formato. Nenhuma direção
-                    cinematic entra neste fluxo. Não é necessário
-                    criar Scene Plan, slides ou render local; a montagem e os elementos visuais são
-                    produzidos pelo HeyGen e consomem créditos dele.
+                    cinematic entra neste fluxo. Não é necessário criar Scene Plan, slides ou render
+                    local; a montagem e os elementos visuais são produzidos pelo HeyGen e consomem
+                    créditos dele.
                   </div>
                 ) : cinematicMode ? (
                   <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                     <span className="font-semibold text-foreground">Fluxo Cinematic separado.</span>{" "}
-                    Somente este modo recebe o briefing de câmera, encenação e ações de fundo. Ele não
-                    usa Scene Plan, slides ou a direção dos fluxos anteriores.
+                    Somente este modo recebe o briefing de câmera, encenação e ações de fundo. Ele
+                    não usa Scene Plan, slides ou a direção dos fluxos anteriores.
                   </div>
                 ) : null}
               </div>
@@ -1574,9 +2098,9 @@ function RoteiroDetalhe() {
                     ? "A duração final acompanha a fala, sem silêncio para completar o tempo."
                     : cinematicMode
                       ? "O Cinematic organiza câmera, encenação e acontecimentos dentro deste tempo aproximado."
-                    : heygenAgentMode
-                      ? "O HeyGen Video Agent organiza ritmo, cortes e visuais dentro deste tempo aproximado."
-                      : "O app distribui a fala e as cenas dentro deste tempo aproximado."}
+                      : heygenAgentMode
+                        ? "O HeyGen Video Agent organiza ritmo, cortes e visuais dentro deste tempo aproximado."
+                        : "O app distribui a fala e as cenas dentro deste tempo aproximado."}
                 </p>
                 {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
               </div>
@@ -1586,8 +2110,15 @@ function RoteiroDetalhe() {
                   <AccordionContent>
                     <div className="grid gap-3 pt-2 md:grid-cols-2">
                       <Field label="Orientação">
-                        <Select value={orientation} onValueChange={(value) => setOrientation(value as "portrait" | "landscape")}>
-                          <SelectTrigger><SelectValue /></SelectTrigger>
+                        <Select
+                          value={orientation}
+                          onValueChange={(value) =>
+                            setOrientation(value as "portrait" | "landscape")
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="portrait">Vertical - Reels e TikTok</SelectItem>
                             <SelectItem value="landscape">Horizontal - YouTube</SelectItem>
@@ -1601,18 +2132,35 @@ function RoteiroDetalhe() {
                         </div>
                       </div>
                       <Field label="Modo de geração">
-                        <Select value={generationMode} onValueChange={(value) => setGenerationMode(value as GenerationMode)}>
-                          <SelectTrigger><SelectValue /></SelectTrigger>
+                        <Select
+                          value={generationMode}
+                          onValueChange={(value) => setGenerationMode(value as GenerationMode)}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="direct" disabled={selectedAvatar?.supportsDirectAvatar === false}>Direct Avatar</SelectItem>
+                            <SelectItem
+                              value="direct"
+                              disabled={selectedAvatar?.supportsDirectAvatar === false}
+                            >
+                              Direct Avatar
+                            </SelectItem>
                             <SelectItem value="video_agent">Video Agent</SelectItem>
                             <SelectItem value="cinematic">Cinematic separado</SelectItem>
                           </SelectContent>
                         </Select>
                       </Field>
                       <Field label="Ritmo da fala">
-                        <Select value={speechMode} onValueChange={(value) => setSpeechMode(value as "natural" | "fiel" | "direto" | "enfatico")}>
-                          <SelectTrigger><SelectValue /></SelectTrigger>
+                        <Select
+                          value={speechMode}
+                          onValueChange={(value) =>
+                            setSpeechMode(value as "natural" | "fiel" | "direto" | "enfatico")
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="natural">Natural - conversa fluida</SelectItem>
                             <SelectItem value="fiel">Fiel - segue o roteiro</SelectItem>
@@ -1622,8 +2170,15 @@ function RoteiroDetalhe() {
                         </Select>
                       </Field>
                       <Field label="Encerramento falado">
-                        <Select value={ctaMode} onValueChange={(value) => setCtaMode(value as "auto" | "manual" | "none" | "visual")}>
-                          <SelectTrigger><SelectValue /></SelectTrigger>
+                        <Select
+                          value={ctaMode}
+                          onValueChange={(value) =>
+                            setCtaMode(value as "auto" | "manual" | "none" | "visual")
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="auto">Automático com Claude</SelectItem>
                             <SelectItem value="manual">Manual</SelectItem>
@@ -1633,8 +2188,15 @@ function RoteiroDetalhe() {
                         </Select>
                       </Field>
                       <Field label="Trilha de fundo">
-                        <Select value={musicTrackId || "none"} onValueChange={(value) => setMusicTrackId(value === "none" ? null : value)}>
-                          <SelectTrigger><SelectValue placeholder="Sem trilha" /></SelectTrigger>
+                        <Select
+                          value={musicTrackId || "none"}
+                          onValueChange={(value) =>
+                            setMusicTrackId(value === "none" ? null : value)
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Sem trilha" />
+                          </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="none">Sem trilha</SelectItem>
                             {musicTracks.map((track) => (
@@ -1652,12 +2214,21 @@ function RoteiroDetalhe() {
                           <div className="flex items-center gap-2 text-sm">
                             <Volume2 className="h-4 w-4 text-primary" />
                             <span className="font-medium">{selectedMusicTrack.name}</span>
-                            <span className="text-muted-foreground">{selectedMusicTrack.artist} · {selectedMusicTrack.mood}</span>
+                            <span className="text-muted-foreground">
+                              {selectedMusicTrack.artist} · {selectedMusicTrack.mood}
+                            </span>
                           </div>
-                          <span className="text-xs text-muted-foreground">A trilha entra baixa e não substitui a voz.</span>
+                          <span className="text-xs text-muted-foreground">
+                            A trilha entra baixa e não substitui a voz.
+                          </span>
                         </div>
                         <div className="mt-2 grid gap-2 md:grid-cols-[1fr_auto] md:items-center">
-                          <audio controls preload="none" className="h-9 w-full" src={selectedMusicTrack.url}>
+                          <audio
+                            controls
+                            preload="none"
+                            className="h-9 w-full"
+                            src={selectedMusicTrack.url}
+                          >
                             Seu navegador não suporta a prévia de áudio.
                           </audio>
                           <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -1675,25 +2246,52 @@ function RoteiroDetalhe() {
                       </div>
                     ) : null}
                     <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-                      A música só é mixada localmente no MP4 final composto; não cria chamada Claude nem HeyGen.
+                      A música só é mixada localmente no MP4 final composto; não cria chamada Claude
+                      nem HeyGen.
                     </p>
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <FriendlySwitch icon={<Captions className="h-4 w-4" />} label="Legendas automáticas" description="Texto em português acompanhando a fala" checked={captions} onCheckedChange={setCaptions} />
-                      <FriendlySwitch icon={<Sparkles className="h-4 w-4" />} label="Melhorar pronúncia" description="Ajusta siglas, remédios e números para a voz" checked={optimizePronunciation} onCheckedChange={setOptimizePronunciation} />
+                      <FriendlySwitch
+                        icon={<Captions className="h-4 w-4" />}
+                        label="Legendas automáticas"
+                        description="Texto em português acompanhando a fala"
+                        checked={captions}
+                        onCheckedChange={setCaptions}
+                      />
+                      <FriendlySwitch
+                        icon={<Sparkles className="h-4 w-4" />}
+                        label="Melhorar pronúncia"
+                        description="Ajusta siglas, remédios e números para a voz"
+                        checked={optimizePronunciation}
+                        onCheckedChange={setOptimizePronunciation}
+                      />
                     </div>
                     {ctaMode === "manual" && durationSeconds !== 10 ? (
                       <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
-                        <Label htmlFor="outro-text" className="text-xs font-medium">Frase final do vídeo</Label>
+                        <Label htmlFor="outro-text" className="text-xs font-medium">
+                          Frase final do vídeo
+                        </Label>
                         <div className="mt-2 flex gap-2">
                           <Input
                             id="outro-text"
                             value={outroText}
                             onChange={(event) => setOutroText(event.target.value)}
-                            onBlur={() => setDisplayText((current) => normalizeNarrationOutro(current, outroText))}
+                            onBlur={() =>
+                              setDisplayText((current) =>
+                                normalizeNarrationOutro(current, outroText),
+                              )
+                            }
                             placeholder="Ex.: Me siga para mais dicas."
                             maxLength={180}
                           />
-                          <Button type="button" variant="secondary" onClick={() => setDisplayText((current) => normalizeNarrationOutro(current, outroText))}>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            onClick={() =>
+                              setDisplayText((current) =>
+                                normalizeNarrationOutro(current, outroText),
+                              )
+                            }
+                          >
                             Aplicar
                           </Button>
                         </div>
@@ -1704,12 +2302,19 @@ function RoteiroDetalhe() {
                       <p className="mt-0.5 text-[11px] text-muted-foreground">
                         Ajustes fonéticos ficam somente aqui, nunca na legenda.
                       </p>
-                      <Textarea id="spoken-text" rows={5} value={spokenText} onChange={(event) => setSpokenText(event.target.value)} className="mt-2 leading-6" />
+                      <Textarea
+                        id="spoken-text"
+                        rows={5}
+                        value={spokenText}
+                        onChange={(event) => setSpokenText(event.target.value)}
+                        className="mt-2 leading-6"
+                      />
                     </div>
                     {performancePlan ? (
                       <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                         <span className="font-medium text-foreground">Plano de performance:</span>{" "}
-                        {performancePlan.tone} · {performancePlan.pace} · {performancePlan.emotion} · speed {performancePlan.recommendedVoiceSpeed}.
+                        {performancePlan.tone} · {performancePlan.pace} · {performancePlan.emotion}{" "}
+                        · speed {performancePlan.recommendedVoiceSpeed}.
                       </div>
                     ) : null}
                   </AccordionContent>
@@ -1717,8 +2322,8 @@ function RoteiroDetalhe() {
               </Accordion>
               <div className="mt-2 flex items-start gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />A fala
-                exata será validada antes do envio ao HeyGen. Se houver dose, promessa ou instrução
-                prescritiva, o sistema mantém o alerta para revisão, mas não bloqueia o teste.
+                exata será validada antes do envio ao HeyGen. Dose, promessa ou instrução
+                prescritiva bloqueiam a geração paga até a correção.
               </div>
             </div>
           </div>
@@ -1735,7 +2340,7 @@ function RoteiroDetalhe() {
                   ? "Briefing exclusivo do Cinematic. Ele não altera Scene Plan, slides ou o Video Agent comum."
                   : generationMode === "video_agent"
                     ? "O Video Agent comum cria a edição sem receber nenhuma direção cinematic."
-                  : "Depois de escolher duração e avatar, deixe o Claude organizar cenas, cortes de look e slide de transição."
+                    : "Depois de escolher duração e avatar, deixe o Claude organizar cenas, cortes de look e slide de transição."
               }
             />
             <div className="mt-4">
@@ -1746,8 +2351,8 @@ function RoteiroDetalhe() {
                       Direção cinematic
                     </Label>
                     <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                      Escreva clima, câmera, ações de fundo e apoios visuais. O agente interpreta isso
-                      como direção visual, nunca como fala.
+                      Escreva clima, câmera, ações de fundo e apoios visuais. O agente interpreta
+                      isso como direção visual, nunca como fala.
                     </p>
                     <Textarea
                       id="cinematic-prompt"
@@ -1764,8 +2369,9 @@ function RoteiroDetalhe() {
                       <div>
                         <h3 className="text-sm font-semibold">Direção exclusiva do Cinematic</h3>
                         <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                          Ao enviar este modo, o agente recebe a fala aprovada e somente este briefing.
-                          Os fluxos de cenas, slides e Video Agent comum permanecem separados.
+                          Ao enviar este modo, o agente recebe a fala aprovada e somente este
+                          briefing. Os fluxos de cenas, slides e Video Agent comum permanecem
+                          separados.
                         </p>
                       </div>
                     </div>
@@ -1778,8 +2384,8 @@ function RoteiroDetalhe() {
                     <div>
                       <h3 className="text-sm font-semibold">Video Agent sem Cinematic</h3>
                       <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                        Este fluxo recebe somente fala, performance, avatar, duração e formato. Nenhum
-                        briefing cinematic, Scene Plan ou slide local é enviado.
+                        Este fluxo recebe somente fala, performance, avatar, duração e formato.
+                        Nenhum briefing cinematic, Scene Plan ou slide local é enviado.
                       </p>
                     </div>
                   </div>
@@ -1787,45 +2393,45 @@ function RoteiroDetalhe() {
               ) : (
                 <>
                   <ScenePlanEditor
-                scriptId={id}
-                loading={scenePlanLoading}
-                plan={scenePlan}
-                fallbackText={displayText || narrationText}
-                displayText={displayText || narrationText}
-                spokenText={spokenText}
-                durationSeconds={durationSeconds}
-                performancePlan={performancePlan}
-                availableRoles={sceneRoles}
-                transitionSlideGenerating={transitionSlideGenerating}
-                onSaved={setScenePlan}
-                onGenerateTransitionSlides={gerarSlidesTransicao}
-              />
+                    scriptId={id}
+                    loading={scenePlanLoading}
+                    plan={scenePlan}
+                    fallbackText={displayText || narrationText}
+                    displayText={displayText || narrationText}
+                    spokenText={spokenText}
+                    durationSeconds={durationSeconds}
+                    performancePlan={performancePlan}
+                    availableRoles={sceneRoles}
+                    transitionSlideGenerating={transitionSlideGenerating}
+                    onSaved={setScenePlan}
+                    onGenerateTransitionSlides={gerarSlidesTransicao}
+                  />
                   <VisualPlanDirector
-                scriptId={id}
-                scenePlan={scenePlan}
-                visualPlan={visualPlan}
-                loading={visualPlanLoading}
-                displayText={displayText || narrationText}
-                spokenText={spokenText}
-                durationSeconds={durationSeconds}
-                performancePlan={performancePlan}
-                onSaved={setVisualPlan}
-                videoSlideRender={videoSlideRender}
-                videoSlideRenderLoading={videoSlideRenderLoading}
-                onRendered={setVideoSlideRender}
-              />
+                    scriptId={id}
+                    scenePlan={scenePlan}
+                    visualPlan={visualPlan}
+                    loading={visualPlanLoading}
+                    displayText={displayText || narrationText}
+                    spokenText={spokenText}
+                    durationSeconds={durationSeconds}
+                    performancePlan={performancePlan}
+                    onSaved={setVisualPlan}
+                    videoSlideRender={videoSlideRender}
+                    videoSlideRenderLoading={videoSlideRenderLoading}
+                    onRendered={setVideoSlideRender}
+                  />
                   <Accordion type="single" collapsible className="mt-3">
-                <AccordionItem value="scene-generation-details">
-                  <AccordionTrigger>Detalhes técnicos da geração por cena</AccordionTrigger>
-                  <AccordionContent>
-                    <SceneGenerationSummary
-                      plan={sceneGenerationPlan}
-                      loading={sceneGenerationPlanLoading}
-                      durationSeconds={durationSeconds}
-                      avatarMode={avatarMode}
-                    />
-                  </AccordionContent>
-                </AccordionItem>
+                    <AccordionItem value="scene-generation-details">
+                      <AccordionTrigger>Detalhes técnicos da geração por cena</AccordionTrigger>
+                      <AccordionContent>
+                        <SceneGenerationSummary
+                          plan={sceneGenerationPlan}
+                          loading={sceneGenerationPlanLoading}
+                          durationSeconds={durationSeconds}
+                          avatarMode={avatarMode}
+                        />
+                      </AccordionContent>
+                    </AccordionItem>
                   </Accordion>
                 </>
               )}
@@ -1833,7 +2439,11 @@ function RoteiroDetalhe() {
           </div>
 
           <div id="roteiro-gerar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
-            <SectionHeading index={4} title="Gerar" description="Confirme que fala, avatar, direção e compliance estão prontos antes de gastar créditos." />
+            <SectionHeading
+              index={4}
+              title="Gerar"
+              description="Confirme que fala, avatar, direção e compliance estão prontos antes de gastar créditos."
+            />
             <div className="mt-4 space-y-3">
               <ProductionGateChecklist
                 items={productionChecklist}
@@ -1854,10 +2464,14 @@ function RoteiroDetalhe() {
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <div className="font-semibold">Prévia técnica de avatar e voz</div>
-                      <p className="mt-1 text-xs text-muted-foreground">Valida voz e enquadramento; não representa toda a composição final.</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Valida voz e enquadramento; não representa toda a composição final.
+                      </p>
                     </div>
                     <Button size="sm" variant="secondary" asChild>
-                      <Link to="/producao/$id" params={{ id: latestPreview.id }}>Abrir prévia</Link>
+                      <Link to="/producao/$id" params={{ id: latestPreview.id }}>
+                        Abrir prévia
+                      </Link>
                     </Button>
                   </div>
                 </div>
@@ -1875,8 +2489,12 @@ function RoteiroDetalhe() {
                             params={{ id: candidate.id }}
                             className={`rounded-lg border p-3 text-sm transition-colors ${candidate.id === script.id ? "border-status-info bg-background" : "bg-background/60 hover:border-status-info/50"}`}
                           >
-                            <div className="text-[10px] font-semibold uppercase tracking-wider text-status-info">Teste {index + 1}</div>
-                            <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{candidate.textoFalado}</p>
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-status-info">
+                              Teste {index + 1}
+                            </div>
+                            <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
+                              {candidate.textoFalado}
+                            </p>
                           </Link>
                         ))}
                       </div>
@@ -1890,8 +2508,16 @@ function RoteiroDetalhe() {
                   <AccordionContent>
                     <div className="space-y-2 pt-2 text-sm leading-relaxed">
                       <Preview label="Hook" text={draft.hook} palavras={palavras} />
-                      <Preview label="Dor / conflito" text={draft.dorConflito} palavras={palavras} />
-                      <Preview label="Explicação" text={draft.explicacaoSimples} palavras={palavras} />
+                      <Preview
+                        label="Dor / conflito"
+                        text={draft.dorConflito}
+                        palavras={palavras}
+                      />
+                      <Preview
+                        label="Explicação"
+                        text={draft.explicacaoSimples}
+                        palavras={palavras}
+                      />
                       <Preview label="Virada" text={draft.virada} palavras={palavras} />
                       <Preview label="Encerramento" text={draft.cta} palavras={palavras} />
                     </div>
@@ -2107,9 +2733,11 @@ function AvatarSetSelector({
     setDraftLooks(selected?.looks || []);
     setChoosingRole(null);
     setPackError(null);
-  }, [selected?.id, selected?.updatedAt]);
+  }, [selected?.id, selected?.looks, selected?.updatedAt]);
 
-  const packDirty = Boolean(selected && JSON.stringify(draftLooks) !== JSON.stringify(selected.looks));
+  const packDirty = Boolean(
+    selected && JSON.stringify(draftLooks) !== JSON.stringify(selected.looks),
+  );
 
   function updateDraftAvatar(role: AvatarSetRole, avatarId: string) {
     setDraftLooks((current) =>
@@ -2153,7 +2781,11 @@ function AvatarSetSelector({
   }
 
   if (loading) {
-    return <div className="rounded-lg border bg-muted/25 p-3 text-xs text-muted-foreground">Carregando Avatar Sets...</div>;
+    return (
+      <div className="rounded-lg border bg-muted/25 p-3 text-xs text-muted-foreground">
+        Carregando Avatar Sets...
+      </div>
+    );
   }
 
   return (
@@ -2192,7 +2824,8 @@ function AvatarSetSelector({
             {draftLooks.map((look) => {
               const item =
                 avatars.find((avatar) => avatar.id === look.avatarId) ||
-                selectedLooks.find((candidate) => candidate.look.avatarId === look.avatarId)?.avatar;
+                selectedLooks.find((candidate) => candidate.look.avatarId === look.avatarId)
+                  ?.avatar;
               const primary = look.avatarId === primaryAvatarId;
               return (
                 <div
@@ -2205,7 +2838,9 @@ function AvatarSetSelector({
                 >
                   <button
                     type="button"
-                    onClick={() => setChoosingRole((current) => (current === look.role ? null : look.role))}
+                    onClick={() =>
+                      setChoosingRole((current) => (current === look.role ? null : look.role))
+                    }
                     className="flex w-full items-center gap-2 rounded-md text-left transition-colors hover:bg-muted/40"
                   >
                     {item ? (
@@ -2227,7 +2862,9 @@ function AvatarSetSelector({
                   </button>
                   <div className="mt-2 flex items-center justify-between gap-2">
                     {primary ? (
-                      <span className="text-[10px] font-medium text-primary">Posição principal</span>
+                      <span className="text-[10px] font-medium text-primary">
+                        Posição principal
+                      </span>
                     ) : (
                       <Button
                         type="button"
@@ -2253,10 +2890,19 @@ function AvatarSetSelector({
             <div className="rounded-lg border border-status-info/30 bg-background p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <div>
-                  <div className="text-xs font-semibold">Escolha o avatar para {avatarSetRoleLabel(choosingRole)}</div>
-                  <p className="text-[11px] text-muted-foreground">Veja as miniaturas e clique no look que quer usar nesta posição.</p>
+                  <div className="text-xs font-semibold">
+                    Escolha o avatar para {avatarSetRoleLabel(choosingRole)}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Veja as miniaturas e clique no look que quer usar nesta posição.
+                  </p>
                 </div>
-                <Button type="button" size="sm" variant="ghost" onClick={() => setChoosingRole(null)}>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setChoosingRole(null)}
+                >
                   Fechar
                 </Button>
               </div>
@@ -2304,7 +2950,8 @@ function AvatarSetSelector({
           ) : null}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-[11px] leading-4 text-muted-foreground">
-              Clique em um look para trocar por miniatura. Salve o pack para usar as mudanças na produção.
+              Clique em um look para trocar por miniatura. Salve o pack para usar as mudanças na
+              produção.
             </p>
             <div className="flex gap-1">
               {packDirty ? (
@@ -2312,7 +2959,12 @@ function AvatarSetSelector({
                   <Button type="button" size="sm" variant="ghost" onClick={resetDraftPack}>
                     Descartar
                   </Button>
-                  <Button type="button" size="sm" onClick={() => void saveDraftPack()} disabled={savingPack}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => void saveDraftPack()}
+                    disabled={savingPack}
+                  >
                     {savingPack ? "Salvando..." : "Salvar pack"}
                   </Button>
                 </>
@@ -2381,17 +3033,24 @@ function AvatarSetEditorDialog({
   }, [avatars, initial, open, voices]);
 
   function updateLook(index: number, patch: Partial<AvatarSetLook>) {
-    setLooks((current) => current.map((look, lookIndex) => (lookIndex === index ? { ...look, ...patch } : look)));
+    setLooks((current) =>
+      current.map((look, lookIndex) => (lookIndex === index ? { ...look, ...patch } : look)),
+    );
   }
 
   function addLook() {
     const nextAvatar = avatars.find((avatar) => !looks.some((look) => look.avatarId === avatar.id));
-    const nextRole = AVATAR_SET_ROLE_OPTIONS.find((option) => !looks.some((look) => look.role === option.value));
+    const nextRole = AVATAR_SET_ROLE_OPTIONS.find(
+      (option) => !looks.some((look) => look.role === option.value),
+    );
     if (!nextAvatar || !nextRole) {
       setError("Não há outro look ou role disponível no catálogo atual.");
       return;
     }
-    setLooks((current) => [...current, { avatarId: nextAvatar.id, role: nextRole.value, label: nextRole.label }]);
+    setLooks((current) => [
+      ...current,
+      { avatarId: nextAvatar.id, role: nextRole.value, label: nextRole.label },
+    ]);
     setError(null);
   }
 
@@ -2411,7 +3070,11 @@ function AvatarSetEditorDialog({
       const saved = await saveAvatarSet({ name: name.trim(), voiceId, looks }, initial?.id);
       await onSaved(saved);
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Nao foi possivel salvar o Avatar Set.");
+      setError(
+        submitError instanceof Error
+          ? submitError.message
+          : "Nao foi possivel salvar o Avatar Set.",
+      );
     } finally {
       setSaving(false);
     }
@@ -2423,19 +3086,31 @@ function AvatarSetEditorDialog({
         <DialogHeader>
           <DialogTitle>{initial ? "Editar Avatar Set" : "Criar Avatar Set"}</DialogTitle>
           <DialogDescription>
-            Cadastre looks reais da mesma pessoa para alternar entre duas posições com cortes entre cenas.
+            Cadastre looks reais da mesma pessoa para alternar entre duas posições com cortes entre
+            cenas.
           </DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={submit}>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Nome do conjunto">
-              <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Guilherme — Casual Azul" required />
+              <Input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="Guilherme — Casual Azul"
+                required
+              />
             </Field>
             <Field label="Voz">
               <Select value={voiceId} onValueChange={setVoiceId}>
-                <SelectTrigger><SelectValue placeholder="Selecione uma voz" /></SelectTrigger>
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione uma voz" />
+                </SelectTrigger>
                 <SelectContent>
-                  {voices.map((voice) => <SelectItem key={voice.id} value={voice.id}>{voice.name}</SelectItem>)}
+                  {voices.map((voice) => (
+                    <SelectItem key={voice.id} value={voice.id}>
+                      {voice.name}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </Field>
@@ -2444,9 +3119,17 @@ function AvatarSetEditorDialog({
             <div className="flex items-center justify-between gap-2">
               <div>
                 <Label className="text-xs">Looks e posições</Label>
-                <p className="text-[11px] text-muted-foreground">Use pelo menos dois looks diferentes.</p>
+                <p className="text-[11px] text-muted-foreground">
+                  Use pelo menos dois looks diferentes.
+                </p>
               </div>
-              <Button type="button" size="sm" variant="outline" onClick={addLook} disabled={looks.length >= 6}>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={addLook}
+                disabled={looks.length >= 6}
+              >
                 <Plus className="h-3.5 w-3.5" /> Adicionar look
               </Button>
             </div>
@@ -2490,14 +3173,41 @@ function AvatarSetEditorDialog({
                         Escolher
                       </Button>
                     </div>
-                    <Select value={look.role} onValueChange={(value) => updateLook(index, { role: value as AvatarSetRole, label: avatarSetRoleLabel(value as AvatarSetRole) })}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
+                    <Select
+                      value={look.role}
+                      onValueChange={(value) =>
+                        updateLook(index, {
+                          role: value as AvatarSetRole,
+                          label: avatarSetRoleLabel(value as AvatarSetRole),
+                        })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
                       <SelectContent>
-                        {AVATAR_SET_ROLE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                        {AVATAR_SET_ROLE_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
-                    <Input value={look.label} onChange={(event) => updateLook(index, { label: event.target.value })} placeholder="Rótulo" />
-                    <Button type="button" size="icon" variant="ghost" onClick={() => setLooks((current) => current.filter((_, lookIndex) => lookIndex !== index))} disabled={looks.length <= 2} aria-label="Remover look">
+                    <Input
+                      value={look.label}
+                      onChange={(event) => updateLook(index, { label: event.target.value })}
+                      placeholder="Rótulo"
+                    />
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      onClick={() =>
+                        setLooks((current) => current.filter((_, lookIndex) => lookIndex !== index))
+                      }
+                      disabled={looks.length <= 2}
+                      aria-label="Remover look"
+                    >
                       <Trash2 className="h-4 w-4 text-status-danger" />
                     </Button>
                     {choosingLookIndex === index ? (
@@ -2522,7 +3232,11 @@ function AvatarSetEditorDialog({
                                 alreadyUsed && !active && "opacity-70",
                               )}
                             >
-                              <AvatarThumbnail avatar={avatar} className="h-12 w-12" fit="contain" />
+                              <AvatarThumbnail
+                                avatar={avatar}
+                                className="h-12 w-12"
+                                fit="contain"
+                              />
                               <span className="min-w-0 flex-1">
                                 <span className="block truncate text-xs font-semibold">
                                   {avatar.name}
@@ -2546,9 +3260,15 @@ function AvatarSetEditorDialog({
               })}
             </div>
           </div>
-          {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
+          {error ? (
+            <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">
+              {error}
+            </p>
+          ) : null}
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancelar</Button>
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancelar
+            </Button>
             <Button type="submit" disabled={saving || avatars.length < 2 || looks.length < 2}>
               {saving ? "Salvando..." : "Salvar Avatar Set"}
             </Button>
@@ -2581,13 +3301,26 @@ function resolveSceneRole(
 
 function defaultSceneDraft(text: string, roles: AvatarSetRole[]): EditableScene[] {
   const clean = text.replace(/\s+/g, " ").trim();
-  const sentences = clean.match(/[^.!?…]+[.!?…]*/g)?.map((sentence) => sentence.trim()).filter(Boolean) || [];
+  const sentences =
+    clean
+      .match(/[^.!?…]+[.!?…]*/g)
+      ?.map((sentence) => sentence.trim())
+      .filter(Boolean) || [];
   if (roles.length < 2 || !clean) {
-    return [{ id: "scene-1", text: clean, lookRole: roles[0] || "primary", estimatedStart: 0, estimatedEnd: 0 }];
+    return [
+      {
+        id: "scene-1",
+        text: clean,
+        lookRole: roles[0] || "primary",
+        estimatedStart: 0,
+        estimatedEnd: 0,
+      },
+    ];
   }
   const splitAt = Math.max(1, Math.ceil(sentences.length / 2));
   const first = sentences.slice(0, splitAt).join(" ").trim();
-  const second = sentences.slice(splitAt).join(" ").trim() || clean.slice(Math.ceil(clean.length / 2));
+  const second =
+    sentences.slice(splitAt).join(" ").trim() || clean.slice(Math.ceil(clean.length / 2));
   return [
     { id: "scene-1", text: first, lookRole: roles[0], estimatedStart: 0, estimatedEnd: 0 },
     { id: "scene-2", text: second, lookRole: roles[1], estimatedStart: 0, estimatedEnd: 0 },
@@ -2606,9 +3339,16 @@ function coerceToTwoSceneDraft(
         lookRole: scene.lookRole,
       }));
   const firstText = source[0]?.text || "";
-  const secondText = source.slice(1).map((scene) => scene.text).join(" ").trim();
+  const secondText = source
+    .slice(1)
+    .map((scene) => scene.text)
+    .join(" ")
+    .trim();
   const fallback = defaultSceneDraft(
-    source.map((scene) => scene.text).join(" ").trim() || fallbackText,
+    source
+      .map((scene) => scene.text)
+      .join(" ")
+      .trim() || fallbackText,
     roles,
   );
   return [
@@ -2622,7 +3362,11 @@ function coerceToTwoSceneDraft(
     {
       id: "scene-2",
       text: secondText || fallback[1]?.text || "",
-      lookRole: resolveSceneRole(source[1]?.lookRole || roles[1] || roles[0] || "primary", 1, roles),
+      lookRole: resolveSceneRole(
+        source[1]?.lookRole || roles[1] || roles[0] || "primary",
+        1,
+        roles,
+      ),
       estimatedStart: 0,
       estimatedEnd: 0,
     },
@@ -2660,7 +3404,12 @@ function ScenePlanEditor({
   displayText: string;
   spokenText: string;
   durationSeconds: 10 | 15 | 30 | 45 | 60;
-  performancePlan: { tone: string; pace: string; emotion: string; recommendedVoiceSpeed: number } | null;
+  performancePlan: {
+    tone: string;
+    pace: string;
+    emotion: string;
+    recommendedVoiceSpeed: number;
+  } | null;
   availableRoles: AvatarSetRole[];
   transitionSlideGenerating?: boolean;
   onSaved: (plan: ScenePlan) => void;
@@ -2675,13 +3424,17 @@ function ScenePlanEditor({
   useEffect(() => {
     if (loading) return;
     setScenes(
-      plan ? scenePlanToEditableScenes(plan, availableRoles) : defaultSceneDraft(fallbackText, availableRoles),
+      plan
+        ? scenePlanToEditableScenes(plan, availableRoles)
+        : defaultSceneDraft(fallbackText, availableRoles),
     );
     setError(null);
-  }, [availableRoles, loading, plan?.updatedAt]);
+  }, [availableRoles, fallbackText, loading, plan]);
 
   function updateScene(index: number, patch: Partial<EditableScene>) {
-    setScenes((current) => current.map((scene, sceneIndex) => (sceneIndex === index ? { ...scene, ...patch } : scene)));
+    setScenes((current) =>
+      current.map((scene, sceneIndex) => (sceneIndex === index ? { ...scene, ...patch } : scene)),
+    );
   }
 
   function addScene() {
@@ -2699,7 +3452,11 @@ function ScenePlanEditor({
   }
 
   function useTwoScenes() {
-    const mergedText = scenes.map((scene) => scene.text).join(" ").replace(/\s+/g, " ").trim();
+    const mergedText = scenes
+      .map((scene) => scene.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
     setScenes(defaultSceneDraft(mergedText || fallbackText, availableRoles));
     setDirectionNotice("Plano reorganizado em 2 cenas. Revise os textos e salve.");
     setError(null);
@@ -2735,7 +3492,11 @@ function ScenePlanEditor({
           : "Claude sugeriu uma divisão. Revise e salve o plano quando estiver de acordo.",
       );
     } catch (directionError) {
-      setError(directionError instanceof Error ? directionError.message : "Nao foi possivel gerar direção com Claude.");
+      setError(
+        directionError instanceof Error
+          ? directionError.message
+          : "Nao foi possivel gerar direção com Claude.",
+      );
     } finally {
       setDirecting(false);
     }
@@ -2745,7 +3506,10 @@ function ScenePlanEditor({
     if (targetScenes.some((scene) => !scene.text.trim())) {
       return "Cada cena precisa ter um texto falado.";
     }
-    if (availableRoles.length >= 2 && new Set(targetScenes.map((scene) => scene.lookRole)).size < 2) {
+    if (
+      availableRoles.length >= 2 &&
+      new Set(targetScenes.map((scene) => scene.lookRole)).size < 2
+    ) {
       return "Use pelo menos duas posições diferentes quando o Avatar Set estiver ativo.";
     }
     return null;
@@ -2766,7 +3530,9 @@ function ScenePlanEditor({
       if (showToast) toast.success("Scene Plan salvo.");
       return saved;
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Nao foi possivel salvar o Scene Plan.");
+      setError(
+        saveError instanceof Error ? saveError.message : "Nao foi possivel salvar o Scene Plan.",
+      );
       return null;
     } finally {
       setSaving(false);
@@ -2829,7 +3595,11 @@ function ScenePlanEditor({
           : "Claude organizou e salvou o plano de cenas.",
       );
     } catch (directionError) {
-      setError(directionError instanceof Error ? directionError.message : "Nao foi possivel organizar com Claude.");
+      setError(
+        directionError instanceof Error
+          ? directionError.message
+          : "Nao foi possivel organizar com Claude.",
+      );
     } finally {
       setDirecting(false);
     }
@@ -2841,7 +3611,8 @@ function ScenePlanEditor({
         <div>
           <h4 className="text-xs font-semibold">Claude organiza o vídeo</h4>
           <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-            Você escolhe duração e avatar. O Claude divide a fala, alterna os looks e cria o slide entre as cenas.
+            Você escolhe duração e avatar. O Claude divide a fala, alterna os looks e cria o slide
+            entre as cenas.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -2853,7 +3624,9 @@ function ScenePlanEditor({
             disabled={loading || directing || transitionSlideGenerating}
           >
             <Sparkles className="h-3.5 w-3.5" />{" "}
-            {directing || transitionSlideGenerating ? "Claude organizando..." : "Fazer tudo com Claude"}
+            {directing || transitionSlideGenerating
+              ? "Claude organizando..."
+              : "Fazer tudo com Claude"}
           </Button>
           {scenes.length !== 2 && availableRoles.length >= 2 ? (
             <Button type="button" size="sm" variant="outline" onClick={useTwoScenes}>
@@ -2866,8 +3639,9 @@ function ScenePlanEditor({
         </div>
       </div>
       <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-        <span className="font-semibold text-foreground">Fluxo automático:</span> 2 cenas com posições diferentes,
-        1 slide de transição renderizado e checklist final antes de enviar ao HeyGen.
+        <span className="font-semibold text-foreground">Fluxo automático:</span> 2 cenas com
+        posições diferentes, 1 slide de transição renderizado e checklist final antes de enviar ao
+        HeyGen.
       </div>
       {loading ? (
         <p className="text-xs text-muted-foreground">Carregando Scene Plan...</p>
@@ -2882,7 +3656,11 @@ function ScenePlanEditor({
                     type="button"
                     size="icon"
                     variant="ghost"
-                    onClick={() => setScenes((current) => current.filter((_, sceneIndex) => sceneIndex !== index))}
+                    onClick={() =>
+                      setScenes((current) =>
+                        current.filter((_, sceneIndex) => sceneIndex !== index),
+                      )
+                    }
                     disabled={scenes.length <= 1}
                     aria-label={`Remover cena ${index + 1}`}
                   >
@@ -2900,12 +3678,18 @@ function ScenePlanEditor({
                     <Field label="Posição">
                       <Select
                         value={scene.lookRole}
-                        onValueChange={(value) => updateScene(index, { lookRole: value as AvatarSetRole })}
+                        onValueChange={(value) =>
+                          updateScene(index, { lookRole: value as AvatarSetRole })
+                        }
                       >
-                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
                         <SelectContent>
                           {availableRoles.map((role) => (
-                            <SelectItem key={role} value={role}>{avatarSetRoleLabel(role)}</SelectItem>
+                            <SelectItem key={role} value={role}>
+                              {avatarSetRoleLabel(role)}
+                            </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
@@ -2916,7 +3700,9 @@ function ScenePlanEditor({
                         min={0}
                         step={0.1}
                         value={scene.estimatedStart}
-                        onChange={(event) => updateScene(index, { estimatedStart: Number(event.target.value) || 0 })}
+                        onChange={(event) =>
+                          updateScene(index, { estimatedStart: Number(event.target.value) || 0 })
+                        }
                         aria-label="Início estimado"
                         placeholder="Início"
                       />
@@ -2925,7 +3711,9 @@ function ScenePlanEditor({
                         min={0}
                         step={0.1}
                         value={scene.estimatedEnd}
-                        onChange={(event) => updateScene(index, { estimatedEnd: Number(event.target.value) || 0 })}
+                        onChange={(event) =>
+                          updateScene(index, { estimatedEnd: Number(event.target.value) || 0 })
+                        }
                         aria-label="Fim estimado"
                         placeholder="Fim"
                       />
@@ -2940,7 +3728,8 @@ function ScenePlanEditor({
                       Transição Cena {index + 1} → Cena {index + 2}
                     </div>
                     <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-                      O Claude cria este slide para aparecer durante a fala, antes do próximo look entrar.
+                      O Claude cria este slide para aparecer durante a fala, antes do próximo look
+                      entrar.
                     </p>
                   </div>
                   <Button
@@ -2959,13 +3748,27 @@ function ScenePlanEditor({
           ))}
         </div>
       )}
-      {directionNotice ? <p className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-status-info">{directionNotice}</p> : null}
-      {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
+      {directionNotice ? (
+        <p className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-status-info">
+          {directionNotice}
+        </p>
+      ) : null}
+      {error ? (
+        <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">
+          {error}
+        </p>
+      ) : null}
       <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] text-muted-foreground">
           Use o salvamento manual só se você editou alguma cena depois do Claude.
         </p>
-        <Button type="button" size="sm" variant="outline" onClick={() => void save()} disabled={loading || saving || scenes.length === 0}>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => void save()}
+          disabled={loading || saving || scenes.length === 0}
+        >
           {saving ? "Salvando..." : "Salvar ajuste manual"}
         </Button>
       </div>
@@ -3018,7 +3821,12 @@ function VisualPlanDirector({
   displayText: string;
   spokenText: string;
   durationSeconds: 10 | 15 | 30 | 45 | 60;
-  performancePlan: { tone: string; pace: string; emotion: string; recommendedVoiceSpeed: number } | null;
+  performancePlan: {
+    tone: string;
+    pace: string;
+    emotion: string;
+    recommendedVoiceSpeed: number;
+  } | null;
   onSaved: (plan: VisualPlan) => void;
   videoSlideRender: VideoSlideRender | null;
   videoSlideRenderLoading: boolean;
@@ -3033,7 +3841,7 @@ function VisualPlanDirector({
 
   useEffect(() => {
     setDraftPlan(visualPlan);
-  }, [visualPlan?.updatedAt]);
+  }, [visualPlan]);
 
   async function requestVisualDirection() {
     if (!scenePlan) {
@@ -3055,7 +3863,11 @@ function VisualPlanDirector({
       setDraftPlan(result.visualPlan);
       toast.success("Direção visual gerada pelo Claude.");
     } catch (visualError) {
-      setError(visualError instanceof Error ? visualError.message : "Nao foi possivel gerar direção visual.");
+      setError(
+        visualError instanceof Error
+          ? visualError.message
+          : "Nao foi possivel gerar direção visual.",
+      );
     } finally {
       setDirecting(false);
     }
@@ -3067,7 +3879,9 @@ function VisualPlanDirector({
         ? {
             ...current,
             scenes: current.scenes.map((scene) =>
-              scene.sceneId === sceneId ? { ...scene, visual: { ...scene.visual, ...patch } } : scene,
+              scene.sceneId === sceneId
+                ? { ...scene, visual: { ...scene.visual, ...patch } }
+                : scene,
             ),
           }
         : current,
@@ -3084,7 +3898,11 @@ function VisualPlanDirector({
       onSaved(saved);
       toast.success("Direção visual salva.");
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Nao foi possivel salvar a direção visual.");
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Nao foi possivel salvar a direção visual.",
+      );
     } finally {
       setSaving(false);
     }
@@ -3106,7 +3924,11 @@ function VisualPlanDirector({
       toast.success(`${rendered.renderedCount} preview(s) 1080×1920 renderizado(s).`);
       return rendered;
     } catch (renderError) {
-      setError(renderError instanceof Error ? renderError.message : "Nao foi possivel renderizar os previews.");
+      setError(
+        renderError instanceof Error
+          ? renderError.message
+          : "Nao foi possivel renderizar os previews.",
+      );
       return null;
     } finally {
       setRendering(false);
@@ -3114,13 +3936,17 @@ function VisualPlanDirector({
   }
 
   async function renderAndOpenSlide(sceneId: string) {
-    const existing = videoSlideRender?.assets.find((asset) => asset.sceneId === sceneId && asset.url);
+    const existing = videoSlideRender?.assets.find(
+      (asset) => asset.sceneId === sceneId && asset.url,
+    );
     if (existing?.url) {
       window.open(existing.url, "_blank", "noopener,noreferrer");
       return;
     }
     const rendered = await renderPreviews();
-    const asset = rendered?.assets.find((candidate) => candidate.sceneId === sceneId && candidate.url);
+    const asset = rendered?.assets.find(
+      (candidate) => candidate.sceneId === sceneId && candidate.url,
+    );
     if (asset?.url) {
       window.open(asset.url, "_blank", "noopener,noreferrer");
     }
@@ -3132,15 +3958,27 @@ function VisualPlanDirector({
         <div>
           <h4 className="text-xs font-semibold">Direção visual dos apoios</h4>
           <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-            Claude cria {requiredVisualCount} apoio(s) para entrar durante a fala antes dos cortes de look.
+            Claude cria {requiredVisualCount} apoio(s) para entrar durante a fala antes dos cortes
+            de look.
           </p>
         </div>
-        <Button type="button" size="sm" variant="secondary" onClick={() => void requestVisualDirection()} disabled={loading || directing || !scenePlan}>
-          <Sparkles className="h-3.5 w-3.5" /> {directing ? "Claude pensando..." : "Gerar direção visual com Claude"}
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          onClick={() => void requestVisualDirection()}
+          disabled={loading || directing || !scenePlan}
+        >
+          <Sparkles className="h-3.5 w-3.5" />{" "}
+          {directing ? "Claude pensando..." : "Gerar direção visual com Claude"}
         </Button>
       </div>
-      <p className="text-[11px] text-muted-foreground">Esta ação usa tokens Claude e salva uma direção estruturada, sem gerar imagens ou vídeo.</p>
-      {loading ? <p className="text-xs text-muted-foreground">Carregando direção visual...</p> : null}
+      <p className="text-[11px] text-muted-foreground">
+        Esta ação usa tokens Claude e salva uma direção estruturada, sem gerar imagens ou vídeo.
+      </p>
+      {loading ? (
+        <p className="text-xs text-muted-foreground">Carregando direção visual...</p>
+      ) : null}
       {draftPlan ? (
         <div className="space-y-2">
           {draftPlan.scenes.map((scene, index) => {
@@ -3150,120 +3988,198 @@ function VisualPlanDirector({
               (asset) => asset.sceneId === scene.sceneId && asset.url,
             );
             return (
-            <div key={scene.sceneId} className="rounded-md border bg-background p-3">
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <span className="text-xs font-semibold">
-                    {closesOnAvatar
-                      ? `Cena ${index + 1}`
-                      : `Transição Cena ${index + 1} → Cena ${index + 2}`}
-                  </span>
-                  {!closesOnAvatar ? (
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">
-                      Entra durante a fala antes do próximo look.
-                    </p>
-                  ) : null}
+              <div key={scene.sceneId} className="rounded-md border bg-background p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="text-xs font-semibold">
+                      {closesOnAvatar
+                        ? `Cena ${index + 1}`
+                        : `Transição Cena ${index + 1} → Cena ${index + 2}`}
+                    </span>
+                    {!closesOnAvatar ? (
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        Entra durante a fala antes do próximo look.
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {!closesOnAvatar && scene.visual.type !== "none" ? (
+                      previewAsset?.url ? (
+                        <Button type="button" size="sm" variant="outline" asChild>
+                          <a href={previewAsset.url} target="_blank" rel="noreferrer">
+                            <Film className="h-3.5 w-3.5" /> Ver slide
+                          </a>
+                        </Button>
+                      ) : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void renderAndOpenSlide(scene.sceneId)}
+                          disabled={rendering || loading}
+                        >
+                          <Film className="h-3.5 w-3.5" />
+                          {rendering ? "Renderizando..." : "Renderizar e ver slide"}
+                        </Button>
+                      )
+                    ) : null}
+                    <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium uppercase">
+                      {closesOnAvatar
+                        ? "Fechamento no avatar"
+                        : scene.visual.type === "none"
+                          ? "Apoio obrigatório"
+                          : "Slide de transição"}
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  {!closesOnAvatar && scene.visual.type !== "none" ? (
-                    previewAsset?.url ? (
-                      <Button type="button" size="sm" variant="outline" asChild>
-                        <a href={previewAsset.url} target="_blank" rel="noreferrer">
-                          <Film className="h-3.5 w-3.5" /> Ver slide
-                        </a>
-                      </Button>
-                    ) : (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => void renderAndOpenSlide(scene.sceneId)}
-                        disabled={rendering || loading}
-                      >
-                        <Film className="h-3.5 w-3.5" />
-                        {rendering ? "Renderizando..." : "Renderizar e ver slide"}
-                      </Button>
-                    )
-                  ) : null}
-                  <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium uppercase">
-                    {closesOnAvatar ? "Fechamento no avatar" : scene.visual.type === "none" ? "Apoio obrigatório" : "Slide de transição"}
-                  </span>
-                </div>
-              </div>
-              <div className="grid gap-2 md:grid-cols-[180px_1fr]">
-                <div className="space-y-2">
-                  <Field label="Tipo">
-                    <Select
-                      value={scene.visual.type}
-                      disabled={closesOnAvatar}
-                      onValueChange={(value) =>
-                        updateVisual(scene.sceneId, {
-                          type: value as VideoVisualType,
-                          layout: value === "none" ? "" : scene.visual.layout || "big_statement",
-                          headline: value === "none" ? "" : scene.visual.headline,
-                          body: value === "none" ? "" : scene.visual.body,
-                        })
-                      }
-                    >
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {VIDEO_VISUAL_TYPE_OPTIONS.filter((option) => !requiresVisual || option.value !== "none").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                  {scene.visual.type !== "none" && !closesOnAvatar ? (
-                    <Field label="Layout">
+                <div className="grid gap-2 md:grid-cols-[180px_1fr]">
+                  <div className="space-y-2">
+                    <Field label="Tipo">
                       <Select
-                        value={scene.visual.layout || "big_statement"}
-                        onValueChange={(value) => updateVisual(scene.sceneId, { layout: value as VideoVisualLayout })}
+                        value={scene.visual.type}
+                        disabled={closesOnAvatar}
+                        onValueChange={(value) =>
+                          updateVisual(scene.sceneId, {
+                            type: value as VideoVisualType,
+                            layout: value === "none" ? "" : scene.visual.layout || "big_statement",
+                            headline: value === "none" ? "" : scene.visual.headline,
+                            body: value === "none" ? "" : scene.visual.body,
+                          })
+                        }
                       >
-                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
                         <SelectContent>
-                          {VIDEO_VISUAL_LAYOUT_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                          {VIDEO_VISUAL_TYPE_OPTIONS.filter(
+                            (option) => !requiresVisual || option.value !== "none",
+                          ).map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </Field>
-                  ) : null}
-                </div>
-                {closesOnAvatar ? (
-                  <p className="flex items-center text-xs text-muted-foreground">A última cena fica limpa para o próximo look fechar a fala.</p>
-                ) : scene.visual.type === "none" ? (
-                  <p className="flex items-center text-xs text-muted-foreground">Esta cena precisa de um apoio visual antes do próximo corte de look.</p>
-                ) : (
-                  <div className="space-y-2">
-                    <Input value={scene.visual.headline} onChange={(event) => updateVisual(scene.sceneId, { headline: event.target.value })} placeholder="Headline curta" />
-                    <Textarea value={scene.visual.body} onChange={(event) => updateVisual(scene.sceneId, { body: event.target.value })} rows={2} placeholder="Body opcional — complemente a fala" />
-                    <Input value={scene.visual.purpose} onChange={(event) => updateVisual(scene.sceneId, { purpose: event.target.value })} placeholder="Objetivo editorial" />
+                    {scene.visual.type !== "none" && !closesOnAvatar ? (
+                      <Field label="Layout">
+                        <Select
+                          value={scene.visual.layout || "big_statement"}
+                          onValueChange={(value) =>
+                            updateVisual(scene.sceneId, { layout: value as VideoVisualLayout })
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {VIDEO_VISUAL_LAYOUT_OPTIONS.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                    ) : null}
                   </div>
-                )}
+                  {closesOnAvatar ? (
+                    <p className="flex items-center text-xs text-muted-foreground">
+                      A última cena fica limpa para o próximo look fechar a fala.
+                    </p>
+                  ) : scene.visual.type === "none" ? (
+                    <p className="flex items-center text-xs text-muted-foreground">
+                      Esta cena precisa de um apoio visual antes do próximo corte de look.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      <Input
+                        value={scene.visual.headline}
+                        onChange={(event) =>
+                          updateVisual(scene.sceneId, { headline: event.target.value })
+                        }
+                        placeholder="Headline curta"
+                      />
+                      <Textarea
+                        value={scene.visual.body}
+                        onChange={(event) =>
+                          updateVisual(scene.sceneId, { body: event.target.value })
+                        }
+                        rows={2}
+                        placeholder="Body opcional — complemente a fala"
+                      />
+                      <Input
+                        value={scene.visual.purpose}
+                        onChange={(event) =>
+                          updateVisual(scene.sceneId, { purpose: event.target.value })
+                        }
+                        placeholder="Objetivo editorial"
+                      />
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
             );
           })}
         </div>
       ) : null}
-      {draftPlan ? <div className="flex justify-end"><Button type="button" size="sm" onClick={() => void save()} disabled={saving || loading}>{saving ? "Salvando..." : "Salvar direção visual"}</Button></div> : null}
+      {draftPlan ? (
+        <div className="flex justify-end">
+          <Button type="button" size="sm" onClick={() => void save()} disabled={saving || loading}>
+            {saving ? "Salvando..." : "Salvar direção visual"}
+          </Button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
         <div>
           <p className="text-xs font-semibold">Preview dos apoios</p>
-          <p className="text-[11px] text-muted-foreground">Renderer local determinístico, sem Claude, HeyGen ou MP4.</p>
+          <p className="text-[11px] text-muted-foreground">
+            Renderer local determinístico, sem Claude, HeyGen ou MP4.
+          </p>
         </div>
-        <Button type="button" size="sm" variant="outline" onClick={() => void renderPreviews()} disabled={rendering || loading || !draftPlan}>
-          <Film className="h-3.5 w-3.5" /> {rendering ? "Renderizando..." : "Renderizar previews 1080×1920"}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => void renderPreviews()}
+          disabled={rendering || loading || !draftPlan}
+        >
+          <Film className="h-3.5 w-3.5" />{" "}
+          {rendering ? "Renderizando..." : "Renderizar previews 1080×1920"}
         </Button>
       </div>
-      {videoSlideRenderLoading ? <p className="text-xs text-muted-foreground">Carregando previews...</p> : null}
+      {videoSlideRenderLoading ? (
+        <p className="text-xs text-muted-foreground">Carregando previews...</p>
+      ) : null}
       {videoSlideRender && videoSlideRender.assets.some((asset) => asset.url) ? (
         <div className="grid gap-2 sm:grid-cols-3">
-          {videoSlideRender.assets.filter((asset) => asset.url).map((asset) => (
-            <a key={asset.sceneId} href={asset.url} target="_blank" rel="noreferrer" className="group overflow-hidden rounded-md border bg-background">
-              <img src={asset.url} alt={`Preview da cena ${asset.index}`} className="aspect-[9/16] w-full object-cover transition group-hover:opacity-80" />
-              <div className="p-2 text-[10px] text-muted-foreground">Cena {asset.index} · {asset.layout || asset.type}</div>
-            </a>
-          ))}
+          {videoSlideRender.assets
+            .filter((asset) => asset.url)
+            .map((asset) => (
+              <a
+                key={asset.sceneId}
+                href={asset.url}
+                target="_blank"
+                rel="noreferrer"
+                className="group overflow-hidden rounded-md border bg-background"
+              >
+                <img
+                  src={asset.url}
+                  alt={`Preview da cena ${asset.index}`}
+                  className="aspect-[9/16] w-full object-cover transition group-hover:opacity-80"
+                />
+                <div className="p-2 text-[10px] text-muted-foreground">
+                  Cena {asset.index} · {asset.layout || asset.type}
+                </div>
+              </a>
+            ))}
         </div>
       ) : null}
-      {error ? <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">{error}</p> : null}
+      {error ? (
+        <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -3310,7 +4226,8 @@ function SceneGenerationSummary({
         <div>
           <h4 className="text-xs font-semibold">Checklist de geração por cena</h4>
           <p className="text-[11px] leading-4 text-muted-foreground">
-            Nenhum job foi criado. Antes de qualquer geração paga, confira cenas, looks, voz e duração.
+            Nenhum job foi criado. Antes de qualquer geração paga, confira cenas, looks, voz e
+            duração.
           </p>
         </div>
       </div>
@@ -3319,15 +4236,26 @@ function SceneGenerationSummary({
         <>
           <div className="flex flex-wrap gap-2 text-[11px]">
             <span className="rounded-full bg-background px-2 py-1">{plan.sceneCount} cenas</span>
-            <span className="rounded-full bg-background px-2 py-1">{plan.estimatedCalls} chamadas HeyGen estimadas</span>
-            <span className="rounded-full bg-background px-2 py-1">{durationSeconds}s selecionados</span>
-            <span className="rounded-full bg-background px-2 py-1">{plan.requests[0]?.voiceId || "voz não definida"}</span>
+            <span className="rounded-full bg-background px-2 py-1">
+              {plan.estimatedCalls} chamadas HeyGen estimadas
+            </span>
+            <span className="rounded-full bg-background px-2 py-1">
+              {durationSeconds}s selecionados
+            </span>
+            <span className="rounded-full bg-background px-2 py-1">
+              {plan.requests[0]?.voiceId || "voz não definida"}
+            </span>
           </div>
           <div className="space-y-1">
             {plan.requests.map((request) => (
-              <div key={request.sceneId} className="grid gap-1 rounded-md border bg-background px-2 py-1.5 text-[11px] md:grid-cols-[80px_1fr_1.5fr]">
+              <div
+                key={request.sceneId}
+                className="grid gap-1 rounded-md border bg-background px-2 py-1.5 text-[11px] md:grid-cols-[80px_1fr_1.5fr]"
+              >
                 <span className="font-semibold">Cena {request.order}</span>
-                <span>{avatarMode === "set" ? `Look ${request.avatarId}` : "Avatar principal"}</span>
+                <span>
+                  {avatarMode === "set" ? `Look ${request.avatarId}` : "Avatar principal"}
+                </span>
                 <span className="truncate text-muted-foreground">{request.spokenText}</span>
               </div>
             ))}
@@ -3335,7 +4263,9 @@ function SceneGenerationSummary({
           <p className="text-[11px] text-status-warning">{plan.warning}</p>
         </>
       ) : (
-        <p className="text-[11px] text-muted-foreground">Salve um Scene Plan para visualizar a estimativa por cena.</p>
+        <p className="text-[11px] text-muted-foreground">
+          Salve um Scene Plan para visualizar a estimativa por cena.
+        </p>
       )}
     </div>
   );
@@ -3469,7 +4399,9 @@ function ProductionGateChecklist({
     <div
       className={cn(
         "rounded-xl border p-4 shadow-sm",
-        ready ? "border-status-success/30 bg-status-success/5" : "border-status-warning/30 bg-status-warning/10",
+        ready
+          ? "border-status-success/30 bg-status-success/5"
+          : "border-status-warning/30 bg-status-warning/10",
       )}
     >
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -3504,7 +4436,10 @@ function ProductionGateChecklist({
 
       <div className="mt-3 grid gap-2 md:grid-cols-2">
         {items.map((item) => (
-          <div key={item.label} className="flex items-start gap-2 rounded-lg border bg-background/70 px-3 py-2">
+          <div
+            key={item.label}
+            className="flex items-start gap-2 rounded-lg border bg-background/70 px-3 py-2"
+          >
             {item.ready ? (
               <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-status-success" />
             ) : (
@@ -3512,7 +4447,9 @@ function ProductionGateChecklist({
             )}
             <div className="min-w-0">
               <div className="text-xs font-semibold">{item.label}</div>
-              <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{item.detail}</div>
+              <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                {item.detail}
+              </div>
             </div>
           </div>
         ))}
@@ -3525,8 +4462,12 @@ function ProductionGateChecklist({
       ) : null}
       <div className="mt-3 flex flex-wrap gap-2 border-t border-status-info/15 pt-3 text-xs text-muted-foreground">
         <span className="rounded-full bg-background px-2.5 py-1">{narrationWords} palavras</span>
-        <span className="rounded-full bg-background px-2.5 py-1">~{estimatedSpeechSeconds}s de fala</span>
-        <span className="rounded-full bg-background px-2.5 py-1">{dirty ? "Alterações pendentes" : "Roteiro salvo"}</span>
+        <span className="rounded-full bg-background px-2.5 py-1">
+          ~{estimatedSpeechSeconds}s de fala
+        </span>
+        <span className="rounded-full bg-background px-2.5 py-1">
+          {dirty ? "Alterações pendentes" : "Roteiro salvo"}
+        </span>
       </div>
     </div>
   );
