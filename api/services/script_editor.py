@@ -26,7 +26,17 @@ EditorOperation = Literal["medical_rewrite", "fit_duration"]
 
 CONTRACT_PATH = Path(__file__).resolve().parents[2] / "shared" / "script_editor_contract.json"
 SCRIPT_EDITOR_CONTRACT: dict[str, Any] = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+SCRIPT_EDITOR_CONTRACT_VERSION = str(SCRIPT_EDITOR_CONTRACT["contractVersion"])
 DURATION_PRESETS: tuple[int, ...] = tuple(SCRIPT_EDITOR_CONTRACT["durationPresets"])
+DURATION_STATUSES: tuple[str, ...] = tuple(SCRIPT_EDITOR_CONTRACT["durationStatuses"])
+MEDICAL_REVIEW_STATUSES: tuple[str, ...] = tuple(SCRIPT_EDITOR_CONTRACT["medicalReviewStatuses"])
+TITLE_ALIGNMENT_STATUSES: tuple[str, ...] = tuple(SCRIPT_EDITOR_CONTRACT["titleAlignmentStatuses"])
+GENERATION_ELIGIBILITY_STATUSES: tuple[str, ...] = tuple(
+    SCRIPT_EDITOR_CONTRACT["generationEligibilityStatuses"]
+)
+GENERATION_GATE_REASON_CODES: tuple[str, ...] = tuple(
+    SCRIPT_EDITOR_CONTRACT["generationGateReasonCodes"]
+)
 WORD_PATTERN = re.compile(SCRIPT_EDITOR_CONTRACT["wordPattern"])
 MEDICAL_EDITORIAL_PROMPT_VERSION = str(
     SCRIPT_EDITOR_CONTRACT["editorialProfile"]["promptVersion"]

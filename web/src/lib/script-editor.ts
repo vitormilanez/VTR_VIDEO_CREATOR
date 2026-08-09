@@ -96,13 +96,20 @@ export interface GenerationGate {
 }
 
 type Contract = {
+  contractVersion: string;
   durationPresets: number[];
+  durationStatuses: DurationStatus[];
+  medicalReviewStatuses: MedicalReviewStatus[];
+  titleAlignmentStatuses: TitleAlignmentStatus[];
+  generationEligibilityStatuses: GenerationEligibility[];
+  generationGateReasonCodes: string[];
   wordPattern: string;
   speechProfile: SpeechProfile;
   editorialProfile: { id: string; language: string; promptVersion: string };
 };
 
 export const SCRIPT_EDITOR_CONTRACT = contractData as Contract;
+export const SCRIPT_EDITOR_CONTRACT_VERSION = SCRIPT_EDITOR_CONTRACT.contractVersion;
 export const DURATION_PRESETS = SCRIPT_EDITOR_CONTRACT.durationPresets as DurationPreset[];
 export const DEFAULT_SPEECH_PROFILE = SCRIPT_EDITOR_CONTRACT.speechProfile;
 export const MEDICAL_EDITORIAL_PROMPT_VERSION =

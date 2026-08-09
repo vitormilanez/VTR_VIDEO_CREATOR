@@ -1595,7 +1595,15 @@ class StableIdTests(unittest.TestCase):
 
                 safe = unsafe.model_copy(update={"spokenText": safe_display})
                 with (
-                    patch.object(server, "_find_script", return_value={"id": "s-preview", "status": "aprovado_clinicamente"}),
+                    patch.object(
+                        server,
+                        "_find_script",
+                        return_value={
+                            "id": "s-preview",
+                            "status": "aprovado_clinicamente",
+                            "textoFalado": safe_display,
+                        },
+                    ),
                     patch.object(server, "_heygen_cli", return_value="heygen"),
                     patch.object(server, "_private_avatar_library", return_value=([], [{"id": "avatar-1", "status": "completed"}], False)),
                     patch.object(server, "_run_heygen_json", return_value={"data": {"video_id": "preview-1"}}),

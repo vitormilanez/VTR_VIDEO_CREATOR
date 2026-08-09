@@ -130,6 +130,29 @@ class JobStore:
         return payload
 
     @staticmethod
+    def _same_idempotent_request(
+        existing: dict[str, Any] | None,
+        incoming: dict[str, Any],
+    ) -> bool:
+        """Aceita retry somente quando a key representa o mesmo payload.
+
+        Jobs antigos sem fingerprint continuam deduplicáveis entre si. Uma
+        requisição versionada nunca é confundida com um registro legado.
+        """
+
+        if existing is None:
+            return False
+        existing_fingerprint = existing.get("requestFingerprint")
+        incoming_fingerprint = incoming.get("requestFingerprint")
+        if existing_fingerprint is None and incoming_fingerprint is None:
+            return True
+        return bool(
+            existing_fingerprint
+            and incoming_fingerprint
+            and existing_fingerprint == incoming_fingerprint
+        )
+
+    @staticmethod
     def _upsert_on(
         connection: sqlite3.Connection,
         kind: JobKind,
@@ -208,7 +231,7 @@ class JobStore:
         job: dict[str, Any],
         *,
         idempotency_key: str,
-    ) -> tuple[dict[str, Any], Literal["created", "duplicate"]]:
+    ) -> tuple[dict[str, Any], Literal["created", "duplicate", "conflict"]]:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             duplicate = connection.execute(
@@ -216,7 +239,10 @@ class JobStore:
                 (idempotency_key,),
             ).fetchone()
             if duplicate:
-                return self._record(duplicate) or job, "duplicate"
+                existing = self._record(duplicate)
+                if self._same_idempotent_request(existing, job):
+                    return existing or job, "duplicate"
+                return existing or job, "conflict"
             self._upsert_on(connection, kind, job, idempotency_key)
             return job, "created"
 
@@ -234,7 +260,10 @@ class JobStore:
                 (idempotency_key,),
             ).fetchone()
             if duplicate:
-                return self._record(duplicate) or job, "duplicate"
+                existing = self._record(duplicate)
+                if self._same_idempotent_request(existing, job):
+                    return existing or job, "duplicate"
+                return existing or job, "conflict"
 
             rows = connection.execute(
                 """

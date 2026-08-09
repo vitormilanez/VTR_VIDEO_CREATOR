@@ -56,6 +56,7 @@ import {
 } from "@/lib/api/local";
 import {
   DURATION_PRESETS,
+  SCRIPT_EDITOR_CONTRACT_VERSION,
   assessScriptDuration,
   durationStatusLabel,
   evaluateGenerationGate,
@@ -276,6 +277,11 @@ function RoteiroDetalhe() {
   const [titleChoice, setTitleChoice] = useState<"current" | "suggested">("current");
   const [titleBeforeSuggestion, setTitleBeforeSuggestion] = useState(script?.titulo ?? "");
   const [editorStateLoaded, setEditorStateLoaded] = useState(false);
+  const [paidScriptVersion, setPaidScriptVersion] = useState({
+    scriptRevision: 0,
+    finalSpeechHash: "",
+    contractVersion: SCRIPT_EDITOR_CONTRACT_VERSION,
+  });
   const [staleEditorResult, setStaleEditorResult] = useState<EditorAssistResult | null>(null);
   const [durationAnnouncement, setDurationAnnouncement] = useState("");
   const lastSavedProfileKey = useRef("");
@@ -385,6 +391,11 @@ function RoteiroDetalhe() {
         setPreviousAiScript(state.previousScript ?? null);
         setEditorSchemaValid(state.schemaValid);
         setEditorTechnicalError(state.technicalError ?? null);
+        setPaidScriptVersion({
+          scriptRevision: state.scriptRevision,
+          finalSpeechHash: state.finalSpeechHash ?? "",
+          contractVersion: state.contractVersion,
+        });
         lastSavedEditorStateKey.current = JSON.stringify({
           durationSeconds: state.durationSeconds,
           humanReviewApproved: state.humanReviewApproved,
@@ -632,6 +643,9 @@ function RoteiroDetalhe() {
     finalConfirmed: true,
   });
   const canSendToProduction =
+    editorStateLoaded &&
+    paidScriptVersion.scriptRevision > 0 &&
+    Boolean(paidScriptVersion.finalSpeechHash) &&
     editorGenerationGate.allowed &&
     selectedAvatarReady &&
     productionModeReady &&
@@ -748,8 +762,13 @@ function RoteiroDetalhe() {
     if (key === lastSavedEditorStateKey.current) return;
     const timeout = window.setTimeout(() => {
       saveScriptEditorState(id, state)
-        .then(() => {
+        .then((savedState) => {
           lastSavedEditorStateKey.current = key;
+          setPaidScriptVersion({
+            scriptRevision: savedState.scriptRevision,
+            finalSpeechHash: savedState.finalSpeechHash ?? "",
+            contractVersion: savedState.contractVersion,
+          });
         })
         .catch(() => toast.error("Não consegui salvar o histórico do editor."));
     }, 450);
@@ -983,11 +1002,20 @@ function RoteiroDetalhe() {
     );
     try {
       let scriptToSend = script;
+      let versionToSend = paidScriptVersion;
       if (dirty) {
         const saved = await saveScript({ ...draft, textoFalado: displayText, outroText });
         updateScript(saved.id, saved);
         setDraft(saved);
         scriptToSend = saved;
+        const versionState = await fetchScriptEditorState(saved.id);
+        setHumanReviewApproved(versionState.humanReviewApproved);
+        versionToSend = {
+          scriptRevision: versionState.scriptRevision,
+          finalSpeechHash: versionState.finalSpeechHash ?? "",
+          contractVersion: versionState.contractVersion,
+        };
+        setPaidScriptVersion(versionToSend);
       }
       if (avatarMode === "set" && generationMode === "direct") {
         const sceneResult = await submitSceneGeneration(scriptToSend.id, {
@@ -997,6 +1025,9 @@ function RoteiroDetalhe() {
           voiceMood,
           captions,
           optimizePronunciation,
+          expectedScriptRevision: versionToSend.scriptRevision,
+          expectedFinalSpeechHash: versionToSend.finalSpeechHash,
+          contractVersion: versionToSend.contractVersion,
         });
         sceneResult.jobs.forEach((job) => addVideoJob(job));
         const firstJob = sceneResult.jobs[0];
@@ -1030,6 +1061,9 @@ function RoteiroDetalhe() {
         aiSchemaValid: editorSchemaValid,
         editorTechnicalError,
         finalConfirmed: true,
+        expectedScriptRevision: versionToSend.scriptRevision,
+        expectedFinalSpeechHash: versionToSend.finalSpeechHash,
+        contractVersion: versionToSend.contractVersion,
       });
       addVideoJob(job);
       toast.success(
@@ -1105,6 +1139,13 @@ function RoteiroDetalhe() {
       updateScript(saved.id, saved);
       setDraft(saved);
       setNarrationText(displayText);
+      const versionState = await fetchScriptEditorState(saved.id);
+      setHumanReviewApproved(versionState.humanReviewApproved);
+      setPaidScriptVersion({
+        scriptRevision: versionState.scriptRevision,
+        finalSpeechHash: versionState.finalSpeechHash ?? "",
+        contractVersion: versionState.contractVersion,
+      });
       setEditorSchemaValid(true);
       setEditorTechnicalError(null);
       toast.success("Roteiro salvo no Sheets.");
@@ -1240,11 +1281,20 @@ function RoteiroDetalhe() {
     setPreviewing(true);
     try {
       let scriptToSend = script;
+      let versionToSend = paidScriptVersion;
       if (dirty) {
         const saved = await saveScript({ ...draft, textoFalado: displayText, outroText });
         updateScript(saved.id, saved);
         setDraft(saved);
         scriptToSend = saved;
+        const versionState = await fetchScriptEditorState(saved.id);
+        setHumanReviewApproved(versionState.humanReviewApproved);
+        versionToSend = {
+          scriptRevision: versionState.scriptRevision,
+          finalSpeechHash: versionState.finalSpeechHash ?? "",
+          contractVersion: versionState.contractVersion,
+        };
+        setPaidScriptVersion(versionToSend);
       }
       const job = await createHeyGenPreview(scriptToSend.id, {
         avatarId,
@@ -1257,6 +1307,9 @@ function RoteiroDetalhe() {
         displayText,
         spokenText: spokenText || undefined,
         finalConfirmed: true,
+        expectedScriptRevision: versionToSend.scriptRevision,
+        expectedFinalSpeechHash: versionToSend.finalSpeechHash,
+        contractVersion: versionToSend.contractVersion,
       });
       addVideoJob(job);
       toast.success("Prévia técnica Direct Avatar enviada ao HeyGen.");
@@ -1362,7 +1415,13 @@ function RoteiroDetalhe() {
                     size="sm"
                     variant="secondary"
                     disabled={
-                      saving || previewing || !selectedAvatarReady || !voiceId || !approvalReady
+                      saving ||
+                      previewing ||
+                      !selectedAvatarReady ||
+                      !voiceId ||
+                      !approvalReady ||
+                      !editorStateLoaded ||
+                      !paidScriptVersion.finalSpeechHash
                     }
                   >
                     <Film className="mr-1 h-4 w-4" /> Gerar prévia

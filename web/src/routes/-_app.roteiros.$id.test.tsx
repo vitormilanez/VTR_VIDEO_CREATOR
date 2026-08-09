@@ -191,6 +191,12 @@ function editorState(overrides: Record<string, unknown> = {}) {
     technicalError: null,
     previousScript: null,
     lastResult: null,
+    scriptRevision: 1,
+    finalSpeechHash: "a".repeat(64),
+    approvedScriptRevision: null,
+    approvedFinalSpeechHash: null,
+    approvalHistory: [],
+    contractVersion: "2.0.0",
     legacyFallback: false,
     ...overrides,
   };
@@ -243,6 +249,12 @@ beforeEach(() => {
   vi.mocked(saveScriptEditorState).mockImplementation(async (scriptId, state) => ({
     scriptId,
     ...state,
+    scriptRevision: 1,
+    finalSpeechHash: "a".repeat(64),
+    approvedScriptRevision: null,
+    approvedFinalSpeechHash: null,
+    approvalHistory: [],
+    contractVersion: "2.0.0",
   }));
   vi.mocked(saveScript).mockImplementation(async (script) => script);
 });

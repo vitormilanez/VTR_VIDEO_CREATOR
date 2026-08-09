@@ -860,6 +860,9 @@ export async function submitSceneGeneration(
     captions: boolean;
     optimizePronunciation: boolean;
     idempotencyKey?: string;
+    expectedScriptRevision?: number;
+    expectedFinalSpeechHash?: string;
+    contractVersion?: string;
   },
 ): Promise<{ generation: SceneGenerationResult; jobs: VideoJob[] }> {
   const response = await requestJson<{
@@ -1176,6 +1179,9 @@ export async function createHeyGenVideo(
     aiSchemaValid?: boolean;
     editorTechnicalError?: string | null;
     finalConfirmed?: boolean;
+    expectedScriptRevision?: number;
+    expectedFinalSpeechHash?: string;
+    contractVersion?: string;
   },
 ): Promise<VideoJob> {
   const baseKey = stableProductionKey("video", {
@@ -1222,6 +1228,20 @@ export interface ScriptEditorState {
   technicalError?: string | null;
   previousScript?: string | null;
   lastResult?: EditorAssistResult | null;
+  scriptRevision: number;
+  finalSpeechHash?: string | null;
+  approvedScriptRevision?: number | null;
+  approvedFinalSpeechHash?: string | null;
+  approvalHistory?: Array<{
+    actor: string;
+    timestamp: string;
+    previousStatus: string;
+    nextStatus: string;
+    scriptRevision: number;
+    finalSpeechHash?: string | null;
+    reason?: string | null;
+  }>;
+  contractVersion: string;
   updatedAt?: string | null;
   legacyFallback?: boolean;
 }
@@ -1249,7 +1269,18 @@ export async function fetchScriptEditorState(scriptId: string): Promise<ScriptEd
 
 export async function saveScriptEditorState(
   scriptId: string,
-  state: Omit<ScriptEditorState, "scriptId" | "updatedAt" | "legacyFallback">,
+  state: Omit<
+    ScriptEditorState,
+    | "scriptId"
+    | "scriptRevision"
+    | "finalSpeechHash"
+    | "approvedScriptRevision"
+    | "approvedFinalSpeechHash"
+    | "approvalHistory"
+    | "contractVersion"
+    | "updatedAt"
+    | "legacyFallback"
+  >,
 ): Promise<ScriptEditorState> {
   const response = await requestJson<{ ok: boolean; state: ScriptEditorState }>(
     `/api/scripts/${encodeURIComponent(scriptId)}/editor-state`,
@@ -1311,6 +1342,9 @@ export async function createHeyGenPreview(
     spokenText?: string;
     idempotencyKey?: string;
     finalConfirmed?: boolean;
+    expectedScriptRevision?: number;
+    expectedFinalSpeechHash?: string;
+    contractVersion?: string;
   },
 ): Promise<VideoJob> {
   const idempotencyKey =
@@ -1783,8 +1817,12 @@ export async function publishVideoToInstagram(input: {
 
 async function errorDetail(res: Response, fallback: string): Promise<string> {
   try {
-    const body = (await res.json()) as { detail?: string };
-    return body.detail || fallback;
+    const body = (await res.json()) as {
+      detail?: string | { code?: string; message?: string };
+    };
+    if (typeof body.detail === "string") return body.detail;
+    if (body.detail?.message) return body.detail.message;
+    return fallback;
   } catch {
     return fallback;
   }

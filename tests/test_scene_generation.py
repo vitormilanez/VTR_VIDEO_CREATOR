@@ -65,7 +65,8 @@ class SceneGenerationTests(unittest.TestCase):
             with self.assertRaises(server.HTTPException) as raised:
                 server.submit_scene_generation("script-1", payload)
         self.assertEqual(raised.exception.status_code, 422)
-        self.assertIn("Pronto", raised.exception.detail)
+        self.assertEqual(raised.exception.detail["code"], "SCRIPT_NOT_READY")
+        self.assertIn("Pronto", raised.exception.detail["message"])
         heygen_cli.assert_not_called()
 
 

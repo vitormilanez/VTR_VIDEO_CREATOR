@@ -84,16 +84,19 @@ from api.services.script_editor import (
     EDITOR_OUTPUT_SCHEMA,
     MEDICAL_EDITORIAL_PROMPT_VERSION,
     SCRIPT_EDITOR_CONTRACT,
+    SCRIPT_EDITOR_CONTRACT_VERSION,
     build_editor_prompt,
     duration_assessment,
     editor_cache_payload,
     evaluate_generation_gate,
+    hash_text,
     medical_review_status,
     normalize_editor_output,
     normalize_text as normalize_editor_text,
     post_validate_editor_output,
     title_alignment,
 )
+from api.services.paid_generation import request_fingerprint, validate_paid_version
 from api.services.video_generation import (
     DIRECT_VIDEO_DURATIONS,
     direct_video_payload,
@@ -141,6 +144,15 @@ COMPOSED_VIDEO_OUTPUTS = PRODUCED_VIDEO_OUTPUTS / "composicoes"
 MUSIC_TRACKS_DIR = ROOT / "data" / "music_tracks"
 MANDATORY_VIDEO_OUTRO = LEGACY_OUTRO
 LOGGER = logging.getLogger("uvicorn.error")
+_PAID_GENERATION_LOCKS_GUARD = threading.Lock()
+_PAID_GENERATION_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _paid_generation_lock(script_id: str) -> threading.RLock:
+    """Serializa gate + reserva apenas para o mesmo roteiro neste processo."""
+
+    with _PAID_GENERATION_LOCKS_GUARD:
+        return _PAID_GENERATION_LOCKS.setdefault(script_id, threading.RLock())
 
 # Biblioteca local: arquivos enviados pelo usuário, sem upload ou chamada paga.
 # O compositor usa essas faixas apenas depois de as cenas HeyGen ficarem prontas.
@@ -269,6 +281,12 @@ def _ai_db() -> sqlite3.Connection:
             technical_error TEXT,
             previous_script TEXT,
             last_result_json TEXT,
+            script_revision INTEGER NOT NULL DEFAULT 0,
+            final_speech_hash TEXT,
+            approved_script_revision INTEGER,
+            approved_final_speech_hash TEXT,
+            approval_history_json TEXT NOT NULL DEFAULT '[]',
+            contract_version TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS production_profiles (
@@ -334,42 +352,181 @@ def _ai_db() -> sqlite3.Connection:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+    for column, definition in (
+        ("script_revision", "INTEGER NOT NULL DEFAULT 0"),
+        ("final_speech_hash", "TEXT"),
+        ("approved_script_revision", "INTEGER"),
+        ("approved_final_speech_hash", "TEXT"),
+        ("approval_history_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("contract_version", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE script_editor_states ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
     conn.commit()
     return conn
+
+
+def _canonical_script_speech(script: dict[str, Any] | None) -> str:
+    if not script:
+        return ""
+    saved = str(script.get("textoFalado") or "").strip()
+    if saved:
+        return saved
+    parts = (
+        script.get("hook"),
+        script.get("dorConflito"),
+        script.get("explicacaoSimples"),
+        script.get("virada"),
+        script.get("cta"),
+    )
+    return "\n\n".join(str(part).strip() for part in parts if str(part or "").strip())
+
+
+def _approval_history(value: Any) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return []
+    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
 
 
 def _script_editor_state(
     script_id: str,
     script: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    current_speech = _canonical_script_speech(script)
+    current_hash = hash_text(current_speech) if current_speech else None
+    legacy_fallback = False
     conn = _ai_db()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """SELECT script_id, duration_seconds, human_review_approved, title_choice,
                       suggested_title, schema_valid, technical_error, previous_script,
-                      last_result_json, updated_at
+                      last_result_json, script_revision, final_speech_hash,
+                      approved_script_revision, approved_final_speech_hash,
+                      approval_history_json, contract_version, updated_at
                FROM script_editor_states WHERE script_id = ?""",
             (script_id,),
         ).fetchone()
+        if not row:
+            legacy_fallback = True
+            revision = 1 if current_hash else 0
+            legacy_approved = bool(
+                script and script.get("status") == "aprovado_clinicamente" and current_hash
+            )
+            history = []
+            if legacy_approved:
+                history.append(
+                    {
+                        "actor": "legacy_script_status",
+                        "timestamp": _now(),
+                        "previousStatus": "unknown",
+                        "nextStatus": "approved",
+                        "scriptRevision": revision,
+                        "finalSpeechHash": current_hash,
+                        "reason": "Migração do status clínico persistido.",
+                    }
+                )
+            conn.execute(
+                """INSERT INTO script_editor_states(
+                       script_id, duration_seconds, human_review_approved, title_choice,
+                       suggested_title, schema_valid, technical_error, previous_script,
+                       last_result_json, script_revision, final_speech_hash,
+                       approved_script_revision, approved_final_speech_hash,
+                       approval_history_json, contract_version, updated_at
+                   ) VALUES (?, 45, ?, 'current', NULL, 1, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    script_id,
+                    int(legacy_approved),
+                    revision,
+                    current_hash,
+                    revision if legacy_approved else None,
+                    current_hash if legacy_approved else None,
+                    json.dumps(history, ensure_ascii=False),
+                    SCRIPT_EDITOR_CONTRACT_VERSION,
+                    _now(),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM script_editor_states WHERE script_id = ?", (script_id,)
+            ).fetchone()
+        elif current_hash:
+            revision = int(row["script_revision"] or 0)
+            stored_hash = row["final_speech_hash"]
+            approved = bool(row["human_review_approved"])
+            approved_revision = row["approved_script_revision"]
+            approved_hash = row["approved_final_speech_hash"]
+            history = _approval_history(row["approval_history_json"])
+            if not stored_hash:
+                revision = max(1, revision)
+                # Migração calculável: uma aprovação legada é vinculada à fala
+                # atual uma única vez. Mudanças futuras sempre reabrem a revisão.
+                if approved and (approved_revision is None or not approved_hash):
+                    approved_revision = revision
+                    approved_hash = current_hash
+                    history.append(
+                        {
+                            "actor": "legacy_state_migration",
+                            "timestamp": _now(),
+                            "previousStatus": "approved_unversioned",
+                            "nextStatus": "approved",
+                            "scriptRevision": revision,
+                            "finalSpeechHash": current_hash,
+                            "reason": "Aprovação legada vinculada à fala recalculada.",
+                        }
+                    )
+            elif stored_hash != current_hash:
+                previous_status = "approved" if approved else "open"
+                revision = max(1, revision + 1)
+                approved = False
+                approved_revision = None
+                approved_hash = None
+                history.append(
+                    {
+                        "actor": "system",
+                        "timestamp": _now(),
+                        "previousStatus": previous_status,
+                        "nextStatus": "reopened",
+                        "scriptRevision": revision,
+                        "finalSpeechHash": current_hash,
+                        "reason": "A fala final salva foi alterada.",
+                    }
+                )
+            approval_matches = bool(
+                approved
+                and approved_revision == revision
+                and approved_hash == current_hash
+            )
+            conn.execute(
+                """UPDATE script_editor_states
+                   SET human_review_approved=?, script_revision=?, final_speech_hash=?,
+                       approved_script_revision=?, approved_final_speech_hash=?,
+                       approval_history_json=?, contract_version=?, updated_at=?
+                   WHERE script_id=?""",
+                (
+                    int(approval_matches),
+                    revision,
+                    current_hash,
+                    approved_revision if approval_matches else None,
+                    approved_hash if approval_matches else None,
+                    json.dumps(history, ensure_ascii=False),
+                    SCRIPT_EDITOR_CONTRACT_VERSION,
+                    _now(),
+                    script_id,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM script_editor_states WHERE script_id = ?", (script_id,)
+            ).fetchone()
+        conn.commit()
     finally:
         conn.close()
     if not row:
-        # Compatibilidade: roteiros historicamente marcados como Pronto já
-        # passaram pela revisão clínica do fluxo anterior.
-        legacy_approved = bool(script and script.get("status") == "aprovado_clinicamente")
-        return {
-            "scriptId": script_id,
-            "durationSeconds": 45,
-            "humanReviewApproved": legacy_approved,
-            "titleChoice": "current",
-            "suggestedTitle": None,
-            "schemaValid": True,
-            "technicalError": None,
-            "previousScript": None,
-            "lastResult": None,
-            "updatedAt": None,
-            "legacyFallback": True,
-        }
+        raise RuntimeError("Não foi possível inicializar o estado versionado do roteiro.")
     try:
         last_result = json.loads(str(row["last_result_json"])) if row["last_result_json"] else None
     except json.JSONDecodeError:
@@ -384,22 +541,57 @@ def _script_editor_state(
         "technicalError": row["technical_error"],
         "previousScript": row["previous_script"],
         "lastResult": last_result,
+        "scriptRevision": int(row["script_revision"] or 0),
+        "finalSpeechHash": row["final_speech_hash"],
+        "approvedScriptRevision": row["approved_script_revision"],
+        "approvedFinalSpeechHash": row["approved_final_speech_hash"],
+        "approvalHistory": _approval_history(row["approval_history_json"]),
+        "contractVersion": row["contract_version"] or SCRIPT_EDITOR_CONTRACT_VERSION,
         "updatedAt": row["updated_at"],
-        "legacyFallback": False,
+        "legacyFallback": legacy_fallback,
     }
 
 
-def _save_script_editor_state(state: dict[str, Any]) -> dict[str, Any]:
+def _save_script_editor_state(
+    state: dict[str, Any],
+    script: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current = _script_editor_state(str(state["scriptId"]), script)
+    requested_approval = bool(state.get("humanReviewApproved"))
+    current_hash = current.get("finalSpeechHash")
+    current_revision = int(current.get("scriptRevision") or 0)
+    approval_allowed = bool(requested_approval and current_hash and current_revision > 0)
+    history = list(current.get("approvalHistory") or [])
+    if approval_allowed != bool(current.get("humanReviewApproved")):
+        history.append(
+            {
+                "actor": str(state.get("reviewActor") or "editor_user"),
+                "timestamp": _now(),
+                "previousStatus": (
+                    "approved" if current.get("humanReviewApproved") else "open"
+                ),
+                "nextStatus": "approved" if approval_allowed else "reopened",
+                "scriptRevision": current_revision,
+                "finalSpeechHash": current_hash,
+                "reason": state.get("reviewReason"),
+            }
+        )
     normalized = {
         "scriptId": str(state["scriptId"]),
         "durationSeconds": int(state.get("durationSeconds") or 45),
-        "humanReviewApproved": bool(state.get("humanReviewApproved")),
+        "humanReviewApproved": approval_allowed,
         "titleChoice": str(state.get("titleChoice") or "current"),
         "suggestedTitle": state.get("suggestedTitle"),
         "schemaValid": bool(state.get("schemaValid", True)),
         "technicalError": state.get("technicalError"),
         "previousScript": state.get("previousScript"),
         "lastResult": state.get("lastResult"),
+        "scriptRevision": current_revision,
+        "finalSpeechHash": current_hash,
+        "approvedScriptRevision": current_revision if approval_allowed else None,
+        "approvedFinalSpeechHash": current_hash if approval_allowed else None,
+        "approvalHistory": history,
+        "contractVersion": SCRIPT_EDITOR_CONTRACT_VERSION,
         "updatedAt": _now(),
     }
     conn = _ai_db()
@@ -408,8 +600,10 @@ def _save_script_editor_state(state: dict[str, Any]) -> dict[str, Any]:
             """INSERT INTO script_editor_states(
                    script_id, duration_seconds, human_review_approved, title_choice,
                    suggested_title, schema_valid, technical_error, previous_script,
-                   last_result_json, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   last_result_json, script_revision, final_speech_hash,
+                   approved_script_revision, approved_final_speech_hash,
+                   approval_history_json, contract_version, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(script_id) DO UPDATE SET
                    duration_seconds=excluded.duration_seconds,
                    human_review_approved=excluded.human_review_approved,
@@ -419,6 +613,12 @@ def _save_script_editor_state(state: dict[str, Any]) -> dict[str, Any]:
                    technical_error=excluded.technical_error,
                    previous_script=excluded.previous_script,
                    last_result_json=excluded.last_result_json,
+                   script_revision=excluded.script_revision,
+                   final_speech_hash=excluded.final_speech_hash,
+                   approved_script_revision=excluded.approved_script_revision,
+                   approved_final_speech_hash=excluded.approved_final_speech_hash,
+                   approval_history_json=excluded.approval_history_json,
+                   contract_version=excluded.contract_version,
                    updated_at=excluded.updated_at""",
             (
                 normalized["scriptId"], normalized["durationSeconds"],
@@ -427,6 +627,10 @@ def _save_script_editor_state(state: dict[str, Any]) -> dict[str, Any]:
                 normalized["technicalError"], normalized["previousScript"],
                 json.dumps(normalized["lastResult"], ensure_ascii=False)
                 if normalized["lastResult"] is not None else None,
+                normalized["scriptRevision"], normalized["finalSpeechHash"],
+                normalized["approvedScriptRevision"], normalized["approvedFinalSpeechHash"],
+                json.dumps(normalized["approvalHistory"], ensure_ascii=False),
+                normalized["contractVersion"],
                 normalized["updatedAt"],
             ),
         )
@@ -3018,6 +3222,9 @@ class VideoCreateIn(BaseModel):
     cinematicPrompt: str | None = Field(default=None, max_length=2000)
     outroText: str = Field(default=MANDATORY_VIDEO_OUTRO, max_length=200)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+    expectedScriptRevision: int | None = Field(default=None, ge=0)
+    expectedFinalSpeechHash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    contractVersion: str | None = Field(default=None, min_length=1, max_length=40)
     medicalReviewStatus: Literal["not_required", "recommended", "required", "approved"] | None = None
     humanReviewApproved: bool = False
     aiOperationInFlight: bool = False
@@ -3039,6 +3246,9 @@ class VideoPreviewCreateIn(BaseModel):
     displayText: str = Field(min_length=10, max_length=6000)
     spokenText: str | None = Field(default=None, max_length=6000)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+    expectedScriptRevision: int | None = Field(default=None, ge=0)
+    expectedFinalSpeechHash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    contractVersion: str | None = Field(default=None, min_length=1, max_length=40)
     finalConfirmed: bool = True
 
 
@@ -3051,6 +3261,9 @@ class SceneVideoConfirmIn(BaseModel):
     captions: bool = True
     optimizePronunciation: bool = True
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+    expectedScriptRevision: int | None = Field(default=None, ge=0)
+    expectedFinalSpeechHash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    contractVersion: str | None = Field(default=None, min_length=1, max_length=40)
 
 
 class ProductionProfileIn(BaseModel):
@@ -3076,6 +3289,8 @@ class ScriptEditorStateIn(BaseModel):
     technicalError: str | None = Field(default=None, max_length=500)
     previousScript: str | None = Field(default=None, max_length=6000)
     lastResult: dict[str, Any] | None = None
+    reviewActor: str | None = Field(default=None, max_length=120)
+    reviewReason: str | None = Field(default=None, max_length=500)
 
 
 class AvatarLookIn(BaseModel):
@@ -3255,8 +3470,11 @@ def get_script_editor_state(script_id: str) -> dict:
 
 @app.put("/api/scripts/{script_id}/editor-state")
 def save_script_editor_state(script_id: str, payload: ScriptEditorStateIn) -> dict:
-    _find_script(script_id)
-    state = _save_script_editor_state({"scriptId": script_id, **payload.model_dump()})
+    script = _find_script(script_id)
+    state = _save_script_editor_state(
+        {"scriptId": script_id, **payload.model_dump()},
+        script,
+    )
     return {"ok": True, "state": state}
 
 
@@ -3393,72 +3611,50 @@ def get_scene_generation_plan(
 @app.post("/api/scripts/{script_id}/scene-generation/submit")
 def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dict:
     """Submete uma chamada HeyGen por cena somente após confirmação explícita."""
-    script = _find_script(script_id)
-    editor_state = _script_editor_state(script_id, script)
-    approved = bool(editor_state.get("humanReviewApproved"))
-    review_status = _resolved_medical_review_status(script, editor_state)
-    final_speech = str(script.get("textoFalado") or "").strip() or _script_text(script)
-    gate = evaluate_generation_gate(
-        speech=final_speech,
-        duration_seconds=payload.durationSeconds,
-        ai_operation_in_flight=False,
-        schema_valid=bool(editor_state.get("schemaValid", True)),
-        technical_error=editor_state.get("technicalError"),
-        medical_review=review_status,
-        human_review_approved=approved,
-        script_status=str(script.get("status") or ""),
-        final_saved=True,
-        final_confirmed=payload.confirmed,
-    )
-    if not gate.allowed:
-        raise HTTPException(status_code=422, detail=gate.reason)
-    scene_plan = _scene_plan(script_id)
-    profile = _production_profile(script_id)
-    if not scene_plan or not profile or not profile.get("voiceId"):
-        raise HTTPException(status_code=409, detail="Salve perfil de produção e Scene Plan antes de gerar por cena.")
-    try:
-        generation = build_scene_generation_result(
+    with _paid_generation_lock(script_id):
+        authorization = _authorize_paid_generation(
             script_id=script_id,
-            scene_plan=scene_plan,
-            voice_id=str(profile["voiceId"]),
-            speech_mode=payload.speechMode,
-            voice_mood=payload.voiceMood,
-            orientation=payload.orientation,
+            duration_seconds=payload.durationSeconds,
+            expected_script_revision=payload.expectedScriptRevision,
+            expected_final_speech_hash=payload.expectedFinalSpeechHash,
+            contract_version=payload.contractVersion,
+            requested_speech=None,
+            ai_operation_in_flight=False,
+            final_confirmed=payload.confirmed,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        script = authorization["script"]
+        scene_plan = _scene_plan(script_id)
+        profile = _production_profile(script_id)
+        if not scene_plan or not profile or not profile.get("voiceId"):
+            raise _paid_error(
+                409,
+                "SCENE_CONFIGURATION_INCOMPLETE",
+                "Salve perfil de produção e Scene Plan antes de gerar por cena.",
+            )
+        try:
+            generation = build_scene_generation_result(
+                script_id=script_id,
+                scene_plan=scene_plan,
+                voice_id=str(profile["voiceId"]),
+                speech_mode=payload.speechMode,
+                voice_mood=payload.voiceMood,
+                orientation=payload.orientation,
+            )
+        except ValueError as exc:
+            raise _paid_error(422, "SCENE_PLAN_INVALID", str(exc)) from exc
 
-    command = _heygen_cli()
-    _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
-    ready_avatar_ids = {
-        str(look.get("id"))
-        for look in private_looks
-        if isinstance(look, dict) and look.get("status") == "completed" and look.get("id")
-    }
-    missing = [request.avatar_id for request in generation.requests if request.avatar_id not in ready_avatar_ids]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Looks não prontos na HeyGen: {', '.join(missing)}")
-
-    jobs: list[dict[str, Any]] = []
-    base_key = payload.idempotencyKey or hashlib.sha256(
-        json.dumps(generation.to_dict(), sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
-    for request in generation.requests:
-        now = _now()
-        scene_key = f"scene-video:{script_id}:{request.scene_id}:{base_key}"
-        reserved_job = {
-            "id": f"sv-{uuid.uuid4().hex[:12]}",
-            "scriptId": script_id,
-            "status": "fila",
-            "provider": "heygen",
-            "progresso": 0,
-            "criadoEm": now,
-            "atualizadoEm": now,
-            "submissionState": "reserved",
-            "isScene": True,
-            "sceneId": request.scene_id,
-            "sceneOrder": request.order,
-            "productionSettings": {
+        base_key = payload.idempotencyKey or request_fingerprint(
+            {
+                "generation": generation.to_dict(),
+                "scriptRevision": authorization["scriptRevision"],
+                "finalSpeechHash": authorization["finalSpeechHash"],
+            }
+        )
+        reservations: list[tuple[Any, dict[str, Any], str]] = []
+        for request in generation.requests:
+            now = _now()
+            scene_key = f"scene-video:{script_id}:{request.scene_id}:{base_key}"
+            production_settings = {
                 "avatarId": request.avatar_id,
                 "voiceId": request.voice_id,
                 "orientation": request.orientation,
@@ -3471,18 +3667,92 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 "spokenText": request.spoken_text,
                 "sceneCount": generation.scene_count,
                 "cutPolicy": "hard_cut",
-            },
+            }
+            reserved_job = {
+                "id": f"sv-{uuid.uuid4().hex[:12]}",
+                "scriptId": script_id,
+                "scriptRevision": authorization["scriptRevision"],
+                "finalSpeechHash": authorization["finalSpeechHash"],
+                "contractVersion": authorization["contractVersion"],
+                "requestFingerprint": request_fingerprint(
+                    {
+                        "scriptId": script_id,
+                        "scriptRevision": authorization["scriptRevision"],
+                        "finalSpeechHash": authorization["finalSpeechHash"],
+                        "contractVersion": authorization["contractVersion"],
+                        "generationMode": "scene",
+                        "sceneId": request.scene_id,
+                        "productionSettings": production_settings,
+                    }
+                ),
+                "status": "fila",
+                "provider": "heygen",
+                "progresso": 0,
+                "criadoEm": now,
+                "atualizadoEm": now,
+                "submissionState": "reserved",
+                "isScene": True,
+                "sceneId": request.scene_id,
+                "sceneOrder": request.order,
+                "productionSettings": production_settings,
+            }
+            job, reservation = _job_store().reserve_video(
+                reserved_job,
+                idempotency_key=scene_key,
+                force_new_version=False,
+            )
+            if reservation == "conflict":
+                if job.get("idempotencyKey") == scene_key:
+                    raise _paid_error(
+                        409,
+                        "IDEMPOTENCY_KEY_CONFLICT",
+                        "Esta chave de idempotência já foi usada com outro payload de cena.",
+                    )
+                raise _paid_error(
+                    409,
+                    "SCENE_GENERATION_IN_PROGRESS",
+                    f"A cena {request.scene_id} já está em produção.",
+                )
+            reservations.append((request, job, reservation))
+
+    created_jobs = [job for _request, job, reservation in reservations if reservation == "created"]
+    jobs: list[dict[str, Any]] = [
+        job for _request, job, reservation in reservations if reservation == "duplicate"
+    ]
+    try:
+        command = _heygen_cli()
+        _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
+        ready_avatar_ids = {
+            str(look.get("id"))
+            for look in private_looks
+            if isinstance(look, dict) and look.get("status") == "completed" and look.get("id")
         }
-        job, reservation = _job_store().reserve_video(
-            reserved_job,
-            idempotency_key=scene_key,
-            force_new_version=False,
-        )
+        missing = [
+            request.avatar_id
+            for request, _job, reservation in reservations
+            if reservation == "created" and request.avatar_id not in ready_avatar_ids
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Looks não prontos na HeyGen: {', '.join(missing)}",
+            )
+    except (HTTPException, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        message = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        for job in created_jobs:
+            job["status"] = "erro"
+            job["erro"] = message
+            job["retrySafe"] = True
+            job["submissionState"] = "failed_safe"
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+        if isinstance(exc, HTTPException):
+            raise
+        raise _paid_error(502, "HEYGEN_CONFIGURATION_FAILED", message) from exc
+
+    for request, job, reservation in reservations:
         if reservation == "duplicate":
-            jobs.append(job)
             continue
-        if reservation == "conflict":
-            raise HTTPException(status_code=409, detail=f"A cena {request.scene_id} já está em produção.")
         try:
             job["submissionState"] = "submitting"
             job["atualizadoEm"] = _now()
@@ -4667,6 +4937,93 @@ def _find_script(script_id: str) -> dict[str, Any]:
     return script
 
 
+def _paid_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+    )
+
+
+def _authorize_paid_generation(
+    *,
+    script_id: str,
+    duration_seconds: int,
+    expected_script_revision: int | None,
+    expected_final_speech_hash: str | None,
+    contract_version: str | None,
+    requested_speech: str | None,
+    ai_operation_in_flight: bool,
+    final_confirmed: bool,
+) -> dict[str, Any]:
+    """Única autoridade para gate/versionamento antes de qualquer reserva paga."""
+
+    script = _find_script(script_id)
+    editor_state = _script_editor_state(script_id, script)
+    persisted_speech = _canonical_script_speech(script)
+    persisted_hash = editor_state.get("finalSpeechHash") or (
+        hash_text(persisted_speech) if persisted_speech else None
+    )
+    script_revision = int(editor_state.get("scriptRevision") or (1 if persisted_speech else 0))
+    version = validate_paid_version(
+        persisted_speech=persisted_speech,
+        script_revision=script_revision,
+        persisted_speech_hash=persisted_hash,
+        expected_script_revision=expected_script_revision,
+        expected_final_speech_hash=expected_final_speech_hash,
+        expected_contract_version=contract_version,
+    )
+    if not version.allowed:
+        status_code = 409 if version.code and "CONFLICT" in version.code else 422
+        raise _paid_error(
+            status_code,
+            version.code or "PAID_GENERATION_BLOCKED",
+            version.message or "A geração foi bloqueada pelo estado do roteiro.",
+        )
+
+    approval_has_version = (
+        "approvedScriptRevision" in editor_state
+        or "approvedFinalSpeechHash" in editor_state
+    )
+    approved = bool(editor_state.get("humanReviewApproved"))
+    if approval_has_version:
+        approved = bool(
+            approved
+            and editor_state.get("approvedScriptRevision") == script_revision
+            and editor_state.get("approvedFinalSpeechHash") == version.final_speech_hash
+        )
+    authoritative_state = {**editor_state, "humanReviewApproved": approved}
+    review_status = _resolved_medical_review_status(script, authoritative_state)
+    exact_saved_speech = bool(
+        requested_speech is None
+        or normalize_editor_text(requested_speech)
+        == normalize_editor_text(persisted_speech)
+    )
+    gate = evaluate_generation_gate(
+        speech=persisted_speech,
+        duration_seconds=duration_seconds,
+        ai_operation_in_flight=ai_operation_in_flight,
+        schema_valid=bool(editor_state.get("schemaValid", False)),
+        technical_error=editor_state.get("technicalError"),
+        medical_review=review_status,
+        human_review_approved=approved,
+        script_status=str(script.get("status") or ""),
+        final_saved=exact_saved_speech,
+        final_confirmed=final_confirmed,
+    )
+    if not gate.allowed:
+        reason = gate.reasons[0]
+        raise _paid_error(422, reason["code"].upper(), reason["message"])
+    return {
+        "script": script,
+        "editorState": authoritative_state,
+        "speech": persisted_speech,
+        "scriptRevision": script_revision,
+        "finalSpeechHash": version.final_speech_hash,
+        "contractVersion": version.contract_version,
+        "medicalReviewStatus": review_status,
+    }
+
+
 def _heygen_wallet(command: str) -> tuple[float | None, str | None]:
     proc = subprocess.run(
         [command, "user", "me", "get"],
@@ -4775,62 +5132,39 @@ def create_video(payload: VideoCreateIn) -> dict:
                 status_code=409,
                 detail="Este roteiro ja possui um video. Abra a producao existente ou use 'Criar nova versao' para gerar outro video.",
             )
-    script = _find_script(payload.scriptId)
-    final_display_text, final_spoken_text = _finalize_video_texts(payload, script)
-    editor_state = _script_editor_state(payload.scriptId, script)
-    human_review_approved = bool(
-        payload.humanReviewApproved or editor_state.get("humanReviewApproved")
-    )
-    gate_editor_state = {
-        **editor_state,
-        "humanReviewApproved": human_review_approved,
-    }
-    review_status = _resolved_medical_review_status(
-        script,
-        gate_editor_state,
-        payload.medicalReviewStatus,
-    )
-    persisted_speech = normalize_editor_text(str(script.get("textoFalado") or ""))
-    final_saved = not persisted_speech or persisted_speech == normalize_editor_text(final_display_text)
-    gate = evaluate_generation_gate(
-        speech=final_display_text,
-        duration_seconds=payload.durationSeconds,
-        ai_operation_in_flight=payload.aiOperationInFlight,
-        schema_valid=bool(payload.aiSchemaValid and editor_state.get("schemaValid", True)),
-        technical_error=payload.editorTechnicalError or editor_state.get("technicalError"),
-        medical_review=review_status,
-        human_review_approved=human_review_approved,
-        script_status=str(script.get("status") or ""),
-        final_saved=final_saved,
-        final_confirmed=payload.finalConfirmed,
-    )
-    LOGGER.info(
-        "generation_gate script_id=%s preset=%s words=%s duration_status=%s medical_review=%s allowed=%s reason_code=%s",
-        payload.scriptId,
-        payload.durationSeconds,
-        duration_assessment(final_display_text, payload.durationSeconds).wordCount,
-        duration_assessment(final_display_text, payload.durationSeconds).status,
-        review_status,
-        gate.allowed,
-        gate.reasons[0]["code"] if gate.reasons else "none",
-    )
-    if not gate.allowed:
-        raise HTTPException(status_code=422, detail=gate.reason)
-    idempotency_key = payload.idempotencyKey or _production_configuration_key(
-        payload, final_display_text, final_spoken_text
-    )
-    if payload.forceNewVersion and not payload.idempotencyKey:
-        idempotency_key = f"{idempotency_key}:version:{uuid.uuid4().hex}"
-    reserved_job = {
-        "id": f"v-{uuid.uuid4().hex[:12]}",
-        "scriptId": payload.scriptId,
-        "status": "fila",
-        "provider": "heygen",
-        "progresso": 0,
-        "criadoEm": now,
-        "atualizadoEm": now,
-        "submissionState": "reserved",
-        "productionSettings": {
+    with _paid_generation_lock(payload.scriptId):
+        script = _find_script(payload.scriptId)
+        requested_display_text = performance_display_text(
+            payload.displayText or payload.narrationText or _canonical_script_speech(script)
+        )
+        authorization = _authorize_paid_generation(
+            script_id=payload.scriptId,
+            duration_seconds=payload.durationSeconds,
+            expected_script_revision=payload.expectedScriptRevision,
+            expected_final_speech_hash=payload.expectedFinalSpeechHash,
+            contract_version=payload.contractVersion,
+            requested_speech=requested_display_text,
+            ai_operation_in_flight=payload.aiOperationInFlight,
+            final_confirmed=payload.finalConfirmed,
+        )
+        script = authorization["script"]
+        final_display_text, final_spoken_text = _finalize_video_texts(payload, script)
+        assessment = duration_assessment(final_display_text, payload.durationSeconds)
+        LOGGER.info(
+            "generation_gate script_id=%s revision=%s preset=%s words=%s duration_status=%s medical_review=%s allowed=true reason_code=none",
+            payload.scriptId,
+            authorization["scriptRevision"],
+            payload.durationSeconds,
+            assessment.wordCount,
+            assessment.status,
+            authorization["medicalReviewStatus"],
+        )
+        idempotency_key = payload.idempotencyKey or _production_configuration_key(
+            payload, final_display_text, final_spoken_text
+        )
+        if payload.forceNewVersion and not payload.idempotencyKey:
+            idempotency_key = f"{idempotency_key}:version:{uuid.uuid4().hex}"
+        production_settings = {
             "avatarId": payload.avatarId,
             "voiceId": payload.voiceId,
             "orientation": payload.orientation,
@@ -4847,13 +5181,37 @@ def create_video(payload: VideoCreateIn) -> dict:
             "spokenText": final_spoken_text,
             **({"cinematicPrompt": cinematic_prompt} if cinematic_prompt else {}),
             "outroText": payload.outroText,
-        },
-    }
-    job, reservation = _job_store().reserve_video(
-        reserved_job,
-        idempotency_key=idempotency_key,
-        force_new_version=payload.forceNewVersion,
-    )
+        }
+        fingerprint = request_fingerprint(
+            {
+                "scriptId": payload.scriptId,
+                "scriptRevision": authorization["scriptRevision"],
+                "finalSpeechHash": authorization["finalSpeechHash"],
+                "contractVersion": authorization["contractVersion"],
+                "generationMode": payload.generationMode,
+                "productionSettings": production_settings,
+            }
+        )
+        reserved_job = {
+            "id": f"v-{uuid.uuid4().hex[:12]}",
+            "scriptId": payload.scriptId,
+            "scriptRevision": authorization["scriptRevision"],
+            "finalSpeechHash": authorization["finalSpeechHash"],
+            "contractVersion": authorization["contractVersion"],
+            "requestFingerprint": fingerprint,
+            "status": "fila",
+            "provider": "heygen",
+            "progresso": 0,
+            "criadoEm": now,
+            "atualizadoEm": now,
+            "submissionState": "reserved",
+            "productionSettings": production_settings,
+        }
+        job, reservation = _job_store().reserve_video(
+            reserved_job,
+            idempotency_key=idempotency_key,
+            force_new_version=payload.forceNewVersion,
+        )
     LOGGER.info(
         "Video job reservation: script_id=%s job_id=%s result=%s",
         payload.scriptId,
@@ -4861,24 +5219,27 @@ def create_video(payload: VideoCreateIn) -> dict:
         reservation,
     )
     if reservation == "duplicate":
-        if job.get("submissionState") in {"reserved", "submitting"}:
-            raise HTTPException(
-                status_code=409,
-                detail="Este roteiro ja esta sendo enviado. Aguarde a criacao aparecer na producao.",
-            )
         return {"ok": True, "job": job, "deduplicated": True}
     if reservation == "conflict":
+        if job.get("idempotencyKey") == idempotency_key:
+            raise _paid_error(
+                409,
+                "IDEMPOTENCY_KEY_CONFLICT",
+                "Esta chave de idempotência já foi usada com outro payload.",
+            )
         if job.get("submissionState") in {"reserved", "submitting", "submission_uncertain"}:
-            raise HTTPException(
-                status_code=409,
-                detail=(
+            raise _paid_error(
+                409,
+                "SCRIPT_GENERATION_IN_PROGRESS",
+                (
                     "Ja existe um envio deste roteiro em andamento ou aguardando reconciliacao. "
                     "Nenhuma nova chamada foi feita ao HeyGen."
                 ),
             )
-        raise HTTPException(
-            status_code=409,
-            detail=(
+        raise _paid_error(
+            409,
+            "SCRIPT_ALREADY_GENERATED",
+            (
                 "Este roteiro ja possui um video. Abra a producao existente ou use "
                 "'Criar nova versao' para gerar outro video."
             ),
@@ -5077,42 +5438,31 @@ def _create_video_job(
 def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
     """Gera uma previa tecnica de 10s sempre pelo Direct Avatar."""
     now = _now()
-    script = _find_script(payload.scriptId)
-    editor_state = _script_editor_state(payload.scriptId, script)
-    approved = bool(editor_state.get("humanReviewApproved"))
-    review_status = _resolved_medical_review_status(script, editor_state)
-    selected_duration = int(editor_state.get("durationSeconds") or 45)
-    persisted_speech = normalize_editor_text(str(script.get("textoFalado") or ""))
-    final_saved = not persisted_speech or persisted_speech == normalize_editor_text(payload.displayText)
-    gate = evaluate_generation_gate(
-        speech=payload.displayText,
-        duration_seconds=selected_duration,
-        ai_operation_in_flight=False,
-        schema_valid=bool(editor_state.get("schemaValid", True)),
-        technical_error=editor_state.get("technicalError"),
-        medical_review=review_status,
-        human_review_approved=approved,
-        script_status=str(script.get("status") or ""),
-        final_saved=final_saved,
-        final_confirmed=payload.finalConfirmed,
-    )
-    if not gate.allowed:
-        raise HTTPException(status_code=422, detail=gate.reason)
-    preview_display_text, preview_spoken_text = _finalize_preview_texts(payload)
-    idempotency_key = payload.idempotencyKey or _preview_configuration_key(
-        payload, preview_display_text, preview_spoken_text
-    )
-    reserved_job = {
-        "id": f"vp-{uuid.uuid4().hex[:12]}",
-        "scriptId": payload.scriptId,
-        "status": "fila",
-        "provider": "heygen",
-        "progresso": 0,
-        "criadoEm": now,
-        "atualizadoEm": now,
-        "submissionState": "reserved",
-        "isPreview": True,
-        "productionSettings": {
+    with _paid_generation_lock(payload.scriptId):
+        script = _find_script(payload.scriptId)
+        editor_state = _script_editor_state(payload.scriptId, script)
+        selected_duration = int(editor_state.get("durationSeconds") or 45)
+        authorization = _authorize_paid_generation(
+            script_id=payload.scriptId,
+            duration_seconds=selected_duration,
+            expected_script_revision=payload.expectedScriptRevision,
+            expected_final_speech_hash=payload.expectedFinalSpeechHash,
+            contract_version=payload.contractVersion,
+            requested_speech=None,
+            ai_operation_in_flight=False,
+            final_confirmed=payload.finalConfirmed,
+        )
+        script = authorization["script"]
+        authoritative_preview_payload = payload.model_copy(
+            update={"displayText": authorization["speech"], "spokenText": None}
+        )
+        preview_display_text, preview_spoken_text = _finalize_preview_texts(
+            authoritative_preview_payload
+        )
+        idempotency_key = payload.idempotencyKey or _preview_configuration_key(
+            payload, preview_display_text, preview_spoken_text
+        )
+        production_settings = {
             "avatarId": payload.avatarId,
             "voiceId": payload.voiceId,
             "orientation": payload.orientation,
@@ -5124,15 +5474,45 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
             "optimizePronunciation": payload.optimizePronunciation,
             "displayText": preview_display_text,
             "spokenText": preview_spoken_text,
-        },
-    }
-    job, reservation = _job_store().reserve(
-        "video",
-        reserved_job,
-        idempotency_key=idempotency_key,
-    )
+        }
+        reserved_job = {
+            "id": f"vp-{uuid.uuid4().hex[:12]}",
+            "scriptId": payload.scriptId,
+            "scriptRevision": authorization["scriptRevision"],
+            "finalSpeechHash": authorization["finalSpeechHash"],
+            "contractVersion": authorization["contractVersion"],
+            "requestFingerprint": request_fingerprint(
+                {
+                    "scriptId": payload.scriptId,
+                    "scriptRevision": authorization["scriptRevision"],
+                    "finalSpeechHash": authorization["finalSpeechHash"],
+                    "contractVersion": authorization["contractVersion"],
+                    "generationMode": "preview",
+                    "productionSettings": production_settings,
+                }
+            ),
+            "status": "fila",
+            "provider": "heygen",
+            "progresso": 0,
+            "criadoEm": now,
+            "atualizadoEm": now,
+            "submissionState": "reserved",
+            "isPreview": True,
+            "productionSettings": production_settings,
+        }
+        job, reservation = _job_store().reserve(
+            "video",
+            reserved_job,
+            idempotency_key=idempotency_key,
+        )
     if reservation == "duplicate":
         return {"ok": True, "job": job, "deduplicated": True}
+    if reservation == "conflict":
+        raise _paid_error(
+            409,
+            "IDEMPOTENCY_KEY_CONFLICT",
+            "Esta chave de idempotência já foi usada com outro payload.",
+        )
 
     try:
         command = _heygen_cli()
@@ -8710,7 +9090,9 @@ def append_script(payload: ScriptIn) -> dict:
     raw = dict(zip(SCRIPT_HEADERS, row))
     raw["Criado em"] = payload.criadoEm or _now()
     _append_snapshot_row("roteiros", raw)
-    return {"ok": True, "script": map_scripts([raw])[0]}
+    saved_script = map_scripts([raw])[0]
+    _script_editor_state(item_id, saved_script)
+    return {"ok": True, "script": saved_script}
 
 
 @app.post("/api/sheets/calendario")
@@ -8761,32 +9143,35 @@ def update_script(item_id: str, payload: ScriptIn) -> dict:
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     item_id = payload.id or item_id
-    row = [
-        _FAMILIA.get(payload.categoria, "Educativo"), payload.tema, payload.titulo,
-        payload.hook, payload.dorConflito, payload.explicacaoSimples, payload.virada,
-        payload.cta, payload.cuidadosMedicos, _RISCO.get(payload.risco, "Médio"),
-        payload.formatoSugerido, _ROTEIRO_STATUS.get(payload.status, "Rascunho"),
-        payload.aprovador or "", payload.validadoEm or "", payload.link or "", item_id,
-        payload.ideaId or "",
-        payload.editorialTone or "", payload.textoFalado or "",
-        payload.outroText,
-        payload.generationProvider or "",
-        payload.generationFlowVersion or "",
-    ]
-    try:
-        client = GoogleSheetsRestClient()
-        _ensure_tab_ids(client, "roteiros")
-        _ensure_script_headers(client)
-        values = client.get_values(TAB_RANGE["roteiros"])
-        rownum = _sheet_row_number(values, item_id, "s")
-        client.update_values(f"'Roteiros'!A{rownum}:V{rownum}", [row])
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"falha ao atualizar roteiro: {exc}")
-    raw = dict(zip(SCRIPT_HEADERS, row))
-    _update_snapshot_row("roteiros", item_id, raw)
-    return {"ok": True, "script": map_scripts([raw])[0]}
+    with _paid_generation_lock(item_id):
+        row = [
+            _FAMILIA.get(payload.categoria, "Educativo"), payload.tema, payload.titulo,
+            payload.hook, payload.dorConflito, payload.explicacaoSimples, payload.virada,
+            payload.cta, payload.cuidadosMedicos, _RISCO.get(payload.risco, "Médio"),
+            payload.formatoSugerido, _ROTEIRO_STATUS.get(payload.status, "Rascunho"),
+            payload.aprovador or "", payload.validadoEm or "", payload.link or "", item_id,
+            payload.ideaId or "",
+            payload.editorialTone or "", payload.textoFalado or "",
+            payload.outroText,
+            payload.generationProvider or "",
+            payload.generationFlowVersion or "",
+        ]
+        try:
+            client = GoogleSheetsRestClient()
+            _ensure_tab_ids(client, "roteiros")
+            _ensure_script_headers(client)
+            values = client.get_values(TAB_RANGE["roteiros"])
+            rownum = _sheet_row_number(values, item_id, "s")
+            client.update_values(f"'Roteiros'!A{rownum}:V{rownum}", [row])
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"falha ao atualizar roteiro: {exc}")
+        raw = dict(zip(SCRIPT_HEADERS, row))
+        _update_snapshot_row("roteiros", item_id, raw)
+        saved_script = map_scripts([raw])[0]
+        _script_editor_state(item_id, saved_script)
+    return {"ok": True, "script": saved_script}
 
 
 def _delete_script_local_data(script_id: str) -> dict[str, Any]:

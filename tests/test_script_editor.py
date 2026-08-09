@@ -339,7 +339,9 @@ def test_editor_state_persists_duration_review_history_and_safe_defaults() -> No
                 {"id": "s-legacy", "status": "aprovado_clinicamente"},
             )
             assert legacy["durationSeconds"] == 45
-            assert legacy["humanReviewApproved"] is True
+            assert legacy["humanReviewApproved"] is False
+            assert legacy["scriptRevision"] == 0
+            assert legacy["finalSpeechHash"] is None
             assert legacy["legacyFallback"] is True
 
             saved = server._save_script_editor_state(
