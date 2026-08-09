@@ -178,3 +178,43 @@ Status: concluído.
 - o MP4 final pode ser assistido e baixado no próprio Story Mode;
 - validação focada: 12 testes do orquestrador/compositor e typecheck aprovados, incluindo
   ordem visual e prova sintética de que o B-roll não substitui a narração.
+
+## Slice MVP-4 — Validação e encerramento
+
+Status: concluído.
+
+- fixture principal em `tests/fixtures/story_medieval.py`: personagem atravessa um portal,
+  chega à feira medieval, alterna três B-rolls com três avatar anchors e encerra na botica;
+- os seis shots cobrem exatamente a fala aprovada, mantêm ordem, estratégia, identidade,
+  figurino, época, anacronismos proibidos e prompts finais de produção;
+- o Narrative Director aceita o plano completo em uma única chamada mockada;
+- geração mockada acontece um shot por vez, sem alcançar o transporte real do HeyGen;
+- os testes P0 cobrem vínculo com a fala, invalidação por edição, aprovação, budget,
+  capabilities, idempotência, regeneração seletiva, ordem e narração sobre B-roll;
+- nenhuma chamada real a Anthropic ou HeyGen foi feita nesta fase.
+
+Checkpoint final de 9 de agosto de 2026:
+
+- Python: 276 testes aprovados e 2 smoke tests reais ignorados;
+- Web: 38 testes aprovados;
+- TypeScript: typecheck aprovado;
+- ESLint: zero erros e quatro avisos não bloqueantes de Fast Refresh no editor;
+- build Vite/Nitro de produção aprovado.
+
+## Limite operacional consciente do MVP
+
+A montagem usa como fonte de áudio o vídeo-base pronto mais recente do mesmo roteiro. Isso
+preserva a voz e a sincronização sem criar jobs adicionais de voz. Se não existir vídeo-base,
+o botão informa o pré-requisito e não inicia nenhuma chamada paga.
+
+## Backlog explicitamente adiado
+
+- polish visual avançado e cobertura de todos os breakpoints;
+- Visual QC automático e loops Claude → HeyGen → Claude;
+- análise opcional de thumbnail com Claude Vision;
+- Avatar Shots e providers experimentais;
+- efeitos cinematográficos além de corte seco/fade simples;
+- analytics avançado, colaboração e histórico completo de versões;
+- exportação da Story Bible e templates de histórias;
+- criação de narração independente do vídeo-base;
+- refatorações e abstrações sem impacto direto no MVP.
