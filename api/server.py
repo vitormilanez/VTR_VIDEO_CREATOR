@@ -986,6 +986,40 @@ def _save_scene_plan(script_id: str, scenes: list[dict[str, Any]]) -> dict[str, 
     return plan
 
 
+def _refresh_scene_plan_avatar_bindings(script_id: str) -> dict[str, Any] | None:
+    """Re-resolve persisted scene roles against the currently selected Avatar Set.
+
+    Scene plans intentionally persist semantic roles (for example ``close`` and
+    ``front``). Avatar Set edits can replace the concrete HeyGen IDs behind those
+    roles, so a saved ``avatarId`` must never remain authoritative at generation
+    time.
+    """
+    stored = _scene_plan(script_id)
+    if not stored or not stored.get("scenes"):
+        return stored
+    resolved = _resolve_scene_plan(script_id, list(stored["scenes"]))
+    stored_bindings = [
+        (
+            str(scene.get("id") or ""),
+            str(scene.get("lookRole") or "primary"),
+            str(scene.get("avatarId") or ""),
+        )
+        for scene in stored["scenes"]
+    ]
+    resolved_bindings = [
+        (
+            str(scene.get("id") or ""),
+            str(scene.get("lookRole") or "primary"),
+            str(scene.get("avatarId") or ""),
+        )
+        for scene in resolved["scenes"]
+    ]
+    if stored_bindings == resolved_bindings:
+        return stored
+    LOGGER.info("Scene Plan avatar bindings refreshed: script_id=%s", script_id)
+    return _save_scene_plan(script_id, list(stored["scenes"]))
+
+
 VIDEO_VISUAL_DESIGN_SYSTEM_VERSION = "video-vertical-v1"
 VIDEO_VISUAL_TYPES = frozenset({"none", "full_slide", "overlay", "statistic", "comparison", "quote"})
 VIDEO_VISUAL_MOTION_PRESETS = frozenset({"none", "fade", "soft_zoom", "fade_zoom"})
@@ -1407,24 +1441,60 @@ def _archive_completed_video(job: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
+def _scene_job_batch_id(job: dict[str, Any]) -> str | None:
+    explicit = str(job.get("sceneBatchId") or "").strip()
+    if explicit:
+        return explicit
+    idempotency_key = str(job.get("idempotencyKey") or "")
+    prefix = f"scene-video:{job.get('scriptId')}:{job.get('sceneId')}:"
+    if idempotency_key.startswith(prefix):
+        return idempotency_key[len(prefix) :] or None
+    return None
+
+
 def _scene_jobs_ready(script_id: str, scene_plan: dict[str, Any]) -> list[dict[str, Any]] | None:
     jobs = [job for job in _load_video_jobs() if job.get("scriptId") == script_id and job.get("isScene")]
-    ready_by_scene: dict[str, list[dict[str, Any]]] = {}
+    scenes = list(scene_plan.get("scenes") or [])
+    expected_avatar_by_scene = {
+        str(scene.get("id") or ""): str(scene.get("avatarId") or "")
+        for scene in scenes
+    }
+    ready_by_batch: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for job in jobs:
-        if job.get("status") == "pronto":
-            ready_by_scene.setdefault(str(job.get("sceneId") or ""), []).append(job)
-    ordered: list[dict[str, Any]] = []
-    for scene in scene_plan.get("scenes") or []:
-        scene_id = str(scene.get("id") or "")
-        candidates = sorted(
-            ready_by_scene.get(scene_id, []),
-            key=lambda item: str(item.get("atualizadoEm") or item.get("criadoEm") or ""),
-            reverse=True,
-        )
-        if not candidates:
-            return None
-        ordered.append(candidates[0])
-    return ordered
+        if job.get("status") != "pronto":
+            continue
+        scene_id = str(job.get("sceneId") or "")
+        if scene_id not in expected_avatar_by_scene:
+            continue
+        expected_avatar = expected_avatar_by_scene[scene_id]
+        actual_avatar = str((job.get("productionSettings") or {}).get("avatarId") or "")
+        if expected_avatar and actual_avatar and expected_avatar != actual_avatar:
+            continue
+        batch_id = _scene_job_batch_id(job) or "__legacy__"
+        ready_by_batch.setdefault(batch_id, {}).setdefault(scene_id, []).append(job)
+
+    complete_batches: list[tuple[str, list[dict[str, Any]]]] = []
+    for batch_id, ready_by_scene in ready_by_batch.items():
+        ordered: list[dict[str, Any]] = []
+        for scene in scenes:
+            candidates = sorted(
+                ready_by_scene.get(str(scene.get("id") or ""), []),
+                key=lambda item: str(item.get("atualizadoEm") or item.get("criadoEm") or ""),
+                reverse=True,
+            )
+            if not candidates:
+                break
+            ordered.append(candidates[0])
+        if len(ordered) == len(scenes):
+            newest = max(
+                str(job.get("atualizadoEm") or job.get("criadoEm") or "")
+                for job in ordered
+            )
+            complete_batches.append((newest, ordered))
+    if not complete_batches:
+        return None
+    complete_batches.sort(key=lambda item: item[0], reverse=True)
+    return complete_batches[0][1]
 
 
 def _visual_asset_by_scene(script_id: str, visual_plan: dict[str, Any]) -> dict[str, Path]:
@@ -1462,7 +1532,7 @@ def _composed_video_file_response(job: dict[str, Any], *, download: bool) -> Fil
 
 
 def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool = False) -> dict[str, Any] | None:
-    scene_plan = _scene_plan(script_id)
+    scene_plan = _refresh_scene_plan_avatar_bindings(script_id)
     if not scene_plan or not scene_plan.get("scenes"):
         if raise_when_not_ready:
             raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de compor o vídeo final.")
@@ -3321,6 +3391,7 @@ class SceneVideoConfirmIn(BaseModel):
     voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident"
     captions: bool = True
     optimizePronunciation: bool = True
+    forceNewVersion: bool = False
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
     expectedScriptRevision: int | None = Field(default=None, ge=0)
     expectedFinalSpeechHash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -3630,7 +3701,7 @@ def delete_avatar_set(avatar_set_id: str) -> dict:
 @app.get("/api/scripts/{script_id}/scene-plan")
 def get_script_scene_plan(script_id: str) -> dict:
     _find_script(script_id)
-    return {"ok": True, "scenePlan": _scene_plan(script_id)}
+    return {"ok": True, "scenePlan": _refresh_scene_plan_avatar_bindings(script_id)}
 
 
 @app.put("/api/scripts/{script_id}/scene-plan")
@@ -3649,7 +3720,7 @@ def get_scene_generation_plan(
 ) -> dict:
     """Expõe o contrato futuro por cena sem criar job ou chamar a HeyGen."""
     _find_script(script_id)
-    scene_plan = _scene_plan(script_id)
+    scene_plan = _refresh_scene_plan_avatar_bindings(script_id)
     if not scene_plan or not scene_plan.get("scenes"):
         raise HTTPException(status_code=409, detail="Salve o Scene Plan antes de montar a geração por cena.")
     profile = _production_profile(script_id)
@@ -3684,7 +3755,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
             final_confirmed=payload.confirmed,
         )
         script = authorization["script"]
-        scene_plan = _scene_plan(script_id)
+        scene_plan = _refresh_scene_plan_avatar_bindings(script_id)
         profile = _production_profile(script_id)
         if not scene_plan or not profile or not profile.get("voiceId"):
             raise _paid_error(
@@ -3711,6 +3782,8 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 "finalSpeechHash": authorization["finalSpeechHash"],
             }
         )
+        if payload.forceNewVersion and not payload.idempotencyKey:
+            base_key = f"{base_key}:version:{uuid.uuid4().hex[:12]}"
         reservations: list[tuple[Any, dict[str, Any], str]] = []
         for request in generation.requests:
             now = _now()
@@ -3728,6 +3801,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 "spokenText": request.spoken_text,
                 "sceneCount": generation.scene_count,
                 "cutPolicy": "hard_cut",
+                "avatarSetId": profile.get("avatarSetId"),
             }
             reserved_job = {
                 "id": f"sv-{uuid.uuid4().hex[:12]}",
@@ -3753,6 +3827,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 "atualizadoEm": now,
                 "submissionState": "reserved",
                 "isScene": True,
+                "sceneBatchId": base_key,
                 "sceneId": request.scene_id,
                 "sceneOrder": request.order,
                 "productionSettings": production_settings,
@@ -3760,7 +3835,7 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
             job, reservation = _job_store().reserve_video(
                 reserved_job,
                 idempotency_key=scene_key,
-                force_new_version=False,
+                force_new_version=payload.forceNewVersion,
             )
             if reservation == "conflict":
                 if job.get("idempotencyKey") == scene_key:

@@ -1035,6 +1035,19 @@ function RoteiroDetalhe() {
         setPaidScriptVersion(versionToSend);
       }
       if (avatarMode === "set" && generationMode === "direct") {
+        await saveProductionProfile(scriptToSend.id, {
+          avatarId: primaryAvatarId,
+          primaryAvatarId,
+          avatarSetId,
+          avatarMode,
+          voiceId,
+          speechMode,
+          voiceMood,
+          generationMode,
+          musicTrackId,
+          musicVolume,
+          cinematicPrompt,
+        });
         const sceneResult = await submitSceneGeneration(scriptToSend.id, {
           orientation,
           durationSeconds,
@@ -1042,6 +1055,7 @@ function RoteiroDetalhe() {
           voiceMood,
           captions,
           optimizePronunciation,
+          forceNewVersion,
           expectedScriptRevision: versionToSend.scriptRevision,
           expectedFinalSpeechHash: versionToSend.finalSpeechHash,
           contractVersion: versionToSend.contractVersion,

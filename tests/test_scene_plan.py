@@ -52,6 +52,108 @@ class ScenePlanTests(unittest.TestCase):
         self.assertEqual([scene["order"] for scene in plan["scenes"]], [1, 2])
         self.assertEqual(server._scene_plan("script-1"), plan)
 
+    def test_generation_plan_refreshes_stale_avatar_ids_from_current_set(self) -> None:
+        old_set = server._save_avatar_set(
+            name="Looks antigos",
+            voice_id="voice-1",
+            looks=[
+                {"avatarId": "old-close", "role": "close", "label": "Close"},
+                {"avatarId": "old-front", "role": "front", "label": "Frontal"},
+            ],
+        )
+        server._save_production_profile(
+            {
+                "scriptId": "script-refresh",
+                "avatarId": "old-close",
+                "primaryAvatarId": "old-close",
+                "avatarSetId": old_set["id"],
+                "avatarMode": "set",
+                "voiceId": "voice-1",
+                "speechMode": "natural",
+                "generationMode": "direct",
+            }
+        )
+        server._save_scene_plan(
+            "script-refresh",
+            [
+                {"id": "scene-1", "text": "Abertura", "lookRole": "close"},
+                {"id": "scene-2", "text": "Explicação", "lookRole": "front"},
+            ],
+        )
+        current_set = server._save_avatar_set(
+            name="Looks atuais",
+            voice_id="voice-1",
+            looks=[
+                {"avatarId": "current-close", "role": "close", "label": "Close"},
+                {"avatarId": "current-front", "role": "front", "label": "Frontal"},
+            ],
+        )
+        server._save_production_profile(
+            {
+                "scriptId": "script-refresh",
+                "avatarId": "current-close",
+                "primaryAvatarId": "current-close",
+                "avatarSetId": current_set["id"],
+                "avatarMode": "set",
+                "voiceId": "voice-1",
+                "speechMode": "natural",
+                "generationMode": "direct",
+            }
+        )
+
+        with patch.object(server, "_find_script", return_value={"id": "script-refresh"}):
+            response = server.get_scene_generation_plan("script-refresh")
+
+        avatar_ids = [request["avatarId"] for request in response["generation"]["requests"]]
+        self.assertEqual(avatar_ids, ["current-close", "current-front"])
+        self.assertEqual(
+            [scene["avatarId"] for scene in server._scene_plan("script-refresh")["scenes"]],
+            ["current-close", "current-front"],
+        )
+
+    def test_ready_scene_jobs_require_same_batch_and_expected_avatars(self) -> None:
+        scene_plan = {
+            "scenes": [
+                {"id": "scene-1", "avatarId": "current-close"},
+                {"id": "scene-2", "avatarId": "current-front"},
+            ]
+        }
+
+        def save_job(
+            job_id: str,
+            scene_id: str,
+            avatar_id: str,
+            batch_id: str,
+            updated_at: str,
+        ) -> None:
+            server._job_store().upsert(
+                "video",
+                {
+                    "id": job_id,
+                    "scriptId": "script-batch",
+                    "status": "pronto",
+                    "provider": "heygen",
+                    "progresso": 100,
+                    "criadoEm": updated_at,
+                    "atualizadoEm": updated_at,
+                    "isScene": True,
+                    "sceneBatchId": batch_id,
+                    "sceneId": scene_id,
+                    "productionSettings": {"avatarId": avatar_id},
+                },
+            )
+
+        save_job("old-1", "scene-1", "old-close", "old-batch", "2026-08-09T09:00:00+00:00")
+        save_job("old-2", "scene-2", "old-front", "old-batch", "2026-08-09T09:00:01+00:00")
+        save_job("new-1", "scene-1", "current-close", "new-batch", "2026-08-09T10:00:00+00:00")
+
+        self.assertIsNone(server._scene_jobs_ready("script-batch", scene_plan))
+
+        save_job("new-2", "scene-2", "current-front", "new-batch", "2026-08-09T10:00:01+00:00")
+        ready = server._scene_jobs_ready("script-batch", scene_plan)
+        self.assertIsNotNone(ready)
+        self.assertEqual([job["id"] for job in ready or []], ["new-1", "new-2"])
+
     def test_production_profile_persists_cinematic_prompt(self) -> None:
         profile = server._save_production_profile(
             {

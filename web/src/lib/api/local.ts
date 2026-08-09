@@ -859,6 +859,7 @@ export async function submitSceneGeneration(
     voiceMood: VoiceMood;
     captions: boolean;
     optimizePronunciation: boolean;
+    forceNewVersion?: boolean;
     idempotencyKey?: string;
     expectedScriptRevision?: number;
     expectedFinalSpeechHash?: string;

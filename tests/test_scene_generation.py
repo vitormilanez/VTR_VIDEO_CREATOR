@@ -47,7 +47,11 @@ class SceneGenerationTests(unittest.TestCase):
             server,
             "_scene_plan",
             return_value={"scenes": [{"id": "scene-1", "avatarId": "avatar-1", "text": "Fala"}]},
-        ), patch.object(server, "_production_profile", return_value={"voiceId": "voice-1"}):
+        ), patch.object(
+            server,
+            "_production_profile",
+            return_value={"voiceId": "voice-1", "avatarId": "avatar-1", "primaryAvatarId": "avatar-1"},
+        ):
             response = server.get_scene_generation_plan("script-1")
         self.assertEqual(response["generation"]["status"], "not_submitted")
         self.assertEqual(response["generation"]["requests"][0]["avatarId"], "avatar-1")
