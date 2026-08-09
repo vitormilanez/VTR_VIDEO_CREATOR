@@ -20,6 +20,7 @@ export function ConfirmAction({
   cancelLabel = "Cancelar",
   onConfirm,
   destructive,
+  confirmDisabled,
 }: {
   trigger: ReactNode;
   title: string;
@@ -28,6 +29,7 @@ export function ConfirmAction({
   cancelLabel?: string;
   onConfirm: () => void;
   destructive?: boolean;
+  confirmDisabled?: boolean;
 }) {
   return (
     <AlertDialog>
@@ -45,6 +47,7 @@ export function ConfirmAction({
           <AlertDialogCancel>{cancelLabel}</AlertDialogCancel>
           <AlertDialogAction
             onClick={onConfirm}
+            disabled={confirmDisabled}
             className={cn(
               destructive && "bg-status-danger text-primary-foreground hover:bg-status-danger/90",
             )}

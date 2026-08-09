@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from api.services.script_performance import display_text, speech_preset, spoken_text
+from api.services.script_performance import display_text, spoken_text, voice_settings
 from api.services.voice_providers import get_voice_provider
 
 
-GenerationMode = Literal["direct", "video_agent"]
+GenerationMode = Literal["direct", "video_agent", "cinematic"]
 
 DIRECT_VIDEO_DURATIONS = frozenset({10, 15, 30, 45, 60})
 
@@ -21,13 +21,14 @@ def direct_video_payload(
     speech_mode: str,
     captions: bool,
     optimize_pronunciation: bool,
+    voice_mood: str = "confident",
     caption_source_matches_spoken: bool = True,
 ) -> dict[str, Any]:
     voice_provider = get_voice_provider("heygen_text")
     voice_payload = voice_provider.build_voice_payload(
         text=spoken_text(narration_text, optimize_pronunciation=optimize_pronunciation),
         voice_id=voice_id,
-        voice_settings=speech_preset(speech_mode),
+        voice_settings=voice_settings(speech_mode, voice_mood),
     )
     payload: dict[str, Any] = {
         "type": "avatar",

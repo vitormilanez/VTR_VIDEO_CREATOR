@@ -9,9 +9,22 @@ import { videoJobStatusLabel, canalLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import {
   appendCalendarPost,
+  createPostProduction,
+  fetchLatestPostProduction,
+  fetchPostProduction,
+  fetchPostProductionArtifacts,
+  postProductionPreviewUrl,
   publishVideoToInstagram,
   refreshHeyGenVideo,
+  replanPostProduction,
+  renderPostProductionPreview,
+  runPostProductionPreflight,
+  updatePostProductionEvents,
   videoDownloadUrl,
+  type PostProductionArtifacts,
+  type PostProductionJob,
+  type PreflightReport,
+  type VisualTimelineEvent,
 } from "@/lib/api/local";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -43,11 +56,15 @@ import {
   ExternalLink,
   Film,
   Instagram,
+  Layers3,
   Loader2,
+  Save,
+  Sparkles,
   RefreshCcw,
 } from "lucide-react";
 import type { Canal, Script, VideoJobStatus } from "@/lib/mock-data";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_app/producao/$id")({
   head: ({ params }) => ({
@@ -77,6 +94,16 @@ function VideoDetalhe() {
   const [captionCopied, setCaptionCopied] = useState(false);
   const [shareToFeed, setShareToFeed] = useState(true);
   const [publishing, setPublishing] = useState(false);
+  const [postJob, setPostJob] = useState<PostProductionJob | null>(null);
+  const [postArtifacts, setPostArtifacts] = useState<PostProductionArtifacts | null>(null);
+  const [preflightReport, setPreflightReport] = useState<PreflightReport | null>(null);
+  const [postBusy, setPostBusy] = useState(false);
+  const [autoRefreshing, setAutoRefreshing] = useState(false);
+  const trackedJobId = job?.id;
+  const trackedJobProvider = job?.provider;
+  const trackedJobStatus = job?.status;
+  const postJobId = postJob?.id;
+  const postJobStatus = postJob?.status;
 
   useEffect(() => {
     if (!script) return;
@@ -84,6 +111,129 @@ function VideoDetalhe() {
     const savedCaption = window.localStorage.getItem(storageKey);
     setInstagramCaption(savedCaption || buildReelCaption(script));
   }, [id, job?.id, script]);
+
+  useEffect(() => {
+    const savedId = window.localStorage.getItem(`post-production:${id}`);
+    let cancelled = false;
+    const recover = async () => {
+      let recovered: PostProductionJob | null = null;
+      if (savedId) {
+        try {
+          recovered = await fetchPostProduction(savedId);
+        } catch {
+          window.localStorage.removeItem(`post-production:${id}`);
+        }
+      }
+      if (!recovered) recovered = await fetchLatestPostProduction(id);
+      if (cancelled || !recovered) return;
+      window.localStorage.setItem(`post-production:${id}`, recovered.id);
+      setPostJob(recovered);
+    };
+    void recover().catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  useEffect(() => {
+    if (!postJobId || !postJobStatus) return;
+    const active = [
+      "queued",
+      "transcribing",
+      "planning",
+      "preflight",
+      "rendering_preview",
+    ].includes(postJobStatus);
+    const refresh = async () => {
+      try {
+        const current = await fetchPostProduction(postJobId);
+        setPostJob(current);
+        if (["needs_review", "preview_ready", "failed", "stale"].includes(current.status)) {
+          const artifacts = await fetchPostProductionArtifacts(current.id);
+          setPostArtifacts(artifacts);
+        }
+      } catch {
+        // O próximo poll tenta novamente; a tela principal continua utilizável.
+      }
+    };
+    if (!active) {
+      void refresh();
+      return;
+    }
+    const timer = window.setInterval(() => void refresh(), 2500);
+    return () => window.clearInterval(timer);
+  }, [postJobId, postJobStatus]);
+
+  useEffect(() => {
+    const active =
+      trackedJobProvider === "heygen" &&
+      (trackedJobStatus === "fila" || trackedJobStatus === "processando");
+    if (!trackedJobId || !active) {
+      setAutoRefreshing(false);
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | undefined;
+    setAutoRefreshing(true);
+
+    const poll = async () => {
+      try {
+        const result = await refreshHeyGenVideo(trackedJobId);
+        if (cancelled) return;
+        updateVideoJob(trackedJobId, result.job);
+        if (result.composedJob) addVideoJob(result.composedJob);
+        if (result.job.status === "pronto") {
+          setAutoRefreshing(false);
+          toast.success(
+            result.composedJob
+              ? "Vídeo final composto pronto."
+              : "Nova versão pronta e salva em content/videos.",
+          );
+          return;
+        }
+        if (result.job.status === "erro") {
+          setAutoRefreshing(false);
+          toast.error(result.job.erro || "A produção falhou no HeyGen.");
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), 5000);
+      } catch (error) {
+        if (cancelled) return;
+        console.warn("[video-status] atualização automática falhou", {
+          jobId: trackedJobId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        timer = window.setTimeout(() => void poll(), 8000);
+      }
+    };
+
+    timer = window.setTimeout(() => void poll(), 1200);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [addVideoJob, trackedJobId, trackedJobProvider, trackedJobStatus, updateVideoJob]);
+
+  async function applyElegantPostProduction() {
+    if (postJob?.status === "preview_ready") {
+      document.getElementById("post-production")?.scrollIntoView({ behavior: "smooth" });
+      return;
+    }
+    setPostBusy(true);
+    try {
+      const created = await createPostProduction(job!.id, true);
+      window.localStorage.setItem(`post-production:${job!.id}`, created.id);
+      setPostJob(created);
+      setPostArtifacts(null);
+      setPreflightReport(null);
+      toast.success("Edição elegante iniciada. A prévia será renderizada automaticamente.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível aplicar a edição.");
+    } finally {
+      setPostBusy(false);
+    }
+  }
 
   function updateInstagramCaption(value: string) {
     const next = value.slice(0, 2200);
@@ -120,6 +270,12 @@ function VideoDetalhe() {
     criadoEm: job.criadoEm,
     atualizadoEm: job.atualizadoEm,
   });
+  const postApplying = Boolean(
+    postJob &&
+    ["queued", "transcribing", "planning", "preflight", "rendering_preview"].includes(
+      postJob.status,
+    ),
+  );
 
   return (
     <AppShell
@@ -135,7 +291,7 @@ function VideoDetalhe() {
             <Button
               size="sm"
               variant="secondary"
-              disabled={job.provider === "local"}
+              disabled={job.provider === "local" || autoRefreshing}
               onClick={async () => {
                 try {
                   const result = await refreshHeyGenVideo(job.id);
@@ -151,7 +307,8 @@ function VideoDetalhe() {
                 }
               }}
             >
-              <RefreshCcw className="mr-1 h-4 w-4" /> Atualizar status
+              <RefreshCcw className={cn("mr-1 h-4 w-4", autoRefreshing && "animate-spin")} />
+              {autoRefreshing ? "Acompanhando..." : "Atualizar status"}
             </Button>
           </WithTooltip>
           {script ? (
@@ -167,6 +324,37 @@ function VideoDetalhe() {
                 <Download className="mr-1 h-4 w-4" />
                 {job.isComposed ? "Baixar vídeo final" : "Baixar vídeo"}
               </a>
+            </Button>
+          ) : null}
+          {job.status === "pronto" && job.videoUrl ? (
+            <Button size="sm" variant="secondary" asChild>
+              <Link
+                to="/kit-local"
+                search={{
+                  videoJobId: job.id,
+                  sourceName: script?.titulo ?? `Video ${job.id}`,
+                }}
+              >
+                <Layers3 className="mr-1 h-4 w-4" /> Editar localmente
+              </Link>
+            </Button>
+          ) : null}
+          {job.status === "pronto" && job.videoUrl ? (
+            <Button
+              size="sm"
+              onClick={() => void applyElegantPostProduction()}
+              disabled={postBusy || postApplying}
+            >
+              {postBusy || postApplying ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Sparkles className="mr-1 h-4 w-4" />
+              )}
+              {postJob?.status === "preview_ready"
+                ? "Ver edição elegante"
+                : postApplying
+                  ? "Aplicando edição..."
+                  : "Aplicar edição elegante"}
             </Button>
           ) : null}
           <Dialog open={publishOpen} onOpenChange={setPublishOpen}>
@@ -374,7 +562,12 @@ function VideoDetalhe() {
               {job.duracaoSegundos ? (
                 <Info label="Duracao" value={`${job.duracaoSegundos}s`} />
               ) : null}
-              {job.videoUrl ? <Info label="Arquivo" value={job.isComposed ? "Vídeo final composto" : "Video disponivel"} /> : null}
+              {job.videoUrl ? (
+                <Info
+                  label="Arquivo"
+                  value={job.isComposed ? "Vídeo final composto" : "Video disponivel"}
+                />
+              ) : null}
             </div>
             {job.videoUrl ? (
               <div className="mt-3 flex flex-wrap gap-2">
@@ -384,11 +577,13 @@ function VideoDetalhe() {
                     {job.isComposed ? "Baixar MP4 final" : "Baixar MP4"}
                   </a>
                 </Button>
-                {!job.isComposed ? <Button size="sm" variant="ghost" asChild>
-                  <a href={job.videoUrl} target="_blank" rel="noreferrer">
-                    Abrir no HeyGen <ExternalLink className="ml-1 h-3.5 w-3.5" />
-                  </a>
-                </Button> : null}
+                {!job.isComposed && job.remoteVideoUrl ? (
+                  <Button size="sm" variant="ghost" asChild>
+                    <a href={job.remoteVideoUrl} target="_blank" rel="noreferrer">
+                      Abrir no HeyGen <ExternalLink className="ml-1 h-3.5 w-3.5" />
+                    </a>
+                  </Button>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -425,6 +620,20 @@ function VideoDetalhe() {
                   : "O preview aparece quando o HeyGen disponibiliza o video."}
             </p>
           </div>
+
+          {postJob ? (
+            <PostProductionPanel
+              originalUrl={job.videoUrl}
+              job={postJob}
+              artifacts={postArtifacts}
+              report={preflightReport}
+              busy={postBusy}
+              onArtifactsChange={setPostArtifacts}
+              onJobChange={setPostJob}
+              onReportChange={setPreflightReport}
+              onBusyChange={setPostBusy}
+            />
+          ) : null}
         </div>
 
         <aside className="space-y-3">
@@ -508,6 +717,252 @@ function VideoDetalhe() {
         </aside>
       </div>
     </AppShell>
+  );
+}
+
+function PostProductionPanel({
+  originalUrl,
+  job,
+  artifacts,
+  report,
+  busy,
+  onArtifactsChange,
+  onJobChange,
+  onReportChange,
+  onBusyChange,
+}: {
+  originalUrl?: string;
+  job: PostProductionJob;
+  artifacts: PostProductionArtifacts | null;
+  report: PreflightReport | null;
+  busy: boolean;
+  onArtifactsChange: (value: PostProductionArtifacts | null) => void;
+  onJobChange: (value: PostProductionJob) => void;
+  onReportChange: (value: PreflightReport | null) => void;
+  onBusyChange: (value: boolean) => void;
+}) {
+  async function saveEvents() {
+    if (!artifacts) return;
+    onBusyChange(true);
+    try {
+      const result = await updatePostProductionEvents(
+        job.id,
+        artifacts.timeline.events.map(
+          ({ id, enabled, visualText, interactionType, reviewStatus }) => ({
+            id,
+            enabled,
+            visualText,
+            interactionType,
+            reviewStatus,
+          }),
+        ),
+      );
+      onJobChange(result.job);
+      onArtifactsChange({ ...artifacts, timeline: result.timeline });
+      onReportChange(null);
+      toast.success("Eventos visuais salvos.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível salvar os eventos.");
+    } finally {
+      onBusyChange(false);
+    }
+  }
+
+  async function runPreflight() {
+    onBusyChange(true);
+    try {
+      const result = await runPostProductionPreflight(job.id);
+      onJobChange(result.job);
+      onReportChange(result.report);
+      toast[result.ok ? "success" : "error"](
+        result.ok ? "Preflight aprovado." : "O preflight encontrou blockers.",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Preflight indisponível.");
+    } finally {
+      onBusyChange(false);
+    }
+  }
+
+  async function renderPreview() {
+    onBusyChange(true);
+    try {
+      onJobChange(await renderPostProductionPreview(job.id));
+      toast.success("Prévia em renderização.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível gerar a prévia.");
+    } finally {
+      onBusyChange(false);
+    }
+  }
+
+  async function regeneratePlan() {
+    onBusyChange(true);
+    try {
+      onJobChange(await replanPostProduction(job.id));
+      onArtifactsChange(null);
+      onReportChange(null);
+      toast.success("Plano visual em regeneração.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível regenerar o plano.");
+    } finally {
+      onBusyChange(false);
+    }
+  }
+
+  function patchEvent(
+    eventId: string,
+    patch: {
+      enabled?: boolean;
+      visualText?: string;
+      interactionType?: VisualTimelineEvent["interactionType"];
+    },
+  ) {
+    if (!artifacts) return;
+    onArtifactsChange({
+      ...artifacts,
+      timeline: {
+        ...artifacts.timeline,
+        events: artifacts.timeline.events.map((event) =>
+          event.id === eventId ? { ...event, ...patch } : event,
+        ),
+      },
+    });
+  }
+
+  return (
+    <section
+      id="post-production"
+      className="rounded-xl border border-status-info/30 bg-card p-4 shadow-sm"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="font-display text-sm font-semibold">Pós-produção inteligente</h3>
+          <p className="mt-1 text-xs text-muted-foreground">{job.etapa}</p>
+        </div>
+        <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] font-semibold">
+          {job.status.replaceAll("_", " ")} · {job.progresso}%
+        </span>
+      </div>
+      <Progress value={job.progresso} className="mt-3" />
+      {job.erro ? (
+        <p className="mt-3 rounded bg-destructive/10 p-2 text-xs text-destructive">{job.erro}</p>
+      ) : null}
+
+      {artifacts ? (
+        <>
+          <div className="mt-4 rounded-lg bg-muted/40 p-3">
+            <div className="text-xs font-semibold">Transcrição</div>
+            <p className="mt-1 max-h-28 overflow-y-auto text-xs leading-5 text-muted-foreground">
+              {artifacts.transcript.text}
+            </p>
+          </div>
+          <div className="mt-4 space-y-3">
+            {artifacts.timeline.events.map((event) => (
+              <div key={event.id} className="rounded-lg border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs font-semibold">
+                    {(event.startMs / 1000).toFixed(1)}s–{(event.endMs / 1000).toFixed(1)}s
+                  </div>
+                  <Switch
+                    checked={event.enabled}
+                    onCheckedChange={(enabled) => patchEvent(event.id, { enabled })}
+                    aria-label={`Ativar evento ${event.id}`}
+                  />
+                </div>
+                <p className="mt-2 text-[11px] text-muted-foreground">{event.spokenText}</p>
+                <Select
+                  value={event.interactionType}
+                  disabled={!event.enabled}
+                  onValueChange={(interactionType) =>
+                    patchEvent(event.id, {
+                      interactionType: interactionType as VisualTimelineEvent["interactionType"],
+                    })
+                  }
+                >
+                  <SelectTrigger className="mt-2" aria-label={`Tipo visual do evento ${event.id}`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="caption_emphasis">Destaque de legenda</SelectItem>
+                    <SelectItem value="kinetic_text">Texto cinético</SelectItem>
+                    <SelectItem value="progressive_list">Lista progressiva</SelectItem>
+                    <SelectItem value="supporting_visual">Imagem de apoio</SelectItem>
+                    <SelectItem value="cta_card">CTA</SelectItem>
+                    <SelectItem value="none">Sem intervenção</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Textarea
+                  className="mt-2 min-h-20 resize-y whitespace-pre-wrap"
+                  maxLength={100}
+                  value={event.visualText}
+                  disabled={!event.enabled}
+                  onChange={(input) => patchEvent(event.id, { visualText: input.target.value })}
+                  aria-label={`Texto visual do evento ${event.id}`}
+                />
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void regeneratePlan()}>
+              <RefreshCcw className="mr-1 h-4 w-4" /> Regenerar plano
+            </Button>
+            <Button size="sm" variant="secondary" disabled={busy} onClick={() => void saveEvents()}>
+              <Save className="mr-1 h-4 w-4" /> Salvar eventos
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => void runPreflight()}
+            >
+              Executar preflight
+            </Button>
+            <Button
+              size="sm"
+              disabled={busy || report?.ok === false}
+              onClick={() => void renderPreview()}
+            >
+              Gerar prévia
+            </Button>
+          </div>
+        </>
+      ) : null}
+
+      {report ? (
+        <div className="mt-4 space-y-1 rounded-lg border p-3 text-xs">
+          {report.findings.map((finding) => (
+            <div key={`${finding.code}-${finding.eventId ?? "timeline"}`}>
+              <strong>{finding.classification}</strong> · {finding.message}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {job.status === "preview_ready" ? (
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          <div>
+            <div className="mb-2 text-xs font-semibold">Original</div>
+            {originalUrl ? (
+              <video src={originalUrl} controls className="aspect-[9/16] w-full rounded bg-black" />
+            ) : null}
+          </div>
+          <div>
+            <div className="mb-2 text-xs font-semibold">Prévia editada</div>
+            <video
+              src={postProductionPreviewUrl(job.id)}
+              controls
+              className="aspect-[9/16] w-full rounded bg-black"
+            />
+            <Button className="mt-2" size="sm" variant="secondary" asChild>
+              <a href={postProductionPreviewUrl(job.id, true)}>
+                <Download className="mr-1 h-4 w-4" /> Baixar prévia
+              </a>
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

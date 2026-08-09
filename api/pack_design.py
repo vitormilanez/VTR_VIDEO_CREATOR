@@ -60,7 +60,7 @@ DARK_LAYOUTS = {"hero_photo", "big_statement", "three_points", "photo_overlay", 
 # 55 MB de fotografias no Git.
 PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
     "wide-office": {
-        "file": "data/pack_assets/photos/vine8121.jpg",
+        "file": "data/pack_assets/photos/vine8178.jpg",
         "name": "Consultorio aberto",
         "description": "plano aberto no consultorio, bom para capa com respiro",
         "facePointX": 0.48,
@@ -68,7 +68,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.42,
     },
     "seated-side": {
-        "file": "data/pack_assets/photos/vine8142.jpg",
+        "file": "data/pack_assets/photos/vine8172.jpg",
         "name": "Sentado de lado",
         "description": "sentado de perfil, espaco lateral para texto",
         "facePointX": 0.46,
@@ -76,7 +76,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.36,
     },
     "seated-lean": {
-        "file": "data/pack_assets/photos/vine8150.jpg",
+        "file": "data/pack_assets/photos/vine8163.jpg",
         "name": "Sentado inclinado",
         "description": "sentado inclinado, corpo inteiro e olhar direto",
         "facePointX": 0.44,
@@ -84,7 +84,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.34,
     },
     "seated-arm": {
-        "file": "data/pack_assets/photos/vine8163.jpg",
+        "file": "data/pack_assets/photos/vine8150.jpg",
         "name": "Sentado com braco apoiado",
         "description": "retrato vertical com postura clinica e fundo limpo",
         "facePointX": 0.52,
@@ -92,7 +92,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.39,
     },
     "seated-front": {
-        "file": "data/pack_assets/photos/vine8172.jpg",
+        "file": "data/pack_assets/photos/vine8142.jpg",
         "name": "Sentado de frente",
         "description": "corpo inteiro de frente, ideal para capa e CTA",
         "facePointX": 0.44,
@@ -100,7 +100,7 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "brightness": 0.31,
     },
     "portrait-closeup": {
-        "file": "data/pack_assets/photos/vine8178.jpg",
+        "file": "data/pack_assets/photos/vine8121.jpg",
         "name": "Retrato proximo",
         "description": "close-up do rosto, ideal para citacao medica",
         "facePointX": 0.52,
@@ -213,6 +213,10 @@ def normalize_slide(slide: dict[str, Any], index: int = 0) -> dict[str, Any]:
     photo = slide.get("photoAsset") if isinstance(slide.get("photoAsset"), dict) else None
     if photo and photo.get("id") in PHOTO_LIBRARY:
         fields["photoId"] = str(photo["id"])
+        # O ID semântico é estável; o caminho pode ter sido salvo por uma
+        # versão com o mapeamento das fotos trocado. Reidrata sempre a partir
+        # da biblioteca canônica para migrar Packs existentes.
+        photo = photo_asset(fields["photoId"])
     elif fields["photoId"] in PHOTO_LIBRARY:
         photo = photo_asset(fields["photoId"])
 
@@ -290,6 +294,21 @@ _GENERIC_MYTH_FALLBACKS = {
 
 def _has_item_content(value: Any) -> bool:
     return isinstance(value, dict) and bool(_text(value.get("title")) or _text(value.get("text")))
+
+
+def pack_slides(pack: dict[str, Any]) -> list[Any]:
+    """Retorna a lista canônica do carrossel, aceitando o alias legado ``slides``."""
+    # A interface edita ``carousel``. Quando um Pack antigo contém os dois
+    # campos, priorizar ``slides`` restaura silenciosamente fotos e layouts
+    # antigos na próxima leitura.
+    candidates = [pack.get("carousel"), pack.get("slides")]
+    for candidate in candidates:
+        if isinstance(candidate, list) and candidate:
+            return candidate
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return candidate
+    return []
 
 
 def _repair_layout_semantics(slide: dict[str, Any]) -> None:
@@ -405,6 +424,72 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
         }
 
 
+def _legacy_context_slide(raw_slides: list[Any]) -> dict[str, Any]:
+    """Cria o slide de contexto para Packs antigos de seis telas.
+
+    Esta migração precisa ser local: Packs já salvos não devem voltar a chamar
+    o Claude apenas porque o contrato editorial passou de seis para sete
+    slides. O texto é reaproveitado do explainer existente sempre que possível
+    e cai para uma frase editorial neutra quando o Pack antigo não o possui.
+    """
+    source: dict[str, Any] | None = None
+    for index, raw_slide in enumerate(raw_slides):
+        if not isinstance(raw_slide, dict):
+            continue
+        normalized = normalize_slide(raw_slide, index)
+        if normalized["layoutId"] == "explainer":
+            source = normalized
+            break
+
+    source_fields = source["fields"] if source else {}
+    headline = _text(source_fields.get("subheadline")) or _text(source_fields.get("headline"))
+    body = _text(source_fields.get("body"))
+    fields = empty_fields()
+    fields.update(
+        {
+            "eyebrow": "Contexto",
+            "headline": _fit_copy(headline or "O contexto também importa", 64),
+            "body": _fit_copy(body, 90),
+            "footer": "Entenda antes de decidir",
+        }
+    )
+    return {"layoutId": "explainer", "variant": "light", "fields": fields}
+
+
+def _repair_missing_context_slide(slides: list[Any]) -> None:
+    """Garante o explainer central inclusive em Packs já migrados e salvos."""
+    if len(slides) != PACK_SLIDE_COUNT:
+        return
+    if any(
+        isinstance(slide, dict) and slide.get("layoutId") == "explainer"
+        for slide in slides[2:5]
+    ):
+        return
+
+    target = slides[3]
+    if not isinstance(target, dict):
+        return
+    fields = target.get("fields") if isinstance(target.get("fields"), dict) else empty_fields()
+    neighbor_bodies = [
+        (slide.get("fields") or {}).get("body")
+        for slide in (slides[4], slides[2])
+        if isinstance(slide, dict) and isinstance(slide.get("fields"), dict)
+    ]
+    fields["eyebrow"] = _fit_copy(fields.get("eyebrow") or "Contexto", 22)
+    fields["headline"] = _fit_copy(fields.get("headline") or "O contexto também importa", 56)
+    fields["body"] = _fit_copy(
+        fields.get("body")
+        or next((_text(body) for body in neighbor_bodies if _text(body)), "")
+        or "Cada pessoa precisa de avaliação individual e acompanhamento médico.",
+        280,
+    )
+    target["layoutId"] = "explainer"
+    target["layout"] = "explainer"
+    target["variant"] = "light"
+    target["fields"] = fields
+    _repair_required_items(fields, "explainer", LAYOUT_SPECS["explainer"])
+
+
 def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
     """Ajusta excesso de caracteres antes da validacao final do contrato.
 
@@ -413,9 +498,15 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
     mais invalide o Pack inteiro por uma diferenca editorial trivial.
     """
     repaired = deepcopy(pack)
-    raw_slides = repaired.get("slides") if isinstance(repaired.get("slides"), list) else repaired.get("carousel")
-    if not isinstance(raw_slides, list):
+    raw_slides = pack_slides(repaired)
+    if not raw_slides:
         return repaired
+
+    migrated_six_slide_pack = len(raw_slides) == PACK_SLIDE_COUNT - 1
+    if migrated_six_slide_pack:
+        # O slide novo entra antes do explainer/autoridade antigo para manter
+        # a narrativa: gancho -> tensao -> contexto -> explicacao -> CTA.
+        raw_slides = [*raw_slides[:3], _legacy_context_slide(raw_slides), *raw_slides[3:]]
 
     slides: list[Any] = []
     for index, raw_slide in enumerate(raw_slides):
@@ -455,8 +546,11 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
                 fields["body"] = body[len(fact):].lstrip(" .:;–—")
         slides.append(slide)
 
+    _repair_missing_context_slide(slides)
     repaired["slides"] = slides
     repaired["carousel"] = slides
+    if migrated_six_slide_pack:
+        repaired["schemaVersion"] = PACK_SCHEMA_VERSION
     return repaired
 
 
@@ -477,8 +571,8 @@ _EMOJI_RE = re.compile(
 
 def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    slides = pack.get("slides") if isinstance(pack.get("slides"), list) else pack.get("carousel")
-    if not isinstance(slides, list):
+    slides = pack_slides(pack)
+    if not slides:
         return [f"slides precisa ser uma lista com {PACK_SLIDE_COUNT} itens"]
     if len(slides) != PACK_SLIDE_COUNT:
         errors.append(f"slides tem {len(slides)} itens; esperado: {PACK_SLIDE_COUNT}")

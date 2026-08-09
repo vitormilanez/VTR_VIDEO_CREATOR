@@ -3,6 +3,12 @@
 import type { HydratePayload } from "../store";
 import type { AppSettings, CalendarPost, EditorialTone, Idea, Script, Trend } from "../mock-data";
 import type { VideoJob } from "../mock-data";
+import type {
+  DurationPreset,
+  EditorAssistResult,
+  EditorOperation,
+  MedicalReviewStatus,
+} from "../script-editor";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
 
@@ -68,6 +74,13 @@ async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
           })
           .filter(Boolean)
           .join(" ");
+      } else if (
+        b.detail &&
+        typeof b.detail === "object" &&
+        "message" in b.detail &&
+        typeof (b.detail as { message?: unknown }).message === "string"
+      ) {
+        detail = String((b.detail as { message: string }).message);
       } else if (b.detail) {
         detail = JSON.stringify(b.detail);
       }
@@ -291,6 +304,15 @@ export async function saveScript(script: Script): Promise<Script> {
   return response.script;
 }
 
+/** Exclui o roteiro no Sheets; o backend bloqueia quando existe vídeo ou agendamento vinculado. */
+export async function deleteScript(scriptId: string): Promise<{ id: string; title: string }> {
+  const response = await requestJson<{ ok: boolean; id: string; title: string }>(
+    `/api/sheets/roteiros/${encodeURIComponent(scriptId)}`,
+    { method: "DELETE" },
+  );
+  return { id: response.id, title: response.title };
+}
+
 /** Cria um agendamento real na aba Calendario do Sheets. */
 export async function appendCalendarPost(post: Omit<CalendarPost, "id">): Promise<CalendarPost> {
   const response = await postJson<{ ok: boolean; post: CalendarPost }>(
@@ -421,18 +443,307 @@ export interface PackSlide {
   photoAsset?: Omit<PackPhotoAsset, "url"> | null;
 }
 
+export type VoiceMood = "confident" | "upbeat" | "warm" | "serious" | "neutral";
+export type GenerationMode = "direct" | "video_agent" | "cinematic" | "story";
+
+export interface HeyGenProviderCapabilities {
+  provider: "heygen";
+  cliVersion: string;
+  capabilitiesVersion: string;
+  checkedAt: string;
+  videoAgent: {
+    supported: boolean;
+    supportsStyleId: boolean;
+    supportsBrandKitId: boolean;
+    supportsChatMode: boolean;
+    supportsAttachments: boolean;
+    orientations: string[];
+    modes: string[];
+  };
+  directVideo: {
+    supported: boolean;
+    supportedTypes: string[];
+    supportedEngines: string[];
+    supportedResolutions: string[];
+    supportedAspectRatios: string[];
+  };
+}
+
+export interface StoryReferenceAsset {
+  id: string;
+  kind: "image" | "video" | "document";
+  sha256: string;
+  description: string;
+}
+
+export interface StoryBrief {
+  storyType: "historical_explainer" | "medical_explainer" | "narrative_explainer";
+  educationalGoal: string;
+  period: string;
+  location: string;
+  realismLevel: "high" | "medium" | "stylized";
+  historicalAccuracy: "strict" | "inspired" | "not_applicable";
+  tone: "curious_educational" | "documentary" | "warm_explainer" | "dramatic_restrained";
+  durationSeconds: number;
+  orientation: "portrait" | "landscape" | "square";
+  productionTier: "standard" | "cinematic" | "premium";
+  maxHeyGenJobs: number;
+  maxRegenerationsPerShot: number;
+  maxBudgetUsd: number | null;
+  characterId: string | null;
+  lookId: string | null;
+  characterDescription: string;
+  wardrobeDirection: string;
+  referenceAssets: StoryReferenceAsset[];
+}
+
+export interface StoryPlanShot {
+  id: string;
+  order: number;
+  narrativePurpose: string;
+  shotType: "avatar_anchor" | "historical_broll" | "modern_broll" | "transition" | "local_asset";
+  strategy: "avatar_anchor" | "cinematic_broll" | "local_transition";
+  providerStrategy: "video_agent" | "direct_video" | "local_compositor";
+  subject: string;
+  durationSeconds: number;
+  speech: {
+    mode: "avatar_speaks" | "voice_continues_from_base_scene";
+    startWordIndex: number;
+    endWordIndex: number;
+  };
+  character: { required: boolean; characterId: string | null; lookId: string | null };
+  environment: string;
+  period: string;
+  wardrobe: string;
+  action: string;
+  camera: { framing: string; movement: string; lens: string };
+  lighting: string;
+  atmosphere: string;
+  continuityKeys: string[];
+  referenceAssetIds: string[];
+  negativePrompt: string[];
+  heygenPrompt: string;
+  audioPolicy: "preserve_base_narration" | "mute_generated_audio";
+  estimatedCost: { heygenJobs: number; anthropicCalls: 0 };
+}
+
+export interface StoryPlan {
+  contractVersion: "story-contract-v2";
+  storyBible: {
+    premise: string;
+    educationalGoal: string;
+    narrativeArc: { opening: string; development: string; turn: string; ending: string };
+    historicalSetting: {
+      period: string;
+      location: string;
+      accuracyMode: "strict" | "inspired" | "not_applicable";
+    };
+  };
+  characterBible: {
+    characterId: string | null;
+    lookId: string | null;
+    identityRule: string;
+    voiceRule: string;
+    wardrobe: { base: string; accessories: string[]; colors: string[] };
+    forbiddenChanges: string[];
+  };
+  visualBible: {
+    palette: string;
+    lighting: string;
+    cameraStyle: string;
+    texture: string;
+    forbiddenAnachronisms: string[];
+  };
+  medicalAssertions: [];
+  shots: StoryPlanShot[];
+}
+
+export interface StoryShotRecord {
+  id: string;
+  storyVersionId: string;
+  shotId: string;
+  order: number;
+  provider: StoryPlanShot["providerStrategy"];
+  prompt: StoryPlanShot;
+  promptHash: string;
+  continuityHash: string;
+  controls: {
+    promptOverride: string;
+    lockIdentity: boolean;
+    lockWardrobe: boolean;
+    lockEnvironment: boolean;
+    approved: boolean;
+  };
+  status: "review" | "approved" | string;
+  shotRevision: number;
+  currentGenerationId?: string | null;
+  thumbnailPath?: string | null;
+  currentGeneration?: StoryShotGeneration | null;
+}
+
+export interface StoryShotGeneration {
+  id: string;
+  storyShotId: string;
+  storyVersionId: string;
+  shotRevision: number;
+  strategy: StoryPlanShot["strategy"];
+  provider: StoryPlanShot["providerStrategy"];
+  prompt: string;
+  spokenText: string;
+  avatarId: string | null;
+  durationSeconds: number;
+  continuity: Record<string, unknown>;
+  idempotencyKey: string;
+  providerJobId: string | null;
+  outputPath: string | null;
+  outputUrl: string | null;
+  status: "ready" | "generating" | "submitted" | "completed" | "failed" | "needs_regeneration";
+  retrySafe: boolean;
+  estimatedCostUsd: number | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoryComposition {
+  id: string;
+  scriptId: string;
+  storyVersionId: string;
+  status: "processando" | "pronto" | "erro";
+  progresso: number;
+  videoUrl: string;
+  outputPath: string;
+  duracaoSegundos?: number;
+  shotCount?: number;
+  sourceShotGenerations: string[];
+  baseNarrationJobId: string;
+  narrationPolicy?: "base_audio_continuous";
+  captions?: boolean;
+  erro?: string;
+}
+
+export interface StoryBudgetIssue {
+  code: string;
+  severity: "blocking" | "warning" | "info";
+  message: string;
+  suggestedAction: string;
+}
+
+export interface StoryBudget {
+  initialHeyGenJobs: number;
+  maxRegenerationJobs: number;
+  worstCaseHeyGenJobs: number;
+  maxHeyGenJobs: number;
+  maxRegenerationsPerShot: number;
+  providerJobCounts: Record<string, number>;
+  providerRatesUsd: Record<string, number | null>;
+  estimatedInitialUsd: number | null;
+  estimatedWorstCaseUsd: number | null;
+  maxBudgetUsd: number | null;
+  estimatedAnthropicCalls: number;
+  issues: StoryBudgetIssue[];
+  approvalEligible: boolean;
+  budgetHash: string;
+}
+
+export interface StoryCritiqueRecord {
+  id: string;
+  storyVersionId: string;
+  critiqueRevision: number;
+  critique: {
+    contractVersion: "story-critic-v1";
+    decision: "ready" | "changes_required" | "blocked";
+    overallRisk: "low" | "medium" | "high";
+    summary: string;
+    issues: Array<{
+      code: string;
+      category: string;
+      severity: "info" | "warning" | "blocking";
+      shotIds: string[];
+      message: string;
+      suggestedAction: string;
+    }>;
+    shotAssessments: Array<{
+      shotId: string;
+      difficulty: "low" | "medium" | "high";
+      continuityRisk: "low" | "medium" | "high";
+      historicalRisk: "low" | "medium" | "high" | "not_applicable";
+      medicalRisk: "low" | "medium" | "high";
+      recommendedProvider: StoryPlanShot["providerStrategy"];
+      recommendationReason: string;
+      redundantWithShotId: string | null;
+    }>;
+  };
+  budget: StoryBudget;
+  critiqueHash: string;
+  model: string;
+  createdAt: string;
+}
+
+export interface StoryVersion {
+  id: string;
+  storyProjectId: string;
+  storyRevision: number;
+  scriptRevision: number;
+  finalSpeechHash: string;
+  scriptContractVersion: string;
+  storyContractVersion: string;
+  providerCapabilitiesVersion: string;
+  storyHash: string;
+  promptVersion: string;
+  model: string;
+  activeCritiqueId: string | null;
+  activeCritique?: StoryCritiqueRecord | null;
+  storyBibleApproved: boolean;
+  budgetApproved: boolean;
+  budgetApproval: Record<string, unknown> | null;
+  approved: boolean;
+  approvedAt: string | null;
+  createdAt: string;
+  plan: StoryPlan;
+  shots?: StoryShotRecord[];
+  composition?: StoryComposition | null;
+}
+
+export interface StoryProject {
+  id: string;
+  scriptId: string;
+  status: string;
+  activeStoryVersion: string | null;
+  productionTier: StoryBrief["productionTier"];
+  brief: StoryBrief;
+  budget: {
+    maxHeyGenJobs: number;
+    maxRegenerationsPerShot: number;
+    maxBudgetUsd: number | null;
+  };
+  activeVersion: StoryVersion | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoryBindings {
+  scriptRevision: number;
+  finalSpeechHash: string;
+  scriptContractVersion: string;
+  storyContractVersion: string;
+  storyPromptVersion: string;
+}
+
 export interface ProductionProfile {
   scriptId: string;
   avatarId: string;
   voiceId: string;
   speechMode: "natural" | "fiel" | "direto" | "enfatico";
-  generationMode: "direct" | "video_agent";
+  voiceMood: VoiceMood;
+  generationMode: GenerationMode;
   avatarMode?: "single" | "set";
   avatarSetId?: string | null;
   primaryAvatarId?: string | null;
   positionCount?: 1 | 2;
   musicTrackId?: string | null;
   musicVolume?: number;
+  cinematicPrompt?: string;
   updatedAt?: string;
 }
 
@@ -471,9 +782,12 @@ export interface ScenePlanScene {
   estimatedEnd: number;
 }
 
+export type SceneTransitionStyle = "smooth" | "hard_cut" | "dip_to_black";
+
 export interface ScenePlan {
   scriptId: string;
   scenes: ScenePlanScene[];
+  transitionStyle: SceneTransitionStyle;
   updatedAt: string;
 }
 
@@ -484,6 +798,7 @@ export interface SceneGenerationRequest {
   voiceId: string;
   spokenText: string;
   speechMode: "natural" | "fiel" | "direto" | "enfatico";
+  voiceMood: VoiceMood;
   orientation: "portrait" | "landscape";
 }
 
@@ -504,7 +819,8 @@ export interface SceneDirectionSuggestion {
   reason: string;
 }
 
-export type VideoVisualType = "none" | "full_slide" | "overlay" | "statistic" | "comparison" | "quote";
+export type VideoVisualType =
+  "none" | "full_slide" | "overlay" | "statistic" | "comparison" | "quote";
 export type VideoVisualLayout =
   | "hero_photo"
   | "photo_split"
@@ -695,7 +1011,14 @@ export interface PackForExport {
 export async function exportPack(
   script: Script,
   pack: PackForExport,
-): Promise<{ ok: boolean; relative: string; folder: string; files: number }> {
+): Promise<{
+  ok: boolean;
+  relative: string;
+  folder: string;
+  files: number;
+  images: number;
+  warning?: string;
+}> {
   const res = await fetch(`${BASE}/api/packs/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -715,6 +1038,8 @@ export async function exportPack(
     relative: string;
     folder: string;
     files: number;
+    images: number;
+    warning?: string;
   };
 }
 
@@ -737,18 +1062,221 @@ export async function saveProductionProfile(
   return response.profile;
 }
 
+export async function fetchHeyGenProviderCapabilities(): Promise<HeyGenProviderCapabilities> {
+  const response = await requestJson<{
+    ok: boolean;
+    capabilities: HeyGenProviderCapabilities;
+  }>("/api/providers/heygen/capabilities", { method: "GET" });
+  return response.capabilities;
+}
+
+export async function fetchStoryProject(scriptId: string): Promise<{
+  project: StoryProject | null;
+  bindings: StoryBindings;
+}> {
+  const response = await requestJson<{
+    ok: boolean;
+    project: StoryProject | null;
+    bindings: StoryBindings;
+  }>(`/api/scripts/${encodeURIComponent(scriptId)}/story`, { method: "GET" });
+  return { project: response.project, bindings: response.bindings };
+}
+
+export async function saveStoryBrief(
+  scriptId: string,
+  brief: StoryBrief,
+  bindings: Pick<StoryBindings, "scriptRevision" | "finalSpeechHash" | "scriptContractVersion">,
+): Promise<StoryProject> {
+  const response = await requestJson<{ ok: boolean; project: StoryProject }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/story/brief`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        brief,
+        expectedScriptRevision: bindings.scriptRevision,
+        expectedFinalSpeechHash: bindings.finalSpeechHash,
+        scriptContractVersion: bindings.scriptContractVersion,
+      }),
+    },
+  );
+  return response.project;
+}
+
+export async function planStory(
+  scriptId: string,
+  brief: StoryBrief,
+  bindings: Pick<StoryBindings, "scriptRevision" | "finalSpeechHash" | "scriptContractVersion">,
+  providerCapabilitiesVersion: string,
+): Promise<{ project: StoryProject; version: StoryVersion; cacheHit: boolean }> {
+  return requestJson<{ project: StoryProject; version: StoryVersion; cacheHit: boolean }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/story/plan`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        brief,
+        expectedScriptRevision: bindings.scriptRevision,
+        expectedFinalSpeechHash: bindings.finalSpeechHash,
+        scriptContractVersion: bindings.scriptContractVersion,
+        expectedProviderCapabilitiesVersion: providerCapabilitiesVersion,
+        confirmed: true,
+      }),
+    },
+  );
+}
+
+export async function reviseStoryVersion(
+  version: StoryVersion,
+  plan: StoryPlan,
+  shotReviews: StoryShotRecord["controls"][],
+  providerCapabilitiesVersion: string,
+  storyBibleApproved: boolean,
+): Promise<{ project: StoryProject; version: StoryVersion }> {
+  const reviews = plan.shots.map((shot, index) => ({
+    shotId: shot.id,
+    ...(shotReviews[index] || {
+      promptOverride: "",
+      lockIdentity: true,
+      lockWardrobe: true,
+      lockEnvironment: false,
+      approved: false,
+    }),
+  }));
+  return requestJson<{ project: StoryProject; version: StoryVersion }>(
+    `/api/story-versions/${encodeURIComponent(version.id)}/revise`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expectedStoryHash: version.storyHash,
+        expectedProviderCapabilitiesVersion: providerCapabilitiesVersion,
+        plan,
+        shotReviews: reviews,
+        storyBibleApproved,
+        reason: "Edição humana do storyboard.",
+        idempotencyKey: newVersionKey(`story-revision:${version.id}`),
+      }),
+    },
+  );
+}
+
+export async function critiqueStoryVersion(
+  version: StoryVersion,
+  providerCapabilitiesVersion: string,
+  forceNewVersion = false,
+): Promise<{ critique: StoryCritiqueRecord; version: StoryVersion; cacheHit: boolean }> {
+  return requestJson<{
+    critique: StoryCritiqueRecord;
+    version: StoryVersion;
+    cacheHit: boolean;
+  }>(`/api/story-versions/${encodeURIComponent(version.id)}/critique`, {
+    method: "POST",
+    body: JSON.stringify({
+      expectedStoryHash: version.storyHash,
+      expectedProviderCapabilitiesVersion: providerCapabilitiesVersion,
+      confirmed: true,
+      forceNewVersion,
+      idempotencyKey: forceNewVersion ? newVersionKey(`story-critique:${version.id}`) : undefined,
+    }),
+  });
+}
+
+export async function approveStoryVersion(
+  version: StoryVersion,
+  critique: StoryCritiqueRecord,
+): Promise<{ project: StoryProject; version: StoryVersion }> {
+  return requestJson<{ project: StoryProject; version: StoryVersion }>(
+    `/api/story-versions/${encodeURIComponent(version.id)}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        critiqueId: critique.id,
+        expectedStoryHash: version.storyHash,
+        expectedBudgetHash: critique.budget.budgetHash,
+        approvalActor: "editor_user",
+        confirmed: true,
+      }),
+    },
+  );
+}
+
+export async function generateStoryShot(
+  version: StoryVersion,
+  shot: StoryShotRecord,
+  critique: StoryCritiqueRecord,
+  regenerate = false,
+): Promise<{ generation: StoryShotGeneration; deduplicated: boolean; ok: boolean }> {
+  const nextRevision = (shot.currentGeneration?.shotRevision ?? 0) + 1;
+  const response = await requestJson<{
+    generation: StoryShotGeneration;
+    deduplicated: boolean;
+    ok: boolean;
+  }>(`/api/story-shots/${encodeURIComponent(shot.id)}/generate`, {
+    method: "POST",
+    body: JSON.stringify({
+      expectedStoryHash: version.storyHash,
+      expectedPromptHash: shot.promptHash,
+      expectedBudgetHash: critique.budget.budgetHash,
+      idempotencyKey: `story-shot:${shot.id}:revision:${nextRevision}`,
+      regenerate,
+      confirmed: true,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(response.generation.error || "O provider não confirmou a geração do shot.");
+  }
+  return response;
+}
+
+export async function refreshStoryShot(generationId: string): Promise<StoryShotGeneration> {
+  const response = await requestJson<{ ok: boolean; generation: StoryShotGeneration }>(
+    `/api/story-shot-generations/${encodeURIComponent(generationId)}/refresh`,
+    { method: "POST" },
+  );
+  return response.generation;
+}
+
+export function storyShotMediaUrl(generation: StoryShotGeneration, thumbnail = false) {
+  const path = thumbnail
+    ? `/api/story-shot-generations/${encodeURIComponent(generation.id)}/thumbnail`
+    : generation.outputUrl ||
+      `/api/story-shot-generations/${encodeURIComponent(generation.id)}/file`;
+  return /^https?:\/\//.test(path) ? path : `${BASE}${path}`;
+}
+
+export async function composeStoryVersion(version: StoryVersion): Promise<StoryComposition> {
+  const response = await requestJson<{ ok: boolean; job: StoryComposition }>(
+    `/api/story-versions/${encodeURIComponent(version.id)}/compose`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expectedStoryHash: version.storyHash,
+        confirmed: true,
+      }),
+    },
+  );
+  return response.job;
+}
+
+export function storyCompositionMediaUrl(composition: StoryComposition, download = false) {
+  const path = download
+    ? `/api/videos/${encodeURIComponent(composition.id)}/download`
+    : composition.videoUrl || `/api/videos/${encodeURIComponent(composition.id)}/file`;
+  return /^https?:\/\//.test(path) ? path : `${BASE}${path}`;
+}
+
 export async function fetchMusicTracks(): Promise<MusicTrack[]> {
   const response = await requestJson<{ ok: boolean; tracks: MusicTrack[] }>("/api/music-tracks", {
     method: "GET",
   });
-  return response.tracks;
+  return response.tracks.map((track) => ({
+    ...track,
+    url: /^https?:\/\//.test(track.url) ? track.url : `${BASE}${track.url}`,
+  }));
 }
 
 export async function fetchAvatarSets(): Promise<AvatarSet[]> {
-  const response = await requestJson<{ ok: boolean; avatarSets: AvatarSet[] }>(
-    "/api/avatar-sets",
-    { method: "GET" },
-  );
+  const response = await requestJson<{ ok: boolean; avatarSets: AvatarSet[] }>("/api/avatar-sets", {
+    method: "GET",
+  });
   return response.avatarSets;
 }
 
@@ -789,10 +1317,11 @@ export async function saveScenePlan(
     estimatedStart: number;
     estimatedEnd: number;
   }>,
+  transitionStyle: SceneTransitionStyle = "smooth",
 ): Promise<ScenePlan> {
   const response = await requestJson<{ ok: boolean; scenePlan: ScenePlan }>(
     `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan`,
-    { method: "PUT", body: JSON.stringify({ scenes }) },
+    { method: "PUT", body: JSON.stringify({ scenes, transitionStyle }) },
   );
   return response.scenePlan;
 }
@@ -801,11 +1330,13 @@ export async function fetchSceneGenerationPlan(
   scriptId: string,
   options?: {
     speechMode?: SceneGenerationRequest["speechMode"];
+    voiceMood?: VoiceMood;
     orientation?: SceneGenerationRequest["orientation"];
   },
 ): Promise<SceneGenerationResult> {
   const query = new URLSearchParams({
     speechMode: options?.speechMode || "natural",
+    voiceMood: options?.voiceMood || "confident",
     orientation: options?.orientation || "portrait",
   });
   const response = await requestJson<{ ok: boolean; generation: SceneGenerationResult }>(
@@ -821,9 +1352,14 @@ export async function submitSceneGeneration(
     orientation: "portrait" | "landscape";
     durationSeconds: 10 | 15 | 30 | 45 | 60;
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
+    voiceMood: VoiceMood;
     captions: boolean;
     optimizePronunciation: boolean;
+    forceNewVersion?: boolean;
     idempotencyKey?: string;
+    expectedScriptRevision?: number;
+    expectedFinalSpeechHash?: string;
+    contractVersion?: string;
   },
 ): Promise<{ generation: SceneGenerationResult; jobs: VideoJob[] }> {
   const response = await requestJson<{
@@ -974,7 +1510,7 @@ export interface HeyGenCatalog {
   defaultAvatarId?: string | null;
   defaultVoiceId?: string | null;
   speechPresets?: Record<string, { speed: number; pitch: number; volume: number; locale: string }>;
-  generationModes?: Array<"direct" | "video_agent">;
+  generationModes?: GenerationMode[];
   directDurations?: Array<10 | 15 | 30 | 45 | 60>;
 }
 
@@ -1016,6 +1552,8 @@ export interface AvatarJob {
   voiceId?: string | null;
   voiceStatus?: string | null;
   consentUrl?: string | null;
+  consentStatus?: string | null;
+  setupWarning?: string | null;
   previewImageUrl?: string | null;
   previewVideoUrl?: string | null;
   createdAt: string;
@@ -1119,17 +1657,30 @@ export async function createHeyGenVideo(
     orientation: "portrait" | "landscape";
     durationSeconds: 10 | 15 | 30 | 45 | 60;
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
-    generationMode: "direct" | "video_agent";
+    voiceMood: VoiceMood;
+    generationMode: GenerationMode;
     ctaMode?: "auto" | "manual" | "none" | "visual";
     captions: boolean;
     optimizePronunciation: boolean;
     styleId?: string;
+    brandKitId?: string;
+    videoAgentMode?: "generate" | "chat";
     forceNewVersion?: boolean;
     narrationText?: string;
     displayText?: string;
     spokenText?: string;
+    cinematicPrompt?: string;
     outroText?: string;
     idempotencyKey?: string;
+    medicalReviewStatus?: MedicalReviewStatus;
+    humanReviewApproved?: boolean;
+    aiOperationInFlight?: boolean;
+    aiSchemaValid?: boolean;
+    editorTechnicalError?: string | null;
+    finalConfirmed?: boolean;
+    expectedScriptRevision?: number;
+    expectedFinalSpeechHash?: string;
+    contractVersion?: string;
   },
 ): Promise<VideoJob> {
   const baseKey = stableProductionKey("video", {
@@ -1148,6 +1699,95 @@ export async function createHeyGenVideo(
   return ((await res.json()) as { job: VideoJob }).job;
 }
 
+export interface ScriptEditorAssistInput {
+  operation: EditorOperation;
+  scriptId?: string;
+  text: string;
+  title: string;
+  sourceText?: string;
+  contextText?: string;
+  medicalCautions?: string;
+  riskLevel?: string;
+  claims?: string[];
+  glossary?: string[];
+  cta?: string;
+  durationSeconds: DurationPreset;
+  speechProfileId?: string;
+  editorialProfileId?: string;
+  humanReviewApproved?: boolean;
+}
+
+export interface ScriptEditorState {
+  scriptId: string;
+  durationSeconds: DurationPreset;
+  humanReviewApproved: boolean;
+  titleChoice: "current" | "suggested";
+  suggestedTitle?: string | null;
+  schemaValid: boolean;
+  technicalError?: string | null;
+  previousScript?: string | null;
+  lastResult?: EditorAssistResult | null;
+  scriptRevision: number;
+  finalSpeechHash?: string | null;
+  approvedScriptRevision?: number | null;
+  approvedFinalSpeechHash?: string | null;
+  approvalHistory?: Array<{
+    actor: string;
+    timestamp: string;
+    previousStatus: string;
+    nextStatus: string;
+    scriptRevision: number;
+    finalSpeechHash?: string | null;
+    reason?: string | null;
+  }>;
+  contractVersion: string;
+  updatedAt?: string | null;
+  legacyFallback?: boolean;
+}
+
+const editorAssistInFlight = new Map<string, Promise<EditorAssistResult>>();
+
+export function runScriptEditorAssist(input: ScriptEditorAssistInput): Promise<EditorAssistResult> {
+  const key = JSON.stringify(input);
+  const existing = editorAssistInFlight.get(key);
+  if (existing) return existing;
+  const request = postJson<EditorAssistResult>("/api/scripts/editor-assist", input).finally(() => {
+    editorAssistInFlight.delete(key);
+  });
+  editorAssistInFlight.set(key, request);
+  return request;
+}
+
+export async function fetchScriptEditorState(scriptId: string): Promise<ScriptEditorState> {
+  const response = await requestJson<{ ok: boolean; state: ScriptEditorState }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/editor-state`,
+    { method: "GET" },
+  );
+  return response.state;
+}
+
+export async function saveScriptEditorState(
+  scriptId: string,
+  state: Omit<
+    ScriptEditorState,
+    | "scriptId"
+    | "scriptRevision"
+    | "finalSpeechHash"
+    | "approvedScriptRevision"
+    | "approvedFinalSpeechHash"
+    | "approvalHistory"
+    | "contractVersion"
+    | "updatedAt"
+    | "legacyFallback"
+  >,
+): Promise<ScriptEditorState> {
+  const response = await requestJson<{ ok: boolean; state: ScriptEditorState }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/editor-state`,
+    { method: "PUT", body: JSON.stringify(state) },
+  );
+  return response.state;
+}
+
 export async function naturalizeScript(input: {
   text: string;
   medicalCautions: string;
@@ -1156,7 +1796,7 @@ export async function naturalizeScript(input: {
   ctaMode?: "auto" | "manual" | "none" | "visual";
   manualCta?: string;
   recentCtas?: string[];
-  generationMode?: "direct" | "video_agent";
+  generationMode?: GenerationMode;
 }): Promise<{
   text: string;
   displayText: string;
@@ -1194,11 +1834,16 @@ export async function createHeyGenPreview(
     voiceId: string;
     orientation: "portrait" | "landscape";
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
+    voiceMood: VoiceMood;
     captions: boolean;
     optimizePronunciation: boolean;
     displayText: string;
     spokenText?: string;
     idempotencyKey?: string;
+    finalConfirmed?: boolean;
+    expectedScriptRevision?: number;
+    expectedFinalSpeechHash?: string;
+    contractVersion?: string;
   },
 ): Promise<VideoJob> {
   const idempotencyKey =
@@ -1220,6 +1865,266 @@ export async function createHeyGenPreview(
 
 export function videoDownloadUrl(jobId: string): string {
   return `${BASE}/api/videos/${encodeURIComponent(jobId)}/download`;
+}
+
+export function videoFileUrl(jobId: string): string {
+  return `${BASE}/api/videos/${encodeURIComponent(jobId)}/file`;
+}
+
+export type PostProductionStatus =
+  | "queued"
+  | "transcribing"
+  | "planning"
+  | "preflight"
+  | "rendering_preview"
+  | "preview_ready"
+  | "failed"
+  | "cancelled"
+  | "stale"
+  | "needs_review";
+
+export interface PostProductionJob {
+  id: string;
+  kind: "post_production";
+  videoJobId: string;
+  status: PostProductionStatus;
+  progresso: number;
+  etapa: string;
+  criadoEm: string;
+  atualizadoEm: string;
+  erro?: string;
+  plannerMode?: "cache" | "fallback" | "anthropic";
+}
+
+export interface VisualTimelineEvent {
+  id: string;
+  startWordIndex: number;
+  endWordIndex: number;
+  startMs: number;
+  endMs: number;
+  spokenText: string;
+  interactionType:
+    | "none"
+    | "caption_emphasis"
+    | "kinetic_text"
+    | "progressive_list"
+    | "supporting_visual"
+    | "cta_card";
+  visualText: string;
+  enabled: boolean;
+  reviewStatus: "pending" | "approved" | "rejected";
+  reason: string;
+  confidence: number;
+}
+
+export interface PostProductionArtifacts {
+  transcript: {
+    text: string;
+    language: string;
+    durationMs: number;
+    words: Array<{ index: number; startMs: number; endMs: number; text: string }>;
+  };
+  timeline: {
+    version: string;
+    stale: boolean;
+    events: VisualTimelineEvent[];
+  };
+}
+
+export interface PreflightReport {
+  ok: boolean;
+  checkedAt: string;
+  findings: Array<{
+    code: string;
+    classification: "BLOCKER" | "WARNING" | "INFO";
+    message: string;
+    eventId?: string;
+  }>;
+}
+
+export async function createPostProduction(
+  videoJobId: string,
+  autoRender = false,
+): Promise<PostProductionJob> {
+  const response = await postJson<{ job: PostProductionJob }>("/api/post-production", {
+    videoJobId,
+    autoRender,
+  });
+  return response.job;
+}
+
+export async function fetchPostProduction(jobId: string): Promise<PostProductionJob> {
+  const response = await requestJson<{ job: PostProductionJob }>(
+    `/api/post-production/${encodeURIComponent(jobId)}`,
+    {},
+  );
+  return response.job;
+}
+
+export async function fetchLatestPostProduction(
+  videoJobId: string,
+): Promise<PostProductionJob | null> {
+  const response = await requestJson<{ job: PostProductionJob | null }>(
+    `/api/videos/${encodeURIComponent(videoJobId)}/post-production`,
+    {},
+  );
+  return response.job;
+}
+
+export async function fetchPostProductionArtifacts(
+  jobId: string,
+): Promise<PostProductionArtifacts> {
+  return requestJson<PostProductionArtifacts>(
+    `/api/post-production/${encodeURIComponent(jobId)}/artifacts`,
+    {},
+  );
+}
+
+export async function updatePostProductionEvents(
+  jobId: string,
+  events: Array<
+    Pick<VisualTimelineEvent, "id"> &
+      Partial<
+        Pick<VisualTimelineEvent, "enabled" | "visualText" | "reviewStatus" | "interactionType">
+      >
+  >,
+): Promise<{ job: PostProductionJob; timeline: PostProductionArtifacts["timeline"] }> {
+  return requestJson(`/api/post-production/${encodeURIComponent(jobId)}/events`, {
+    method: "PATCH",
+    body: JSON.stringify({ events }),
+  });
+}
+
+export async function runPostProductionPreflight(
+  jobId: string,
+): Promise<{ ok: boolean; report: PreflightReport; job: PostProductionJob }> {
+  return postJson(`/api/post-production/${encodeURIComponent(jobId)}/preflight`, {});
+}
+
+export async function renderPostProductionPreview(jobId: string): Promise<PostProductionJob> {
+  const response = await postJson<{ job: PostProductionJob }>(
+    `/api/post-production/${encodeURIComponent(jobId)}/render`,
+    {},
+  );
+  return response.job;
+}
+
+export async function replanPostProduction(jobId: string): Promise<PostProductionJob> {
+  const response = await postJson<{ job: PostProductionJob }>(
+    `/api/post-production/${encodeURIComponent(jobId)}/replan`,
+    {},
+  );
+  return response.job;
+}
+
+export function postProductionPreviewUrl(jobId: string, download = false): string {
+  return `${BASE}/api/post-production/${encodeURIComponent(jobId)}/preview${download ? "?download=true" : ""}`;
+}
+
+export interface LocalVideoKitConfig {
+  name: string;
+  role: string;
+  title: string;
+  subtitle: string;
+  sectionNumber: string;
+  sectionTitle: string;
+  cta: string;
+  site: string;
+  accent: string;
+  sectionStartSeconds?: number | null;
+  sectionDurationSeconds?: number | null;
+  sectionTransition?: "none" | "fade" | "slide_up" | null;
+  musicTrackId?: string | null;
+  musicVolume?: number;
+  includeCaptions: boolean;
+  captionStyle: "dynamic" | "clean" | "editorial";
+  captionPosition: "safe_bottom" | "center" | "upper";
+  highlightKeywords: boolean;
+  duckMusicDuringSpeech: boolean;
+  motionPreset: "none" | "subtle" | "social";
+  enhanceVoice: boolean;
+  outroTailSeconds?: number;
+  includeOpening: boolean;
+  includeLowerThird: boolean;
+  includeSection: boolean;
+  includeOutro: boolean;
+}
+
+export interface LocalVideoKitJob {
+  id: string;
+  status: "fila" | "processando" | "pronto" | "erro";
+  progresso: number;
+  etapa: string;
+  sourceName: string;
+  sourcePath: string;
+  sourceVideoJobId?: string | null;
+  outputPath: string;
+  coverPath?: string;
+  config: LocalVideoKitConfig;
+  externalCreditsUsed: false;
+  duracaoSegundos?: number;
+  erro?: string;
+  criadoEm: string;
+  atualizadoEm: string;
+}
+
+export async function uploadLocalVideoKitSource(
+  file: File,
+): Promise<{ uploadId: string; filename: string; size: number }> {
+  const response = await fetch(`${BASE}/api/local-video-kit/uploads`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "video/mp4",
+      "X-Filename": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, "Não foi possível enviar o vídeo local."));
+  }
+  return (await response.json()) as { uploadId: string; filename: string; size: number };
+}
+
+export async function createLocalVideoKit(input: {
+  uploadId?: string;
+  videoJobId?: string;
+  sourceKitJobId?: string;
+  sourceName: string;
+  config: LocalVideoKitConfig;
+}): Promise<LocalVideoKitJob> {
+  const response = await postJson<{ ok: boolean; job: LocalVideoKitJob }>("/api/local-video-kit", {
+    uploadId: input.uploadId,
+    videoJobId: input.videoJobId,
+    sourceKitJobId: input.sourceKitJobId,
+    sourceName: input.sourceName,
+    ...input.config,
+  });
+  return response.job;
+}
+
+export async function fetchLocalVideoKit(jobId: string): Promise<LocalVideoKitJob> {
+  const response = await requestJson<{ job: LocalVideoKitJob }>(
+    `/api/local-video-kit/${encodeURIComponent(jobId)}`,
+    {},
+  );
+  return response.job;
+}
+
+export async function fetchLocalVideoKitJobs(): Promise<LocalVideoKitJob[]> {
+  const response = await requestJson<{ jobs: LocalVideoKitJob[] }>("/api/local-video-kit", {});
+  return response.jobs;
+}
+
+export function localVideoKitSourceUrl(jobId: string): string {
+  return `${BASE}/api/local-video-kit/${encodeURIComponent(jobId)}/source`;
+}
+
+export function localVideoKitResultUrl(jobId: string, download = false): string {
+  return `${BASE}/api/local-video-kit/${encodeURIComponent(jobId)}/result${download ? "?download=true" : ""}`;
+}
+
+export function localVideoKitCoverUrl(jobId: string, download = false): string {
+  return `${BASE}/api/local-video-kit/${encodeURIComponent(jobId)}/cover${download ? "?download=true" : ""}`;
 }
 
 export interface CutClip {
@@ -1335,7 +2240,9 @@ export function cutFileUrl(projectId: string, filename: string, download = false
   }`;
 }
 
-export async function refreshHeyGenVideo(jobId: string): Promise<{ job: VideoJob; composedJob?: VideoJob | null }> {
+export async function refreshHeyGenVideo(
+  jobId: string,
+): Promise<{ job: VideoJob; composedJob?: VideoJob | null }> {
   const res = await fetch(`${BASE}/api/videos/${jobId}/refresh`, { method: "POST" });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel consultar o HeyGen."));
   return (await res.json()) as { job: VideoJob; composedJob?: VideoJob | null };
@@ -1409,8 +2316,12 @@ export async function publishVideoToInstagram(input: {
 
 async function errorDetail(res: Response, fallback: string): Promise<string> {
   try {
-    const body = (await res.json()) as { detail?: string };
-    return body.detail || fallback;
+    const body = (await res.json()) as {
+      detail?: string | { code?: string; message?: string };
+    };
+    if (typeof body.detail === "string") return body.detail;
+    if (body.detail?.message) return body.detail.message;
+    return fallback;
   } catch {
     return fallback;
   }

@@ -122,8 +122,13 @@ function formatIdeaCreatedAt(value: string) {
   const differenceMinutes = Math.round((Date.now() - timestamp) / 60_000);
   if (differenceMinutes <= 1) return "agora";
   if (differenceMinutes < 60) return `há ${differenceMinutes} min`;
-  if (differenceMinutes < 24 * 60) return `hoje às ${new Date(timestamp).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
-  return new Date(timestamp).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+  if (differenceMinutes < 24 * 60)
+    return `hoje às ${new Date(timestamp).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
+  return new Date(timestamp).toLocaleDateString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
 }
 
 function IdeiasLayout() {
@@ -711,10 +716,13 @@ export function IdeiasPage() {
       )}
 
       <Sheet open={!!preview} onOpenChange={(o) => !o && setPreview(null)}>
-        <SheetContent side="right" className="w-full sm:max-w-md">
+        <SheetContent
+          side="right"
+          className="flex h-dvh w-full flex-col overflow-hidden p-0 sm:max-w-md"
+        >
           {preview && (
-            <>
-              <SheetHeader>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-8 pt-6 [scrollbar-gutter:stable]">
+              <SheetHeader className="pr-8">
                 <SheetTitle>{preview.titulo}</SheetTitle>
                 <SheetDescription>Preview da ideia.</SheetDescription>
               </SheetHeader>
@@ -789,7 +797,7 @@ export function IdeiasPage() {
                   </Link>
                 </Button>
               </div>
-            </>
+            </div>
           )}
         </SheetContent>
       </Sheet>
@@ -1143,7 +1151,10 @@ function IdeaSuggestionCard({
               <Badge className="bg-status-info text-status-info-foreground">Recomendada</Badge>
             ) : null}
             {saved ? (
-              <Badge variant="outline" className="border-status-success/40 bg-status-success/5 text-status-success-foreground">
+              <Badge
+                variant="outline"
+                className="border-status-success/40 bg-status-success/5 text-status-success-foreground"
+              >
                 Salva na lista
               </Badge>
             ) : null}

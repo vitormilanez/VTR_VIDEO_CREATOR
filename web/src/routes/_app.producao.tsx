@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { ExternalLink, Film, RefreshCcw } from "lucide-react";
+import { ExternalLink, Film, Layers3, RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/producao")({
@@ -64,9 +64,11 @@ export function ProducaoPage() {
     <AppShell
       title="Producao de videos"
       actions={
-        <div className="text-[11px] text-muted-foreground">
-          Jobs reais sao criados somente pelo envio explicito de um roteiro.
-        </div>
+        <Button asChild size="sm" variant="secondary">
+          <Link to="/kit-local" search={{ videoJobId: undefined, sourceName: undefined }}>
+            <Layers3 className="mr-1.5 h-4 w-4" /> Aplicar kit local
+          </Link>
+        </Button>
       }
     >
       <StatusChips

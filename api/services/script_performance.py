@@ -4,10 +4,12 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from api.services.script_editor import duration_limits
 from integrations.portuguese_br import prepare_script_for_heygen_voice
 
 
 SpeechMode = Literal["natural", "direto", "enfatico", "fiel"]
+VoiceMood = Literal["confident", "upbeat", "warm", "serious", "neutral"]
 CtaMode = Literal["auto", "manual", "none", "visual"]
 
 VARIABLE_CTAS = [
@@ -25,6 +27,40 @@ SPEECH_PRESETS: dict[str, dict[str, Any]] = {
     "direto": {"speed": 1.0, "pitch": 0, "volume": 1, "locale": "pt-BR"},
     "enfatico": {"speed": 0.98, "pitch": 0, "volume": 1, "locale": "pt-BR"},
     "fiel": {"speed": 1.0, "pitch": 0, "volume": 1, "locale": "pt-BR"},
+}
+
+
+VOICE_MOOD_PRESETS: dict[str, dict[str, Any]] = {
+    "confident": {
+        "speedMultiplier": 1.02,
+        "pitch": 1,
+        "direction": (
+            "confident, positive and reassuring, with conversational energy; "
+            "never sad or melancholic"
+        ),
+    },
+    "upbeat": {
+        "speedMultiplier": 1.04,
+        "pitch": 2,
+        "direction": (
+            "upbeat, lively and optimistic, with clear enthusiasm but without sounding theatrical"
+        ),
+    },
+    "warm": {
+        "speedMultiplier": 0.99,
+        "pitch": 0,
+        "direction": "warm, empathetic and approachable; gentle, but not sad or slow",
+    },
+    "serious": {
+        "speedMultiplier": 0.99,
+        "pitch": -1,
+        "direction": "serious, objective and composed; informative, not gloomy or alarmist",
+    },
+    "neutral": {
+        "speedMultiplier": 1.0,
+        "pitch": 0,
+        "direction": "neutral, clear and natural; avoid sadness, drama or exaggerated enthusiasm",
+    },
 }
 
 
@@ -59,30 +95,13 @@ PERFORMANCE_SCHEMA = {
 
 
 def duration_word_limits(duration_seconds: int) -> tuple[int, int]:
-    return {
-        10: (18, 24),
-        15: (25, 36),
-        30: (55, 72),
-        45: (85, 108),
-        60: (115, 144),
-    }.get(duration_seconds, (85, 108))
+    """Faixa de geração do perfil central, sem usar o limite rígido como meta."""
+    return duration_limits(duration_seconds)
 
 
 def video_agent_word_limits(duration_seconds: int) -> tuple[int, int]:
-    """Faixa conservadora para o Video Agent.
-
-    O Agent adiciona pausas, cortes e interacoes visuais. Por isso a mesma
-    quantidade de palavras usada na geracao direta costuma produzir um video
-    mais longo. Esta faixa deixa espaco para essa edicao sem adicionar nenhuma
-    instrucao extra ao prompt enviado ao HeyGen.
-    """
-    return {
-        10: (16, 21),
-        15: (22, 30),
-        30: (45, 62),
-        45: (68, 84),
-        60: (90, 108),
-    }.get(duration_seconds, (68, 84))
+    """Todos os modos usam o mesmo perfil central de fala e duração."""
+    return duration_limits(duration_seconds)
 
 
 def speech_preset(mode: str) -> dict[str, Any]:
@@ -91,6 +110,26 @@ def speech_preset(mode: str) -> dict[str, Any]:
 
 def speech_speed(mode: str) -> float:
     return float(speech_preset(mode)["speed"])
+
+
+def voice_mood_preset(mood: str) -> dict[str, Any]:
+    return dict(VOICE_MOOD_PRESETS.get(mood, VOICE_MOOD_PRESETS["confident"]))
+
+
+def voice_mood_direction(mood: str) -> str:
+    return str(voice_mood_preset(mood)["direction"])
+
+
+def voice_settings(mode: str, mood: str = "confident") -> dict[str, Any]:
+    """Combina ritmo e humor usando apenas ajustes aceitos pelo Direct Avatar."""
+    settings = speech_preset(mode)
+    mood_preset = voice_mood_preset(mood)
+    settings["speed"] = round(
+        min(1.5, max(0.5, float(settings["speed"]) * float(mood_preset["speedMultiplier"]))),
+        2,
+    )
+    settings["pitch"] = float(mood_preset["pitch"])
+    return settings
 
 
 def strip_known_outros(text: str, selected_outro: str = "") -> str:

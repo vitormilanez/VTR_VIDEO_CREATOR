@@ -95,6 +95,8 @@ export interface VideoJob {
   criadoEm: string;
   atualizadoEm: string;
   videoUrl?: string;
+  localVideoUrl?: string;
+  remoteVideoUrl?: string;
   thumbnailUrl?: string;
   duracaoSegundos?: number;
   erro?: string;
@@ -110,7 +112,7 @@ export interface VideoJob {
   sceneCount?: number;
   visualCount?: number;
   productionSettings?: {
-    generationMode?: "direct" | "video_agent";
+    generationMode?: "direct" | "video_agent" | "cinematic";
     voiceSpeed?: number;
     [key: string]: unknown;
   };

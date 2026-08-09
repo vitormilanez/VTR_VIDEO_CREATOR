@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from api import cut_service, server
 from api.job_store import JobStore
@@ -21,6 +21,7 @@ SCRIPT_HEADERS = server.SCRIPT_HEADERS.copy()
 class FakeSheetsClient:
     def __init__(self) -> None:
         self.values = [SCRIPT_HEADERS]
+        self.deleted_row: tuple[str, int] | None = None
 
     def get_values(self, _range_name: str) -> list[list[str]]:
         return self.values
@@ -34,6 +35,11 @@ class FakeSheetsClient:
             row_number = int(range_name.split("!A", 1)[1].split(":", 1)[0])
             self.values[row_number - 1] = [str(value) for value in rows[0]]
         return {"updatedRange": range_name}
+
+    def delete_row(self, sheet_title: str, row_number: int) -> dict:
+        self.deleted_row = (sheet_title, row_number)
+        self.values.pop(row_number - 1)
+        return {"replies": [{}]}
 
 
 class FakeCalendarClient:
@@ -72,6 +78,50 @@ class FakeRadarClient:
 
 
 class StableIdTests(unittest.TestCase):
+    def test_auto_render_post_production_continues_after_analysis(self) -> None:
+        import threading
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            job_id = "post-auto-render"
+            store.upsert(
+                "post_production",
+                {
+                    "id": job_id,
+                    "kind": "post_production",
+                    "videoJobId": "video-ready",
+                    "status": "queued",
+                    "progresso": 2,
+                    "etapa": "Na fila",
+                    "autoRender": True,
+                    "criadoEm": "2026-08-07T00:00:00+00:00",
+                    "atualizadoEm": "2026-08-07T00:00:00+00:00",
+                },
+            )
+            rendered = threading.Event()
+
+            def finish_analysis(**_kwargs: object) -> None:
+                current = store.get("post_production", job_id)
+                assert current is not None
+                current.update(status="needs_review", progresso=80, etapa="Plano pronto")
+                store.upsert("post_production", current)
+
+            with (
+                patch.object(server, "_job_store", return_value=store),
+                patch.object(server, "analyze_post_production", side_effect=finish_analysis),
+                patch.object(
+                    server,
+                    "_launch_post_production_render",
+                    side_effect=lambda _job_id: rendered.set(),
+                ),
+            ):
+                server._launch_post_production_analysis(job_id)
+                self.assertTrue(rendered.wait(2), "A renderização automática não foi iniciada.")
+
+            updated = store.get("post_production", job_id)
+            self.assertEqual(updated["status"], "rendering_preview")
+            self.assertEqual(updated["etapa"], "Aplicando edição elegante")
+
     def test_claude_array_schemas_do_not_use_unsupported_size_keywords(self) -> None:
         def assert_compatible(value: object) -> None:
             if isinstance(value, dict):
@@ -197,7 +247,8 @@ class StableIdTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["aspect_ratio"], "9:16")
-        self.assertEqual(payload["voice_settings"]["speed"], 1.0)
+        self.assertEqual(payload["voice_settings"]["speed"], 1.02)
+        self.assertEqual(payload["voice_settings"]["pitch"], 1.0)
         self.assertEqual(payload["voice_settings"]["locale"], "pt-BR")
         self.assertNotIn("\n", payload["script"])
         self.assertNotIn("duration", payload)
@@ -308,7 +359,8 @@ class StableIdTests(unittest.TestCase):
                 submitted_payload = run.call_args.kwargs["payload"]
                 self.assertEqual(run.call_args.args[1], ["video", "create"])
                 self.assertNotIn("\n", submitted_payload["script"])
-                self.assertEqual(submitted_payload["voice_settings"]["speed"], 1.0)
+                self.assertEqual(submitted_payload["voice_settings"]["speed"], 1.02)
+                self.assertEqual(submitted_payload["voice_settings"]["pitch"], 1.0)
                 self.assertEqual(result["job"]["remoteVideoId"], "direct-video-1")
                 self.assertNotIn("remoteSessionId", result["job"])
                 self.assertEqual(
@@ -649,6 +701,99 @@ class StableIdTests(unittest.TestCase):
         )
         self.assertEqual(run.call_args_list[1].kwargs["payload"], {})
 
+    def test_photo_avatar_skips_unrequired_consent_and_preserves_look_id(self) -> None:
+        media = server.AvatarMediaIn(
+            name="avatar.png",
+            mimeType="image/png",
+            data=base64.b64encode(b"image-content").decode("ascii"),
+        )
+        response = {
+            "data": {
+                "avatar_group": {
+                    "id": "group-photo",
+                    "name": "Avatar por foto",
+                    "status": "completed",
+                    "consent_status": None,
+                },
+                "avatar_item": {
+                    "id": "look-photo",
+                    "group_id": "group-photo",
+                    "avatar_type": "photo_avatar",
+                    "status": "completed",
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            with (
+                patch.object(server, "_heygen_cli", return_value="heygen"),
+                patch.object(server, "_run_heygen_json", return_value=response) as run,
+                patch.object(server, "_job_store", return_value=store),
+            ):
+                result = server.create_heygen_avatar(
+                    server.AvatarCreateIn(
+                        name="Avatar por foto",
+                        creationType="photo",
+                        media=[media],
+                        consentAccepted=True,
+                    )
+                )
+
+            stored = store.get("avatar", result["job"]["id"])
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(result["job"]["groupId"], "group-photo")
+        self.assertEqual(result["job"]["avatarId"], "look-photo")
+        self.assertEqual(result["job"]["status"], "completed")
+        self.assertIsNone(result["job"]["consentUrl"])
+        self.assertEqual(stored["avatarId"], "look-photo")
+
+    def test_consent_failure_returns_created_avatar_instead_of_502(self) -> None:
+        media = server.AvatarMediaIn(
+            name="avatar.mp4",
+            mimeType="video/mp4",
+            data=base64.b64encode(b"video-content").decode("ascii"),
+        )
+        responses = [
+            {
+                "data": {
+                    "avatar_group": {
+                        "id": "group-created",
+                        "status": "pending_consent",
+                        "consent_status": "pending",
+                    },
+                    "avatar_item": {
+                        "id": "look-created",
+                        "group_id": "group-created",
+                        "avatar_type": "digital_twin",
+                    },
+                }
+            },
+            server.HTTPException(status_code=502, detail="Consent unavailable"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            with (
+                patch.object(server, "_heygen_cli", return_value="heygen"),
+                patch.object(server, "_run_heygen_json", side_effect=responses),
+                patch.object(server, "_job_store", return_value=store),
+            ):
+                result = server.create_heygen_avatar(
+                    server.AvatarCreateIn(
+                        name="Avatar parcialmente configurado",
+                        creationType="digital_twin",
+                        media=[media],
+                        consentAccepted=True,
+                    )
+                )
+
+            stored = store.get("avatar", result["job"]["id"])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["job"]["groupId"], "group-created")
+        self.assertIn("foi criado", result["job"]["setupWarning"])
+        self.assertEqual(stored["groupId"], "group-created")
+
     def test_existing_video_requires_explicit_new_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             jobs_file = Path(temporary) / "video_jobs.json"
@@ -689,6 +834,42 @@ class StableIdTests(unittest.TestCase):
             finally:
                 server.VIDEO_JOBS = original_jobs
                 server.OPERATIONAL_DB = original_database
+
+    def test_completed_heygen_video_is_archived_under_content_videos(self) -> None:
+        with tempfile.TemporaryDirectory(dir=server.ROOT / "data") as temporary:
+            root = Path(temporary)
+            original_outputs = server.PRODUCED_VIDEO_OUTPUTS
+            server.PRODUCED_VIDEO_OUTPUTS = root / "content" / "videos" / "produzidos"
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            response.iter_content.return_value = [b"video-", b"content"]
+            response.__enter__.return_value = response
+            response.__exit__.return_value = False
+            job = {
+                "id": "v-ready",
+                "scriptId": "s-ready",
+                "status": "pronto",
+                "videoUrl": "https://files2.heygen.ai/video/v-ready.mp4",
+            }
+            try:
+                with (
+                    patch.object(server, "_find_script", return_value={"titulo": "Vídeo pronto"}),
+                    patch.object(server.requests, "get", return_value=response) as get,
+                ):
+                    archived = server._archive_completed_video(job)
+            finally:
+                server.PRODUCED_VIDEO_OUTPUTS = original_outputs
+
+            output = server.ROOT / archived["outputPath"]
+            self.assertEqual(output.read_bytes(), b"video-content")
+            self.assertIn("content/videos/produzidos", archived["outputPath"])
+            self.assertEqual(archived["remoteVideoUrl"], job["remoteVideoUrl"])
+            self.assertEqual(archived["videoUrl"], "/api/videos/v-ready/file")
+            get.assert_called_once_with(
+                "https://files2.heygen.ai/video/v-ready.mp4",
+                stream=True,
+                timeout=(15, 300),
+            )
 
     def test_mappers_prefer_persisted_ids(self) -> None:
         scripts = server.map_scripts([{"ID": "s-permanente", "Título": "Teste"}])
@@ -1176,14 +1357,205 @@ class StableIdTests(unittest.TestCase):
         second = server._production_configuration_key(base, base.displayText or "", base.spokenText or "")
         changed_avatar = base.model_copy(update={"avatarId": "avatar-b"})
         changed_spoken = base.model_copy(update={"spokenText": "Texto diferente para a voz."})
+        changed_cinematic = base.model_copy(
+            update={"cinematicPrompt": "Gui caminhando pela cidade com apoios discretos no fundo."}
+        )
+        video_agent = base.model_copy(update={"generationMode": "video_agent"})
+        video_agent_with_cinematic_text = video_agent.model_copy(
+            update={"cinematicPrompt": "Este texto não pode entrar no Video Agent comum."}
+        )
+        cinematic = base.model_copy(
+            update={
+                "generationMode": "cinematic",
+                "cinematicPrompt": "Gui caminhando pela cidade com câmera acompanhando.",
+            }
+        )
+        changed_cinematic_direction = cinematic.model_copy(
+            update={"cinematicPrompt": "Gui parado em uma praça com câmera fixa."}
+        )
+        changed_voice_mood = base.model_copy(update={"voiceMood": "upbeat"})
         self.assertEqual(first, second)
         self.assertNotEqual(first, server._production_configuration_key(changed_avatar, changed_avatar.displayText or "", changed_avatar.spokenText or ""))
         self.assertNotEqual(first, server._production_configuration_key(changed_spoken, changed_spoken.displayText or "", changed_spoken.spokenText or ""))
+        self.assertEqual(
+            first,
+            server._production_configuration_key(
+                changed_cinematic,
+                changed_cinematic.displayText or "",
+                changed_cinematic.spokenText or "",
+            ),
+        )
+        self.assertEqual(
+            server._production_configuration_key(
+                video_agent,
+                video_agent.displayText or "",
+                video_agent.spokenText or "",
+            ),
+            server._production_configuration_key(
+                video_agent_with_cinematic_text,
+                video_agent_with_cinematic_text.displayText or "",
+                video_agent_with_cinematic_text.spokenText or "",
+            ),
+        )
+        self.assertNotEqual(
+            server._production_configuration_key(
+                cinematic,
+                cinematic.displayText or "",
+                cinematic.spokenText or "",
+            ),
+            server._production_configuration_key(
+                changed_cinematic_direction,
+                changed_cinematic_direction.displayText or "",
+                changed_cinematic_direction.spokenText or "",
+            ),
+        )
+        self.assertNotEqual(
+            first,
+            server._production_configuration_key(
+                changed_voice_mood,
+                changed_voice_mood.displayText or "",
+                changed_voice_mood.spokenText or "",
+            ),
+        )
         with patch.object(server.uuid, "uuid4", side_effect=[type("Uuid", (), {"hex": "a" * 32})(), type("Uuid", (), {"hex": "b" * 32})()]):
             self.assertNotEqual(
                 f"{first}:version:{server.uuid.uuid4().hex}",
                 f"{first}:version:{server.uuid.uuid4().hex}",
             )
+
+    def test_video_agent_prompt_keeps_script_and_treats_cinematic_as_visual_only(self) -> None:
+        approved_script = "Um estudo mostrou que a obesidade afeta mobilidade, disposição e saúde mental."
+        prompt, mode = server._compose_video_agent_prompt(
+            approved_script,
+            "Gui andando pela cidade com apoios discretos sobre mobilidade no fundo.",
+            45,
+            "upbeat",
+        )
+
+        self.assertEqual(mode, "approved_text_plus_voice_and_cinematic_direction")
+        self.assertIn(approved_script, prompt)
+        self.assertIn("VOICE DELIVERY", prompt)
+        self.assertIn("upbeat, lively and optimistic", prompt)
+        self.assertIn("CINEMATIC DIRECTION", prompt)
+        self.assertIn("do not read aloud", prompt)
+        self.assertIn("Gui andando pela cidade", prompt)
+
+    def test_video_agent_common_flow_does_not_receive_cinematic_direction(self) -> None:
+        narration = (
+            "Este conteúdo educativo explica como mobilidade e saúde podem afetar "
+            "a rotina e reforça a importância da avaliação individual."
+        )
+        leaked_direction = "NÃO ENVIAR: Gui andando pela cidade com ações no fundo."
+        payload = server.VideoCreateIn(
+            scriptId="s-agent-isolated",
+            avatarId="avatar-1",
+            voiceId="voice-1",
+            durationSeconds=30,
+            generationMode="video_agent",
+            narrationText=narration,
+            displayText=narration,
+            spokenText=narration,
+            cinematicPrompt=leaked_direction,
+            outroText="",
+        )
+        job = {
+            "id": "v-agent-isolated",
+            "scriptId": payload.scriptId,
+            "productionSettings": {
+                "cinematicPrompt": leaked_direction,
+                "providerCapabilities": {
+                    "capabilitiesVersion": "heygen-test-v1",
+                    "videoAgent": {
+                        "supported": True,
+                        "supportsStyleId": True,
+                        "supportsBrandKitId": True,
+                        "supportsChatMode": True,
+                        "supportsAttachments": True,
+                        "orientations": ["landscape", "portrait"],
+                        "modes": ["chat", "generate"],
+                    },
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary) / "operations.db")
+            with (
+                patch.object(server, "_job_store", return_value=store),
+                patch.object(server, "_heygen_cli", return_value="heygen"),
+                patch.object(server, "_heygen_wallet", return_value=(10.0, "usd")),
+                patch.object(
+                    server,
+                    "_private_avatar_library",
+                    return_value=([], [{"id": "avatar-1", "status": "completed"}], False),
+                ),
+                patch.object(
+                    server,
+                    "_production_profile",
+                    return_value={"cinematicPrompt": "Direção cinematic salva anteriormente."},
+                ),
+                patch.object(server, "_save_production_profile") as save_profile,
+                patch.object(
+                    server,
+                    "_run_heygen_json",
+                    return_value={"data": {"session_id": "session-agent-1"}},
+                ) as run,
+            ):
+                result = server._create_video_job(
+                    payload,
+                    job,
+                    script={"id": payload.scriptId, "status": "aprovado_clinicamente"},
+                    final_texts=(narration, narration),
+                )
+
+        submitted_args = run.call_args.args[1]
+        submitted_prompt = submitted_args[submitted_args.index("--prompt") + 1]
+        self.assertNotIn(leaked_direction, submitted_prompt)
+        self.assertNotIn("CINEMATIC DIRECTION", submitted_prompt)
+        self.assertEqual(result["job"]["productionSettings"]["generationMode"], "video_agent")
+        self.assertNotIn("cinematicPrompt", result["job"]["productionSettings"])
+        self.assertEqual(
+            save_profile.call_args.args[0]["cinematicPrompt"],
+            "Direção cinematic salva anteriormente.",
+        )
+
+    def test_cinematic_mode_requires_its_own_direction_before_reservation(self) -> None:
+        payload = server.VideoCreateIn(
+            scriptId="s-cinematic",
+            generationMode="cinematic",
+            cinematicPrompt="   ",
+        )
+        with (
+            patch.object(server, "_find_script") as find_script,
+            patch.object(server, "_create_video_job") as submit,
+        ):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.create_video(payload)
+
+        self.assertEqual(raised.exception.status_code, 422)
+        find_script.assert_not_called()
+        submit.assert_not_called()
+
+    def test_direct_voice_moods_change_supported_pitch_and_speed_only(self) -> None:
+        base = {
+            "script": {"titulo": "Informação educativa"},
+            "narration_text": "Uma explicação clara e objetiva.",
+            "avatar_id": "avatar-1",
+            "voice_id": "voice-1",
+            "orientation": "portrait",
+            "speech_mode": "natural",
+            "captions": False,
+            "optimize_pronunciation": False,
+        }
+        confident = server._direct_video_payload(**base, voice_mood="confident")
+        upbeat = server._direct_video_payload(**base, voice_mood="upbeat")
+        neutral = server._direct_video_payload(**base, voice_mood="neutral")
+
+        self.assertEqual(confident["voice_settings"]["pitch"], 1.0)
+        self.assertEqual(upbeat["voice_settings"]["pitch"], 2.0)
+        self.assertEqual(neutral["voice_settings"]["pitch"], 0.0)
+        self.assertGreater(upbeat["voice_settings"]["speed"], neutral["voice_settings"]["speed"])
+        self.assertNotIn("emotion", upbeat["voice_settings"])
 
     def test_spoken_text_compliance_blocks_before_heygen_submission(self) -> None:
         safe_display = "Este conteúdo é educativo e reforça que decisões de saúde precisam de avaliação individual com profissional qualificado em cada situação."
@@ -1237,7 +1609,15 @@ class StableIdTests(unittest.TestCase):
 
                 safe = unsafe.model_copy(update={"spokenText": safe_display})
                 with (
-                    patch.object(server, "_find_script", return_value={"id": "s-preview", "status": "aprovado_clinicamente"}),
+                    patch.object(
+                        server,
+                        "_find_script",
+                        return_value={
+                            "id": "s-preview",
+                            "status": "aprovado_clinicamente",
+                            "textoFalado": safe_display,
+                        },
+                    ),
                     patch.object(server, "_heygen_cli", return_value="heygen"),
                     patch.object(server, "_private_avatar_library", return_value=([], [{"id": "avatar-1", "status": "completed"}], False)),
                     patch.object(server, "_run_heygen_json", return_value={"data": {"video_id": "preview-1"}}),
@@ -1303,6 +1683,136 @@ class StableIdTests(unittest.TestCase):
                     self.assertEqual(server._find_script("s-estavel")["hook"], "Hook revisado")
             finally:
                 server.SNAPSHOT = original_snapshot
+
+    def test_script_delete_removes_sheet_snapshot_and_local_production_data(self) -> None:
+        client = FakeSheetsClient()
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            snapshot = temporary_path / "snapshot.json"
+            snapshot.write_text(
+                json.dumps(
+                    {
+                        "updated_at": "",
+                        "sheets": {"roteiros": [], "calendario": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            original_snapshot = server.SNAPSHOT
+            original_database = server.OPERATIONAL_DB
+            original_jobs = server.VIDEO_JOBS
+            original_slide_outputs = server.VIDEO_SLIDE_OUTPUTS
+            server.SNAPSHOT = snapshot
+            server.OPERATIONAL_DB = temporary_path / "operations.db"
+            server.VIDEO_JOBS = temporary_path / "missing-video-jobs.json"
+            server.VIDEO_SLIDE_OUTPUTS = temporary_path / "video-slides"
+            try:
+                with patch(
+                    "integrations.google_sheets_rest_client.GoogleSheetsRestClient",
+                    return_value=client,
+                ):
+                    server.append_script(
+                        server.ScriptIn(
+                            id="s-delete",
+                            titulo="Roteiro temporário",
+                            hook="Conteúdo temporário para exclusão.",
+                        )
+                    )
+                    server._save_production_profile(
+                        {
+                            "scriptId": "s-delete",
+                            "avatarId": "avatar-1",
+                            "voiceId": "voice-1",
+                            "speechMode": "natural",
+                            "generationMode": "direct",
+                        }
+                    )
+                    server._save_visual_plan("s-delete", {"scenes": []})
+                    server._save_video_slide_render("s-delete", {"assets": []})
+                    server._save_visual_pack(
+                        "s-delete",
+                        {"sourceAvatarId": "avatar-1", "carousel": []},
+                    )
+                    slide_directory = server._video_slide_output_dir("s-delete")
+                    slide_directory.mkdir(parents=True)
+                    (slide_directory / "preview.png").write_bytes(b"preview")
+
+                    result = server.delete_script("s-delete")
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(client.deleted_row, ("Roteiros", 2))
+                self.assertTrue(result["slidesRemoved"])
+                self.assertFalse(slide_directory.exists())
+                self.assertIsNone(server._production_profile("s-delete"))
+                self.assertIsNone(server._get_visual_plan("s-delete"))
+                self.assertIsNone(server._get_video_slide_render("s-delete"))
+                self.assertIsNone(server._get_visual_pack("s-delete"))
+                with self.assertRaises(server.HTTPException) as raised:
+                    server._find_script("s-delete")
+                self.assertEqual(raised.exception.status_code, 404)
+            finally:
+                server.SNAPSHOT = original_snapshot
+                server.OPERATIONAL_DB = original_database
+                server.VIDEO_JOBS = original_jobs
+                server.VIDEO_SLIDE_OUTPUTS = original_slide_outputs
+
+    def test_script_delete_is_blocked_when_video_exists(self) -> None:
+        with (
+            patch.object(
+                server,
+                "_find_script",
+                return_value={"id": "s-protected", "titulo": "Roteiro com vídeo"},
+            ),
+            patch.object(
+                server,
+                "_load_video_jobs",
+                return_value=[
+                    {"id": "v-1", "scriptId": "s-protected", "status": "pronto"}
+                ],
+            ),
+            patch("integrations.google_sheets_rest_client.GoogleSheetsRestClient") as sheets,
+        ):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.delete_script("s-protected")
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("histórico", raised.exception.detail)
+        sheets.assert_not_called()
+
+    def test_script_delete_is_blocked_when_calendar_post_exists(self) -> None:
+        with (
+            patch.object(
+                server,
+                "_find_script",
+                return_value={"id": "s-scheduled", "titulo": "Roteiro agendado"},
+            ),
+            patch.object(server, "_load_video_jobs", return_value=[]),
+            patch.object(
+                server,
+                "_load_snapshot",
+                return_value={
+                    "sheets": {
+                        "calendario": [
+                            {
+                                "ID": "p-1",
+                                "Título/Hook": "Post agendado",
+                                "Data publicação": "08/08/2026",
+                                "Canal": "Instagram",
+                                "Status": "Agendado",
+                                "Roteiro ID": "s-scheduled",
+                            }
+                        ]
+                    }
+                },
+            ),
+            patch("integrations.google_sheets_rest_client.GoogleSheetsRestClient") as sheets,
+        ):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.delete_script("s-scheduled")
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("Calendário", raised.exception.detail)
+        sheets.assert_not_called()
 
     def test_calendar_create_and_reschedule_are_persisted(self) -> None:
         client = FakeCalendarClient()

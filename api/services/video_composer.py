@@ -1,8 +1,8 @@
-"""Compositor local de cenas, Video Slides, overlays e legendas.
+"""Compositor local de cenas, transições, Video Slides, overlays e legendas.
 
 O compositor trabalha somente com arquivos locais. Cada cena é normalizada
-para o mesmo canvas e concatenada em ordem com corte seco; portanto, trocar o
-Avatar Look só pode acontecer entre dois arquivos de cena.
+para o mesmo canvas e unida em ordem; portanto, trocar o Avatar Look só pode
+acontecer entre dois arquivos de cena.
 """
 from __future__ import annotations
 
@@ -20,6 +20,25 @@ from typing import Any, Iterable
 VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
 VIDEO_FPS = 30
+TRANSITION_STYLES = frozenset({"hard_cut", "smooth", "dip_to_black"})
+
+
+@dataclass(frozen=True)
+class TimedOverlay:
+    path: Path
+    start_seconds: float
+    end_seconds: float
+
+
+@dataclass(frozen=True)
+class TimedVideoOverlay:
+    """Vídeo visual em tela cheia; o áudio sempre continua vindo da cena-base."""
+
+    path: Path
+    start_seconds: float
+    end_seconds: float
+    shot_id: str = ""
+    strategy: str = "cinematic_broll"
 
 
 @dataclass(frozen=True)
@@ -32,6 +51,8 @@ class CompositionScene:
     slide_duration_seconds: float = 1.5
     visual_animation: str = "fade"
     overlay_paths: tuple[Path, ...] = ()
+    timed_overlays: tuple[TimedOverlay, ...] = ()
+    timed_video_overlays: tuple[TimedVideoOverlay, ...] = ()
     captions_path: Path | None = None
 
 
@@ -65,7 +86,7 @@ def _caption_image(text: str, destination: Path) -> None:
     document = f"""<!doctype html><html><head><meta charset='utf-8'><style>
     * {{ box-sizing:border-box }} html,body {{ margin:0; width:1080px; height:1920px; background:transparent; overflow:hidden }}
     body {{ display:flex; align-items:flex-end; justify-content:center; padding:0 100px 250px; font-family:Arial,sans-serif }}
-    .caption {{ max-width:880px; padding:18px 28px; color:#fff; background:rgba(0,0,0,.68); border-radius:12px; font-size:54px; font-weight:700; line-height:1.12; text-align:center; text-transform:uppercase; }}
+    .caption {{ max-width:860px; padding:15px 26px; color:#fff; background:rgba(3,23,37,.76); border:1px solid rgba(255,255,255,.12); border-radius:18px; box-shadow:0 12px 34px rgba(0,0,0,.22); font-size:46px; font-weight:700; line-height:1.14; text-align:center; }}
     </style></head><body><div class='caption'>{safe_text}</div></body></html>"""
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -184,6 +205,14 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
             raise ValueError("A duração do apoio visual deve estar entre 0 e 60 segundos.")
     for overlay in scene.overlay_paths:
         _require_file(overlay, f"Overlay da {scene.scene_id}")
+    for overlay in scene.timed_overlays:
+        _require_file(overlay.path, f"Overlay temporizado da {scene.scene_id}")
+        if overlay.start_seconds < 0 or overlay.end_seconds <= overlay.start_seconds:
+            raise ValueError(f"Intervalo inválido no overlay temporizado da {scene.scene_id}.")
+    for overlay in scene.timed_video_overlays:
+        _require_file(overlay.path, f"Vídeo temporizado da {scene.scene_id}")
+        if overlay.start_seconds < 0 or overlay.end_seconds <= overlay.start_seconds:
+            raise ValueError(f"Intervalo inválido no vídeo temporizado da {scene.scene_id}.")
     if scene.captions_path:
         _require_file(scene.captions_path, f"Legendas da {scene.scene_id}")
 
@@ -202,6 +231,13 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
     overlay_start_index = 1 + (1 if slide_input_index is not None else 0)
     for overlay in scene.overlay_paths:
         input_args.extend(["-loop", "1", "-i", str(overlay)])
+    timed_overlay_start_index = overlay_start_index + len(scene.overlay_paths)
+    for overlay in scene.timed_overlays:
+        input_args.extend(["-loop", "1", "-i", str(overlay.path)])
+    timed_video_start_index = timed_overlay_start_index + len(scene.timed_overlays)
+    for overlay in scene.timed_video_overlays:
+        input_args.extend(["-i", str(overlay.path)])
+    caption_start_index = timed_video_start_index + len(scene.timed_video_overlays)
     for caption_asset, _start, _end in caption_assets:
         input_args.extend(["-loop", "1", "-i", str(caption_asset)])
     filters = [
@@ -243,8 +279,50 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
         filters.append(f"[{index}:v]format=rgba[{overlay_label}]")
         filters.append(f"[{previous}][{overlay_label}]overlay=0:0:shortest=1[{output_label}]")
         previous = output_label
+    for timed_index, overlay in enumerate(scene.timed_overlays):
+        input_index = timed_overlay_start_index + timed_index
+        overlay_label = f"timedoverlay{timed_index}"
+        output_label = f"timedcomposed{timed_index}"
+        filters.append(f"[{input_index}:v]format=rgba[{overlay_label}]")
+        filters.append(
+            f"[{previous}][{overlay_label}]overlay=0:0:shortest=1:"
+            f"enable='between(t,{overlay.start_seconds:.3f},{overlay.end_seconds:.3f})'[{output_label}]"
+        )
+        previous = output_label
+    for video_index, overlay in enumerate(scene.timed_video_overlays):
+        input_index = timed_video_start_index + video_index
+        overlay_label = f"timedvideo{video_index}"
+        output_label = f"timedvideocomposed{video_index}"
+        target_duration = overlay.end_seconds - overlay.start_seconds
+        source_duration = max(0.05, _probe_duration(overlay.path))
+        visible_duration = min(source_duration, target_duration)
+        freeze_duration = max(0.0, target_duration - visible_duration)
+        video_filters = [
+            f"[{input_index}:v]scale=1080:1920:force_original_aspect_ratio=increase",
+            "crop=1080:1920",
+            "fps=30",
+            f"trim=duration={visible_duration:.3f}",
+            "setpts=PTS-STARTPTS",
+        ]
+        if freeze_duration > 0.001:
+            video_filters.append(
+                f"tpad=stop_mode=clone:stop_duration={freeze_duration:.3f}"
+            )
+        video_filters.extend(
+            [
+                f"setpts=PTS+{overlay.start_seconds:.3f}/TB",
+                "format=yuv420p",
+            ]
+        )
+        filters.append(",".join(video_filters) + f"[{overlay_label}]")
+        filters.append(
+            f"[{previous}][{overlay_label}]overlay=0:0:shortest=0:eof_action=pass:"
+            f"enable='between(t,{overlay.start_seconds:.3f},{overlay.end_seconds:.3f})'"
+            f"[{output_label}]"
+        )
+        previous = output_label
     for cue_index, (_caption_asset, start, end) in enumerate(caption_assets):
-        input_index = overlay_start_index + len(scene.overlay_paths) + cue_index
+        input_index = caption_start_index + cue_index
         output_label = f"captioned{cue_index}"
         filters.append(f"[{input_index}:v]format=rgba[caption{cue_index}]")
         filters.append(
@@ -329,15 +407,123 @@ def _render_slide(slide_path: Path, destination: Path, duration: float, ffmpeg: 
     )
 
 
+def _concat_segments(segments: list[Path], destination: Path, workdir: Path, ffmpeg: str) -> None:
+    concat_file = workdir / "concat.txt"
+    concat_file.write_text(
+        "\n".join(f"file {shlex.quote(str(path))}" for path in segments) + "\n",
+        encoding="utf-8",
+    )
+    _run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+    )
+
+
+def _transition_segments(
+    segments: list[Path],
+    destination: Path,
+    *,
+    style: str,
+    ffmpeg: str,
+) -> list[dict[str, Any]]:
+    durations = [_probe_duration(path) for path in segments]
+    ffmpeg_transition = "fade" if style == "smooth" else "fadeblack"
+    requested_duration = 0.35 if style == "smooth" else 0.25
+    input_args = [ffmpeg, "-y"]
+    for segment in segments:
+        input_args.extend(["-i", str(segment)])
+    filters: list[str] = []
+    for index in range(len(segments)):
+        filters.extend(
+            [
+                f"[{index}:v]settb=AVTB,setpts=PTS-STARTPTS[v{index}]",
+                f"[{index}:a]aresample=48000,asetpts=PTS-STARTPTS[a{index}]",
+            ]
+        )
+    video_label = "v0"
+    audio_label = "a0"
+    combined_duration = durations[0]
+    transitions: list[dict[str, Any]] = []
+    for index in range(1, len(segments)):
+        duration = min(requested_duration, durations[index - 1] / 2, durations[index] / 2)
+        duration = max(0.05, duration)
+        offset = max(0.0, combined_duration - duration)
+        next_video = f"vx{index}"
+        next_audio = f"ax{index}"
+        filters.append(
+            f"[{video_label}][v{index}]xfade=transition={ffmpeg_transition}:"
+            f"duration={duration:.3f}:offset={offset:.3f}[{next_video}]"
+        )
+        filters.append(
+            f"[{audio_label}][a{index}]acrossfade=d={duration:.3f}:c1=tri:c2=tri[{next_audio}]"
+        )
+        transitions.append(
+            {
+                "fromSegment": index,
+                "toSegment": index + 1,
+                "style": style,
+                "durationSeconds": round(duration, 3),
+            }
+        )
+        video_label = next_video
+        audio_label = next_audio
+        combined_duration += durations[index] - duration
+    input_args.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            f"[{video_label}]",
+            "-map",
+            f"[{audio_label}]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+    )
+    _run(input_args)
+    return transitions
+
+
 def compose_video(
     scenes: Iterable[CompositionScene],
     output_path: Path,
     *,
     background_music_path: Path | None = None,
     background_music_volume: float = 0.12,
+    transition_style: str = "hard_cut",
     ffmpeg_binary: str | None = None,
 ) -> dict[str, Any]:
-    """Compõe cenas em ordem e retorna um manifesto de cortes secos."""
+    """Compõe cenas em ordem e retorna um manifesto das transições aplicadas."""
     scene_list = list(scenes)
     if not scene_list:
         raise ValueError("Informe pelo menos uma cena para compor o vídeo.")
@@ -350,6 +536,8 @@ def compose_video(
         raise ValueError("A saída do compositor deve ser um arquivo .mp4.")
     if not 0.03 <= background_music_volume <= 0.25:
         raise ValueError("O volume da trilha deve estar entre 0.03 e 0.25.")
+    if transition_style not in TRANSITION_STYLES:
+        raise ValueError(f"Transição inválida: {transition_style}.")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     seen_ids: set[str] = set()
@@ -375,6 +563,18 @@ def compose_video(
                     "animation": scene.visual_animation,
                     "audioSource": "avatar",
                 }
+            if scene.timed_video_overlays:
+                avatar_segment["timedVideoOverlays"] = [
+                    {
+                        "shotId": overlay.shot_id,
+                        "strategy": overlay.strategy,
+                        "startSeconds": overlay.start_seconds,
+                        "endSeconds": overlay.end_seconds,
+                        "audioSource": "base_narration",
+                        "generatedAudioMuted": True,
+                    }
+                    for overlay in scene.timed_video_overlays
+                ]
             manifest.append(avatar_segment)
             if scene.slide_path and scene.slide_mode != "during":
                 slide = workdir / f"scene-{index:02d}-slide.mp4"
@@ -388,29 +588,17 @@ def compose_video(
                         "durationSeconds": scene.slide_duration_seconds,
                     }
                 )
-        concat_file = workdir / "concat.txt"
-        concat_file.write_text(
-            "\n".join(f"file {shlex.quote(str(path))}" for path in segments) + "\n",
-            encoding="utf-8",
-        )
         concatenated = workdir / "concatenated.mp4" if background_music_path else output_path
-        _run(
-            [
-                ffmpeg,
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_file),
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                str(concatenated),
-            ]
-        )
+        transitions: list[dict[str, Any]] = []
+        if transition_style == "hard_cut" or len(segments) == 1:
+            _concat_segments(segments, concatenated, workdir, ffmpeg)
+        else:
+            transitions = _transition_segments(
+                segments,
+                concatenated,
+                style=transition_style,
+                ffmpeg=ffmpeg,
+            )
         final_duration: float | None = None
         if background_music_path:
             final_duration = _mix_background_music(
@@ -427,7 +615,8 @@ def compose_video(
         "fps": VIDEO_FPS,
         "sceneCount": len(scene_list),
         "segmentCount": len(manifest),
-        "cutPolicy": "hard_cut",
+        "cutPolicy": transition_style,
+        "transitions": transitions,
         "segments": manifest,
         "backgroundMusic": (
             {

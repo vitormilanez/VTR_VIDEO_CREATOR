@@ -20,11 +20,11 @@ def test_short_claude_narration_is_repaired_to_selected_duration() -> None:
     repaired, applied = server._repair_script_narration(generated, payload)
 
     assert applied is True
-    assert 85 <= len(repaired.split()) <= 108
+    assert 95 <= len(repaired.split()) <= 101
     assert server._narration_quality_issues(repaired, 45, payload.outro) == []
 
 
-def test_video_agent_blocks_text_that_would_overrun_target_duration() -> None:
+def test_video_agent_does_not_add_a_second_duration_gate() -> None:
     narration = (
         "O Mounjaro pode causar efeitos colaterais além das náuseas e vômitos. Estudos apontam riscos "
         "como hipoglicemia, pancreatite, desnutrição, reações alérgicas e problemas na vesícula. Cada "
@@ -37,7 +37,7 @@ def test_video_agent_blocks_text_that_would_overrun_target_duration() -> None:
 
     issues = server._video_agent_narration_quality_issues(narration, 45)
 
-    assert any("Texto longo" in issue for issue in issues)
+    assert not any("Texto longo" in issue for issue in issues)
 
 
 def test_video_agent_blocks_repeated_narrative_before_paid_submission() -> None:

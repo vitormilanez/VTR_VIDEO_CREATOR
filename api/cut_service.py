@@ -14,6 +14,7 @@ from typing import Any, Callable
 import requests
 
 from api.job_store import JobStore
+from api.services.transcript_service import transcription_python
 
 
 class CutCancelled(RuntimeError):
@@ -98,29 +99,7 @@ def _slug(value: str) -> str:
 
 
 def _caption_python(root: Path) -> Path:
-    configured = os.getenv("CUTS_PYTHON", "").strip()
-    candidates = [
-        *([Path(configured)] if configured else []),
-        root / ".venv-cuts" / "bin" / "python",
-        root / ".venv" / "bin" / "python",
-        root.parent / "Video Creator" / ".venv_caption" / "bin" / "python",
-    ]
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        check = subprocess.run(
-            [str(candidate), "-c", "import faster_whisper"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-        if check.returncode == 0:
-            return candidate
-    raise RuntimeError(
-        "Transcricao indisponivel. Execute ./tools/setup_cuts_env.sh ou configure CUTS_PYTHON "
-        "com um Python que tenha faster-whisper instalado."
-    )
+    return transcription_python(root)
 
 
 def _download_source(job_id: str, url: str, destination: Path) -> None:

@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any, Iterator, Literal
 
 
-JobKind = Literal["video", "avatar", "cut"]
+JobKind = Literal["video", "avatar", "cut", "post_production"]
 
 _JOBS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS operational_jobs (
     id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('video', 'avatar', 'cut')),
+    kind TEXT NOT NULL CHECK (kind IN ('video', 'avatar', 'cut', 'post_production')),
     status TEXT NOT NULL,
     idempotency_key TEXT UNIQUE,
     script_id TEXT,
@@ -61,16 +61,16 @@ class JobStore:
             table_sql = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'operational_jobs'"
             ).fetchone()
-            if table_sql and "'cut'" not in str(table_sql["sql"]):
-                connection.execute("ALTER TABLE operational_jobs RENAME TO operational_jobs_v1")
+            if table_sql and "'post_production'" not in str(table_sql["sql"]):
+                connection.execute("ALTER TABLE operational_jobs RENAME TO operational_jobs_before_post_production")
                 connection.execute(_JOBS_TABLE_SQL)
                 connection.execute(
                     """
                     INSERT INTO operational_jobs
-                    SELECT * FROM operational_jobs_v1
+                    SELECT * FROM operational_jobs_before_post_production
                     """
                 )
-                connection.execute("DROP TABLE operational_jobs_v1")
+                connection.execute("DROP TABLE operational_jobs_before_post_production")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_kind_created "
                 "ON operational_jobs(kind, created_at DESC)"
@@ -128,6 +128,29 @@ class JobStore:
         if row["idempotency_key"]:
             payload["idempotencyKey"] = row["idempotency_key"]
         return payload
+
+    @staticmethod
+    def _same_idempotent_request(
+        existing: dict[str, Any] | None,
+        incoming: dict[str, Any],
+    ) -> bool:
+        """Aceita retry somente quando a key representa o mesmo payload.
+
+        Jobs antigos sem fingerprint continuam deduplicáveis entre si. Uma
+        requisição versionada nunca é confundida com um registro legado.
+        """
+
+        if existing is None:
+            return False
+        existing_fingerprint = existing.get("requestFingerprint")
+        incoming_fingerprint = incoming.get("requestFingerprint")
+        if existing_fingerprint is None and incoming_fingerprint is None:
+            return True
+        return bool(
+            existing_fingerprint
+            and incoming_fingerprint
+            and existing_fingerprint == incoming_fingerprint
+        )
 
     @staticmethod
     def _upsert_on(
@@ -208,7 +231,7 @@ class JobStore:
         job: dict[str, Any],
         *,
         idempotency_key: str,
-    ) -> tuple[dict[str, Any], Literal["created", "duplicate"]]:
+    ) -> tuple[dict[str, Any], Literal["created", "duplicate", "conflict"]]:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             duplicate = connection.execute(
@@ -216,7 +239,10 @@ class JobStore:
                 (idempotency_key,),
             ).fetchone()
             if duplicate:
-                return self._record(duplicate) or job, "duplicate"
+                existing = self._record(duplicate)
+                if self._same_idempotent_request(existing, job):
+                    return existing or job, "duplicate"
+                return existing or job, "conflict"
             self._upsert_on(connection, kind, job, idempotency_key)
             return job, "created"
 
@@ -234,7 +260,10 @@ class JobStore:
                 (idempotency_key,),
             ).fetchone()
             if duplicate:
-                return self._record(duplicate) or job, "duplicate"
+                existing = self._record(duplicate)
+                if self._same_idempotent_request(existing, job):
+                    return existing or job, "duplicate"
+                return existing or job, "conflict"
 
             rows = connection.execute(
                 """

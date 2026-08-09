@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import json
+from array import array
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from api import server
-from api.services.video_composer import CompositionScene, compose_video
+from api.services import video_composer
+from api.services.video_composer import (
+    CompositionScene,
+    TimedOverlay,
+    TimedVideoOverlay,
+    compose_video,
+)
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
 class VideoComposerTests(unittest.TestCase):
-    def _mock_video(self, path: Path, color: str) -> None:
+    def _mock_video(
+        self, path: Path, color: str, *, duration: float = 0.7, frequency: int = 900
+    ) -> None:
         subprocess.run(
             [
                 "ffmpeg",
@@ -21,11 +31,11 @@ class VideoComposerTests(unittest.TestCase):
                 "-f",
                 "lavfi",
                 "-i",
-                f"color=c={color}:s=320x240:d=0.7",
+                f"color=c={color}:s=320x240:d={duration}",
                 "-f",
                 "lavfi",
                 "-i",
-                "sine=frequency=900:duration=0.7",
+                f"sine=frequency={frequency}:duration={duration}",
                 "-shortest",
                 "-c:v",
                 "libx264",
@@ -36,6 +46,56 @@ class VideoComposerTests(unittest.TestCase):
             check=True,
             capture_output=True,
         )
+
+    def _sample_rgb(self, path: Path, seconds: float) -> tuple[int, int, int]:
+        process = subprocess.run(
+            [
+                "ffmpeg",
+                "-ss",
+                str(seconds),
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=1:1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return tuple(process.stdout[:3])  # type: ignore[return-value]
+
+    def _audio_frequency(self, path: Path, duration: float) -> float:
+        process = subprocess.run(
+            [
+                "ffmpeg",
+                "-i",
+                str(path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "8000",
+                "-f",
+                "s16le",
+                "pipe:1",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        samples = array("h")
+        samples.frombytes(process.stdout)
+        crossings = sum(
+            1
+            for previous, current in zip(samples, samples[1:])
+            if (previous < 0 <= current) or (previous >= 0 > current)
+        )
+        return crossings / (2 * duration)
 
     def _mock_image(self, path: Path, color: str) -> None:
         subprocess.run(
@@ -169,6 +229,117 @@ class VideoComposerTests(unittest.TestCase):
             duration = float(json.loads(probe.stdout)["format"]["duration"])
             self.assertLess(duration, 1.8)
 
+    def test_composes_two_scenes_with_smooth_transition_and_no_slide(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scene_one = root / "scene-one.mp4"
+            scene_two = root / "scene-two.mp4"
+            output = root / "final.mp4"
+            self._mock_video(scene_one, "blue")
+            self._mock_video(scene_two, "yellow")
+
+            result = compose_video(
+                [
+                    CompositionScene("scene-1", scene_one),
+                    CompositionScene("scene-2", scene_two),
+                ],
+                output,
+                transition_style="smooth",
+            )
+
+            self.assertTrue(output.is_file())
+            self.assertEqual(result["cutPolicy"], "smooth")
+            self.assertEqual(result["segmentCount"], 2)
+            self.assertEqual(len(result["transitions"]), 1)
+            self.assertEqual(result["transitions"][0]["style"], "smooth")
+            self.assertNotIn("visualOverlay", result["segments"][0])
+
+    def test_fade_dark_uses_a_short_fade_through_black(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(video_composer, "_probe_duration", return_value=1.0), patch.object(
+                video_composer, "_run"
+            ) as run:
+                transitions = video_composer._transition_segments(
+                    [root / "scene-one.mp4", root / "scene-two.mp4"],
+                    root / "final.mp4",
+                    style="dip_to_black",
+                    ffmpeg="ffmpeg",
+                )
+
+            command = run.call_args.args[0]
+            filters = command[command.index("-filter_complex") + 1]
+            self.assertIn("transition=fadeblack", filters)
+            self.assertEqual(transitions[0]["style"], "dip_to_black")
+            self.assertEqual(transitions[0]["durationSeconds"], 0.25)
+
+    def test_timed_overlay_keeps_original_duration_and_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            overlay = root / "overlay.png"
+            output = root / "preview.mp4"
+            self._mock_video(source, "blue")
+            self._mock_image(overlay, "green")
+
+            compose_video(
+                [
+                    CompositionScene(
+                        "post-production",
+                        source,
+                        timed_overlays=(TimedOverlay(overlay, 0.15, 0.5),),
+                    )
+                ],
+                output,
+            )
+
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+                    "-show_entries", "format=duration", "-of", "json", str(output),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            metadata = json.loads(probe.stdout)
+            self.assertEqual({stream["codec_type"] for stream in metadata["streams"]}, {"video", "audio"})
+            self.assertAlmostEqual(float(metadata["format"]["duration"]), 0.7, delta=0.15)
+
+    def test_full_screen_shots_keep_base_narration_and_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            narration = root / "narration.mp4"
+            first_shot = root / "shot-01.mp4"
+            second_shot = root / "shot-02.mp4"
+            output = root / "story.mp4"
+            self._mock_video(narration, "blue", duration=2.4, frequency=900)
+            self._mock_video(first_shot, "red", duration=1.2, frequency=250)
+            self._mock_video(second_shot, "green", duration=1.2, frequency=350)
+
+            manifest = compose_video(
+                [
+                    CompositionScene(
+                        "story-mode",
+                        narration,
+                        timed_video_overlays=(
+                            TimedVideoOverlay(first_shot, 0, 1.2, "shot-01"),
+                            TimedVideoOverlay(second_shot, 1.2, 2.4, "shot-02"),
+                        ),
+                    )
+                ],
+                output,
+            )
+
+            overlays = manifest["segments"][0]["timedVideoOverlays"]
+            self.assertEqual([overlay["shotId"] for overlay in overlays], ["shot-01", "shot-02"])
+            self.assertTrue(all(overlay["generatedAudioMuted"] for overlay in overlays))
+            first_rgb = self._sample_rgb(output, 0.5)
+            second_rgb = self._sample_rgb(output, 1.7)
+            self.assertGreater(first_rgb[0], first_rgb[1])
+            self.assertGreater(second_rgb[1], second_rgb[0])
+            self.assertAlmostEqual(self._audio_frequency(output, 2.4), 900, delta=80)
+
     def test_server_composes_ready_scene_jobs_into_one_local_final_job(self) -> None:
         with tempfile.TemporaryDirectory(dir=server.ROOT / "data") as temporary:
             root = Path(temporary)
@@ -215,6 +386,9 @@ class VideoComposerTests(unittest.TestCase):
                             "isScene": True,
                             "sceneId": f"scene-{index}",
                             "sceneOrder": index,
+                            "finalSpeechHash": server.hash_text(
+                                "Cena um. Cena dois. Cena três."
+                            ),
                             "outputPath": str(path.relative_to(server.ROOT)),
                         },
                     )
@@ -313,7 +487,17 @@ class VideoComposerTests(unittest.TestCase):
                     },
                 )
 
-                result = server._compose_final_video_if_ready(script_id, raise_when_not_ready=True)
+                with patch.object(
+                    server,
+                    "_find_script",
+                    return_value={
+                        "textoFalado": "Cena um. Cena dois. Cena três.",
+                        "outroText": "",
+                    },
+                ):
+                    result = server._compose_final_video_if_ready(
+                        script_id, raise_when_not_ready=True
+                    )
 
                 self.assertIsNotNone(result)
                 assert result is not None
@@ -321,13 +505,15 @@ class VideoComposerTests(unittest.TestCase):
                 self.assertTrue(result["isComposed"])
                 self.assertEqual(result["status"], "pronto")
                 self.assertEqual(result["sceneCount"], 3)
-                self.assertEqual(result["visualCount"], 2)
+                self.assertEqual(result["visualCount"], 0)
+                self.assertEqual(result["transitionStyle"], "smooth")
                 self.assertEqual(result["sourceSceneJobs"], ["sv-1", "sv-2", "sv-3"])
                 output_path = server.ROOT / result["outputPath"]
                 self.assertTrue(output_path.is_file())
                 self.assertEqual(result["composition"]["segmentCount"], 3)
-                self.assertIn("visualOverlay", result["composition"]["segments"][0])
-                self.assertIn("visualOverlay", result["composition"]["segments"][1])
+                self.assertEqual(result["composition"]["cutPolicy"], "smooth")
+                self.assertNotIn("visualOverlay", result["composition"]["segments"][0])
+                self.assertNotIn("visualOverlay", result["composition"]["segments"][1])
                 self.assertNotIn("visualOverlay", result["composition"]["segments"][2])
             finally:
                 server.OPERATIONAL_DB = original_database

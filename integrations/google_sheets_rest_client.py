@@ -133,3 +133,53 @@ class GoogleSheetsRestClient:
             method="PUT",
         )
         return self._open_json(request)
+
+    def delete_row(self, sheet_title: str, row_number: int) -> dict[str, Any]:
+        """Remove uma linha inteira sem deixar um registro vazio na planilha."""
+        if row_number < 2:
+            raise ValueError("A linha de cabecalho nao pode ser removida.")
+
+        fields = urlencode({"fields": "sheets.properties(sheetId,title)"})
+        metadata_request = Request(
+            f"{SHEETS_API}/{self.spreadsheet_id}?{fields}",
+            headers={"Authorization": f"Bearer {self.access_token()}"},
+        )
+        metadata = self._open_json(metadata_request)
+        sheet_id = next(
+            (
+                sheet.get("properties", {}).get("sheetId")
+                for sheet in metadata.get("sheets", [])
+                if sheet.get("properties", {}).get("title") == sheet_title
+            ),
+            None,
+        )
+        if sheet_id is None:
+            raise RuntimeError(f"Aba '{sheet_title}' nao encontrada no Google Sheets.")
+
+        body = json.dumps(
+            {
+                "requests": [
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": row_number - 1,
+                                "endIndex": row_number,
+                            }
+                        }
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        delete_request = Request(
+            f"{SHEETS_API}/{self.spreadsheet_id}:batchUpdate",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.access_token()}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            method="POST",
+        )
+        return self._open_json(delete_request)
