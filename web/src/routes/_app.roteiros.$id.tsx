@@ -642,10 +642,14 @@ function RoteiroDetalhe() {
     // O modal de confirmação cobre esta etapa; o backend recebe o valor explícito.
     finalConfirmed: true,
   });
-  const canSendToProduction =
+  const paidVersionReady = Boolean(
     editorStateLoaded &&
     paidScriptVersion.scriptRevision > 0 &&
-    Boolean(paidScriptVersion.finalSpeechHash) &&
+    paidScriptVersion.finalSpeechHash &&
+    paidScriptVersion.contractVersion === SCRIPT_EDITOR_CONTRACT_VERSION,
+  );
+  const canSendToProduction =
+    paidVersionReady &&
     editorGenerationGate.allowed &&
     selectedAvatarReady &&
     productionModeReady &&
@@ -867,27 +871,31 @@ function RoteiroDetalhe() {
   });
   const productionBlockedReason = !editorGenerationGate.allowed
     ? editorGenerationGate.reason
-    : catalogLoading
-      ? "Carregando avatares e vozes da HeyGen."
-      : !profileLoaded
-        ? "Carregando perfil de producao do roteiro."
-        : cinematicMode && !cinematicPrompt.trim()
-          ? "Escreva a direção cinematic antes de enviar este modo."
-          : avatarMode === "set" && !selectedAvatarSet
-            ? "Selecione um Avatar Set."
-            : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
-              ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
-              : !heygenAgentMode && avatarMode === "set" && !productionModeReady
-                ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
-                : !heygenAgentMode && avatarMode === "set" && !visualProductionReady
-                  ? `Clique em "Fazer tudo com Claude" para gerar e renderizar ${requiredVisualCount} slide(s) de transição.`
-                  : !avatarId
-                    ? "Selecione um avatar pronto."
-                    : !voiceId
-                      ? "Selecione uma voz."
-                      : saving
-                        ? "Salvando roteiro."
-                        : null;
+    : !editorStateLoaded
+      ? "Carregando o versionamento seguro da fala."
+      : !paidVersionReady
+        ? "A fala salva ainda não possui revisão e hash de segurança. Atualize a página ou salve o roteiro novamente."
+        : catalogLoading
+          ? "Carregando avatares e vozes da HeyGen."
+          : !profileLoaded
+            ? "Carregando perfil de producao do roteiro."
+            : cinematicMode && !cinematicPrompt.trim()
+              ? "Escreva a direção cinematic antes de enviar este modo."
+              : avatarMode === "set" && !selectedAvatarSet
+                ? "Selecione um Avatar Set."
+                : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
+                  ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
+                  : !heygenAgentMode && avatarMode === "set" && !productionModeReady
+                    ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
+                    : !heygenAgentMode && avatarMode === "set" && !visualProductionReady
+                      ? `Clique em "Fazer tudo com Claude" para gerar e renderizar ${requiredVisualCount} slide(s) de transição.`
+                      : !avatarId
+                        ? "Selecione um avatar pronto."
+                        : !voiceId
+                          ? "Selecione uma voz."
+                          : saving
+                            ? "Salvando roteiro."
+                            : null;
   const productionChecklist = [
     {
       label: "Roteiro revisado",
@@ -900,6 +908,15 @@ function RoteiroDetalhe() {
       label: "Roteiro salvo",
       ready: !dirty,
       detail: dirty ? "Salve as alterações antes de enviar." : "Sem alterações pendentes.",
+    },
+    {
+      label: "Versão da fala",
+      ready: paidVersionReady,
+      detail: !editorStateLoaded
+        ? "Carregando revisão e hash de segurança."
+        : paidVersionReady
+          ? `Revisão ${paidScriptVersion.scriptRevision} protegida para geração.`
+          : "Atualize a página ou salve novamente para versionar a fala.",
     },
     {
       label: !heygenAgentMode && avatarMode === "set" ? "Avatar Set" : "Avatar",

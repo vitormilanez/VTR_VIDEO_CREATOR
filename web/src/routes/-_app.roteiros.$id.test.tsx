@@ -270,6 +270,26 @@ describe("script editor React interactions", () => {
     expect(within(getEditor()).getByRole("button", { name: "Salvar" })).toBeDisabled();
   });
 
+  it("shows missing paid version in the final checklist instead of a false ready state", async () => {
+    vi.mocked(fetchScriptEditorState).mockResolvedValue(
+      editorState({
+        humanReviewApproved: true,
+        scriptRevision: 0,
+        finalSpeechHash: null,
+        contractVersion: "",
+      }),
+    );
+
+    await renderEditor();
+
+    expect(await screen.findByText("Versão da fala")).toBeInTheDocument();
+    expect(
+      screen.getByText("Atualize a página ou salve novamente para versionar a fala."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Enviar para produção" })).toBeDisabled();
+    expect(screen.queryByText("Tudo certo para enviar ao HeyGen")).not.toBeInTheDocument();
+  });
+
   it.each([
     [10, 24, 26],
     [15, 36, 39],

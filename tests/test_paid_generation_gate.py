@@ -139,6 +139,42 @@ def test_whitespace_only_change_keeps_revision_and_approval() -> None:
             server.OPERATIONAL_DB = original_database
 
 
+def test_existing_unversioned_approval_is_migrated_to_the_current_saved_speech() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        original_database = server.OPERATIONAL_DB
+        server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+        try:
+            connection = server._ai_db()
+            connection.execute(
+                """INSERT INTO script_editor_states(
+                       script_id, human_review_approved, updated_at
+                   ) VALUES (?, 1, ?)""",
+                ("s-existing-legacy", server._now()),
+            )
+            connection.commit()
+            connection.close()
+
+            speech = "Uma fala clínica salva e aprovada antes do versionamento."
+            migrated = server._script_editor_state(
+                "s-existing-legacy",
+                {
+                    "id": "s-existing-legacy",
+                    "status": "aprovado_clinicamente",
+                    "textoFalado": speech,
+                },
+            )
+
+            assert migrated["scriptRevision"] == 1
+            assert migrated["finalSpeechHash"] == hash_text(speech)
+            assert migrated["humanReviewApproved"] is True
+            assert migrated["approvedScriptRevision"] == 1
+            assert migrated["approvedFinalSpeechHash"] == hash_text(speech)
+            assert migrated["contractVersion"] == SCRIPT_EDITOR_CONTRACT_VERSION
+            assert migrated["approvalHistory"][-1]["actor"] == "legacy_state_migration"
+        finally:
+            server.OPERATIONAL_DB = original_database
+
+
 def test_stale_revision_or_contract_is_rejected_before_reservation() -> None:
     speech = words(100)
     current_hash = hash_text(speech)
