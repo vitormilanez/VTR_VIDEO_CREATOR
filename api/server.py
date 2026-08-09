@@ -1763,6 +1763,52 @@ def _save_video_jobs(jobs: list[dict[str, Any]]) -> None:
     _job_store().replace("video", jobs)
 
 
+def _reconcile_incomplete_video_jobs(
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: int = 900,
+) -> dict[str, int]:
+    """Fecha reservas locais antigas sem supor que uma submissão remota falhou.
+
+    Uma reserva que nunca entrou em `submitting` é segura para retry. Uma
+    submissão interrompida permanece incerta e bloqueia duplicação até revisão.
+    Nenhuma consulta externa é feita durante esta reconciliação.
+    """
+
+    current_time = now or datetime.now(timezone.utc)
+    store = _job_store()
+    result = {"failedSafe": 0, "submissionUncertain": 0}
+    for job in store.list("video"):
+        state = str(job.get("submissionState") or "")
+        if state not in {"reserved", "submitting"}:
+            continue
+        raw_updated = str(job.get("atualizadoEm") or job.get("criadoEm") or "")
+        try:
+            updated = datetime.fromisoformat(raw_updated.replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+        except ValueError:
+            updated = datetime.fromtimestamp(0, timezone.utc)
+        if (current_time - updated).total_seconds() < stale_after_seconds:
+            continue
+
+        job["status"] = "erro"
+        job["progresso"] = 0
+        job["atualizadoEm"] = current_time.isoformat()
+        if state == "reserved":
+            job["retrySafe"] = True
+            job["submissionState"] = "failed_safe"
+            job["erro"] = "Reserva local interrompida antes do envio; uma nova tentativa é segura."
+            result["failedSafe"] += 1
+        else:
+            job["retrySafe"] = False
+            job["submissionState"] = "submission_uncertain"
+            job["erro"] = "Envio interrompido; confirme o estado remoto antes de tentar novamente."
+            result["submissionUncertain"] += 1
+        store.upsert("video", job)
+    return result
+
+
 def _load_avatar_jobs() -> list[dict[str, Any]]:
     return _job_store().list("avatar")
 
@@ -3737,8 +3783,8 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
                 status_code=400,
                 detail=f"Looks não prontos na HeyGen: {', '.join(missing)}",
             )
-    except (HTTPException, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        message = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+    except Exception as exc:
+        message = _safe_video_provider_error(exc)
         for job in created_jobs:
             job["status"] = "erro"
             job["erro"] = message
@@ -3778,9 +3824,9 @@ def submit_scene_generation(script_id: str, payload: SceneVideoConfirmIn) -> dic
             job["atualizadoEm"] = _now()
             _job_store().upsert("video", job)
             jobs.append(job)
-        except (HTTPException, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        except Exception as exc:
             job["status"] = "erro"
-            job["erro"] = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            job["erro"] = _safe_video_provider_error(exc)
             job["retrySafe"] = job.get("submissionState") != "submitting"
             job["submissionState"] = "failed_safe" if job["retrySafe"] else "submission_uncertain"
             job["atualizadoEm"] = _now()
@@ -4234,6 +4280,21 @@ def _safe_script_editor_response(
     }
 
 
+def _script_editor_provider_failure(exc: Exception) -> tuple[str, str]:
+    """Classifica falhas sem copiar payload, resposta bruta ou segredo para a UI/log."""
+
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired, requests.Timeout)):
+        return "PROVIDER_TIMEOUT", "A IA excedeu o tempo limite."
+    if status_code == 429:
+        return "PROVIDER_RATE_LIMITED", "A IA atingiu o limite temporário de requisições."
+    if isinstance(status_code, int) and status_code >= 500:
+        return "PROVIDER_UNAVAILABLE", "A IA está temporariamente indisponível."
+    if isinstance(exc, (ConnectionError, OSError, requests.ConnectionError)):
+        return "PROVIDER_CONNECTION_INTERRUPTED", "A conexão com a IA foi interrompida."
+    return "PROVIDER_ERROR", "A IA não respondeu agora."
+
+
 def _run_script_editor_assist(
     payload: ScriptEditorAssistIn,
     *,
@@ -4328,10 +4389,25 @@ def _run_script_editor_assist(
                 reason=last_reason,
             )
         except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail="A IA não respondeu agora. O texto atual foi preservado; tente novamente.",
-            ) from exc
+            error_code, last_reason = _script_editor_provider_failure(exc)
+            LOGGER.warning(
+                "script_editor_provider_error operation=%s provider=%s model=%s code=%s attempt=%s",
+                payload.operation,
+                provider,
+                model,
+                error_code,
+                attempt + 1,
+            )
+            if attempt == 0:
+                retry_count = 1
+                continue
+            return _safe_script_editor_response(
+                payload,
+                provider=provider,
+                model=model,
+                retry_count=1,
+                reason=last_reason,
+            )
     return _safe_script_editor_response(
         payload,
         provider=provider,
@@ -5092,6 +5168,44 @@ def ai_costs() -> dict:
     }
 
 
+def _safe_video_provider_error(exc: Exception) -> str:
+    """Retorna diagnóstico operacional sem propagar resposta bruta do provedor."""
+
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired, requests.Timeout)):
+        return "Tempo limite ao comunicar com a HeyGen."
+    if status_code == 429:
+        return "A HeyGen atingiu o limite temporário de requisições."
+    if isinstance(status_code, int) and status_code >= 500:
+        return "A HeyGen está temporariamente indisponível."
+    if isinstance(exc, (ConnectionError, OSError, requests.ConnectionError)):
+        return "A conexão com a HeyGen foi interrompida."
+    if isinstance(exc, HTTPException) and exc.status_code < 500:
+        return str(exc.detail)[:500]
+    return "Falha ao comunicar com a HeyGen."
+
+
+def _mark_video_submission_failure(job: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    current = _job_store().get("video", str(job["id"])) or job
+    current["status"] = "erro"
+    current["progresso"] = 0
+    current["erro"] = _safe_video_provider_error(exc)
+    current["retrySafe"] = current.get("submissionState") != "submitting"
+    current["submissionState"] = (
+        "failed_safe" if current["retrySafe"] else "submission_uncertain"
+    )
+    current["atualizadoEm"] = _now()
+    _job_store().upsert("video", current)
+    LOGGER.warning(
+        "video_provider_error job_id=%s script_id=%s state=%s provider=heygen error_type=%s",
+        current.get("id"),
+        current.get("scriptId"),
+        current.get("submissionState"),
+        type(exc).__name__,
+    )
+    return current
+
+
 @app.post("/api/videos")
 def create_video(payload: VideoCreateIn) -> dict:
     """Cria um job real no HeyGen somente apos o clique de enviar para producao."""
@@ -5258,17 +5372,8 @@ def create_video(payload: VideoCreateIn) -> dict:
             result["job"].get("remoteVideoId"),
         )
         return result
-    except HTTPException as exc:
-        current = _job_store().get("video", reserved_job["id"]) or reserved_job
-        current["status"] = "erro"
-        current["progresso"] = 0
-        current["erro"] = str(exc.detail)
-        current["retrySafe"] = current.get("submissionState") != "submitting"
-        current["submissionState"] = (
-            "failed_safe" if current["retrySafe"] else "submission_uncertain"
-        )
-        current["atualizadoEm"] = _now()
-        _job_store().upsert("video", current)
+    except Exception as exc:
+        _mark_video_submission_failure(reserved_job, exc)
         raise
 
 
@@ -5571,14 +5676,8 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
         job["atualizadoEm"] = _now()
         _job_store().upsert("video", job)
         return {"ok": True, "job": job}
-    except HTTPException as exc:
-        current = _job_store().get("video", reserved_job["id"]) or reserved_job
-        current["status"] = "erro"
-        current["erro"] = str(exc.detail)
-        current["retrySafe"] = current.get("submissionState") != "submitting"
-        current["submissionState"] = "failed_safe" if current["retrySafe"] else "submission_uncertain"
-        current["atualizadoEm"] = _now()
-        _job_store().upsert("video", current)
+    except Exception as exc:
+        _mark_video_submission_failure(reserved_job, exc)
         raise
 
 

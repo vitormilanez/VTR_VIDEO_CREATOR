@@ -78,7 +78,14 @@ Data de início: 9 de agosto de 2026.
 
 ## Slice 15B
 
-- Status: `not_started`
+- Status: `completed_mocked`; smokes reais `pending_external_authorization`
+- Falhas do editor: timeout, HTTP 429, HTTP 500 e conexão interrompida são classificados sem copiar resposta bruta. Cada caso admite uma única correção/retry, para após a segunda falha e devolve resposta segura com a fala anterior, schema inválido e revisão humana obrigatória.
+- Structured output e segurança: cobertura para JSON/schema sem `script`, `script` vazio, warning aceito, blocking rejeitado em `fit_duration`, percentuais, dose, prazo, contagem clínica e experiência profissional inventada. Claims novos pedem conferência da fonte; o sistema não os rotula automaticamente como falsos.
+- Cache/concorrência/no-op: request repetido usa cache sem nova chamada; requests simultâneos continuam deduplicados; texto já confortável permanece no caminho determinístico local.
+- Jobs pagos: final, prévia e cenas agora capturam também timeout, conexão e falhas inesperadas depois da reserva. O erro persistido é sanitizado e o job termina em `failed_safe` ou `submission_uncertain`, nunca em sucesso. A reconciliação local classifica reservas antigas como retry seguro e submissões interrompidas como incertas, sem consultar nem cobrar o provedor.
+- Privacidade: testes confirmam que logs não incluem fala/fonte integrais, segredos de exceção, tokens ou nomes de chaves; registram somente operação, preset, contagens, status, modelo, cache, retry, latência e tipo/código de falha.
+- Testes: 71 testes mockados do editor/gates/provedores passaram; 2 smokes reais foram corretamente pulados. Nenhuma chamada Anthropic real e nenhum job HeyGen foram executados.
+- Smokes opt-in preparados em `tests/test_real_provider_smoke.py`. IA textual: `ALLOW_REAL_AI_SMOKE_TESTS=true MAX_REAL_AI_CALLS=3 .venv/bin/python -m pytest -q tests/test_real_provider_smoke.py::test_real_anthropic_editor_contract_and_cache`. HeyGen exige autorização separada, IDs explícitos e um único job: `ALLOW_REAL_HEYGEN_SMOKE_TEST=true MAX_REAL_HEYGEN_JOBS=1 REAL_HEYGEN_AVATAR_ID=... REAL_HEYGEN_VOICE_ID=... .venv/bin/python -m pytest -q tests/test_real_provider_smoke.py::test_real_heygen_single_job_is_idempotent`.
 
 ## Slice 15C
 
