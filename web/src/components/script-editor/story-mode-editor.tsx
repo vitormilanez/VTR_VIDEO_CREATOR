@@ -4,6 +4,7 @@ import {
   Check,
   CircleDollarSign,
   Clapperboard,
+  Download,
   FileUp,
   History,
   Loader2,
@@ -35,6 +36,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   approveStoryVersion,
+  composeStoryVersion,
   critiqueStoryVersion,
   fetchHeyGenProviderCapabilities,
   fetchStoryProject,
@@ -51,12 +53,13 @@ import {
   type StoryProject,
   type StoryShotRecord,
   type StoryVersion,
+  storyCompositionMediaUrl,
   storyShotMediaUrl,
 } from "@/lib/api/local";
 import { cn } from "@/lib/utils";
 
 type RequestName =
-  "save" | "plan" | "revise" | "critique" | "approve" | "generate" | "refresh" | null;
+  "save" | "plan" | "revise" | "critique" | "approve" | "generate" | "refresh" | "compose" | null;
 type ShotControls = StoryShotRecord["controls"];
 
 interface StorySnapshot {
@@ -1133,6 +1136,98 @@ function BudgetCard({
   );
 }
 
+function FinalCompositionCard({
+  state,
+  onCompose,
+}: {
+  state: StoryEditorState;
+  onCompose: () => void;
+}) {
+  const version = state.version;
+  const shots = version?.shots ?? [];
+  const allShotsCompleted = Boolean(
+    version?.plan.shots.length &&
+    shots.length === version.plan.shots.length &&
+    shots.every((shot) => shot.currentGeneration?.status === "completed"),
+  );
+  const composition = version?.composition;
+  return (
+    <Card className="border-primary/20">
+      <CardHeader className="p-4">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Clapperboard className="h-4 w-4 text-primary" /> Vídeo final
+            </CardTitle>
+            <CardDescription className="mt-1 text-xs">
+              Montagem local em 1080×1920 com narração contínua, B-roll mudo, legendas e a música
+              selecionada no perfil.
+            </CardDescription>
+          </div>
+          <Badge variant={composition?.status === "pronto" ? "default" : "outline"}>
+            {composition?.status === "pronto"
+              ? "MP4 pronto"
+              : `${shots.filter((shot) => shot.currentGeneration?.status === "completed").length}/${version?.plan.shots.length ?? 0} shots`}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3 p-4 pt-0">
+        {composition?.status === "pronto" ? (
+          <>
+            <video
+              controls
+              preload="metadata"
+              className="aspect-[9/16] max-h-[640px] w-full rounded-lg bg-black object-contain"
+              src={storyCompositionMediaUrl(composition)}
+            />
+            <div className="flex justify-end">
+              <Button variant="outline" asChild>
+                <a href={storyCompositionMediaUrl(composition, true)}>
+                  <Download /> Baixar MP4
+                </a>
+              </Button>
+            </div>
+          </>
+        ) : (
+          <div className="flex flex-col gap-3 rounded-lg border border-dashed p-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs leading-5 text-muted-foreground">
+              {allShotsCompleted
+                ? "Todos os shots estão prontos. A montagem usa o vídeo-base mais recente deste roteiro apenas como fonte da narração."
+                : "Conclua os shots individualmente para liberar a montagem. Esta etapa é local e não usa créditos HeyGen ou Anthropic."}
+            </p>
+            <ConfirmAction
+              title="Montar vídeo final?"
+              description="Processamento local: ordena os shots, mantém a narração e as legendas e aplica a música já selecionada. Zero crédito externo."
+              confirmLabel="Montar vídeo"
+              onConfirm={onCompose}
+              trigger={
+                <Button
+                  type="button"
+                  disabled={!allShotsCompleted || !version?.approved || state.pending !== null}
+                >
+                  {state.pending === "compose" ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Clapperboard />
+                  )}{" "}
+                  Montar vídeo
+                </Button>
+              }
+            />
+          </div>
+        )}
+        {composition?.status === "erro" ? (
+          <Alert variant="destructive">
+            <TriangleAlert className="h-4 w-4" />
+            <AlertTitle>Montagem não concluída</AlertTitle>
+            <AlertDescription>{composition.erro}</AlertDescription>
+          </Alert>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 export interface StoryModeEditorProps {
   scriptId: string;
   title: string;
@@ -1341,6 +1436,15 @@ export function StoryModeEditor(props: StoryModeEditorProps) {
     );
   }
 
+  function compose() {
+    if (!state.version) return;
+    void run(
+      "compose",
+      () => composeStoryVersion(state.version!),
+      () => void load(),
+    );
+  }
+
   if (state.phase === "loading") return <LoadingState />;
   if (state.phase === "error") {
     return (
@@ -1448,7 +1552,7 @@ export function StoryModeEditor(props: StoryModeEditorProps) {
                 characterId={state.plan?.characterBible.characterId ?? null}
                 lookId={state.plan?.characterBible.lookId ?? null}
                 disabled={pendingDisabled || Boolean(state.version?.approved)}
-                generationDisabled={pendingDisabled || !Boolean(state.version?.approved)}
+                generationDisabled={pendingDisabled || !state.version?.approved}
                 onShotChange={(nextShot) =>
                   dispatch({ type: "shot-change", index, shot: nextShot })
                 }
@@ -1472,6 +1576,7 @@ export function StoryModeEditor(props: StoryModeEditorProps) {
             </Alert>
           ) : null}
           <BudgetCard state={state} onCritique={critique} onApprove={approve} />
+          <FinalCompositionCard state={state} onCompose={compose} />
         </>
       ) : null}
     </div>

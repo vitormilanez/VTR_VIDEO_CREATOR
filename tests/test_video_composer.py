@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from array import array
 import shutil
 import subprocess
 import tempfile
@@ -8,12 +9,19 @@ import unittest
 from pathlib import Path
 
 from api import server
-from api.services.video_composer import CompositionScene, TimedOverlay, compose_video
+from api.services.video_composer import (
+    CompositionScene,
+    TimedOverlay,
+    TimedVideoOverlay,
+    compose_video,
+)
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
 class VideoComposerTests(unittest.TestCase):
-    def _mock_video(self, path: Path, color: str) -> None:
+    def _mock_video(
+        self, path: Path, color: str, *, duration: float = 0.7, frequency: int = 900
+    ) -> None:
         subprocess.run(
             [
                 "ffmpeg",
@@ -21,11 +29,11 @@ class VideoComposerTests(unittest.TestCase):
                 "-f",
                 "lavfi",
                 "-i",
-                f"color=c={color}:s=320x240:d=0.7",
+                f"color=c={color}:s=320x240:d={duration}",
                 "-f",
                 "lavfi",
                 "-i",
-                "sine=frequency=900:duration=0.7",
+                f"sine=frequency={frequency}:duration={duration}",
                 "-shortest",
                 "-c:v",
                 "libx264",
@@ -36,6 +44,56 @@ class VideoComposerTests(unittest.TestCase):
             check=True,
             capture_output=True,
         )
+
+    def _sample_rgb(self, path: Path, seconds: float) -> tuple[int, int, int]:
+        process = subprocess.run(
+            [
+                "ffmpeg",
+                "-ss",
+                str(seconds),
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=1:1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return tuple(process.stdout[:3])  # type: ignore[return-value]
+
+    def _audio_frequency(self, path: Path, duration: float) -> float:
+        process = subprocess.run(
+            [
+                "ffmpeg",
+                "-i",
+                str(path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "8000",
+                "-f",
+                "s16le",
+                "pipe:1",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        samples = array("h")
+        samples.frombytes(process.stdout)
+        crossings = sum(
+            1
+            for previous, current in zip(samples, samples[1:])
+            if (previous < 0 <= current) or (previous >= 0 > current)
+        )
+        return crossings / (2 * duration)
 
     def _mock_image(self, path: Path, color: str) -> None:
         subprocess.run(
@@ -201,6 +259,40 @@ class VideoComposerTests(unittest.TestCase):
             metadata = json.loads(probe.stdout)
             self.assertEqual({stream["codec_type"] for stream in metadata["streams"]}, {"video", "audio"})
             self.assertAlmostEqual(float(metadata["format"]["duration"]), 0.7, delta=0.15)
+
+    def test_full_screen_shots_keep_base_narration_and_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            narration = root / "narration.mp4"
+            first_shot = root / "shot-01.mp4"
+            second_shot = root / "shot-02.mp4"
+            output = root / "story.mp4"
+            self._mock_video(narration, "blue", duration=2.4, frequency=900)
+            self._mock_video(first_shot, "red", duration=1.2, frequency=250)
+            self._mock_video(second_shot, "green", duration=1.2, frequency=350)
+
+            manifest = compose_video(
+                [
+                    CompositionScene(
+                        "story-mode",
+                        narration,
+                        timed_video_overlays=(
+                            TimedVideoOverlay(first_shot, 0, 1.2, "shot-01"),
+                            TimedVideoOverlay(second_shot, 1.2, 2.4, "shot-02"),
+                        ),
+                    )
+                ],
+                output,
+            )
+
+            overlays = manifest["segments"][0]["timedVideoOverlays"]
+            self.assertEqual([overlay["shotId"] for overlay in overlays], ["shot-01", "shot-02"])
+            self.assertTrue(all(overlay["generatedAudioMuted"] for overlay in overlays))
+            first_rgb = self._sample_rgb(output, 0.5)
+            second_rgb = self._sample_rgb(output, 1.7)
+            self.assertGreater(first_rgb[0], first_rgb[1])
+            self.assertGreater(second_rgb[1], second_rgb[0])
+            self.assertAlmostEqual(self._audio_frequency(output, 2.4), 900, delta=80)
 
     def test_server_composes_ready_scene_jobs_into_one_local_final_job(self) -> None:
         with tempfile.TemporaryDirectory(dir=server.ROOT / "data") as temporary:

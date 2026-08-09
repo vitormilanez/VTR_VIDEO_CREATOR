@@ -605,6 +605,23 @@ export interface StoryShotGeneration {
   updatedAt: string;
 }
 
+export interface StoryComposition {
+  id: string;
+  scriptId: string;
+  storyVersionId: string;
+  status: "processando" | "pronto" | "erro";
+  progresso: number;
+  videoUrl: string;
+  outputPath: string;
+  duracaoSegundos?: number;
+  shotCount?: number;
+  sourceShotGenerations: string[];
+  baseNarrationJobId: string;
+  narrationPolicy?: "base_audio_continuous";
+  captions?: boolean;
+  erro?: string;
+}
+
 export interface StoryBudgetIssue {
   code: string;
   severity: "blocking" | "warning" | "info";
@@ -685,6 +702,7 @@ export interface StoryVersion {
   createdAt: string;
   plan: StoryPlan;
   shots?: StoryShotRecord[];
+  composition?: StoryComposition | null;
 }
 
 export interface StoryProject {
@@ -1218,6 +1236,27 @@ export function storyShotMediaUrl(generation: StoryShotGeneration, thumbnail = f
     ? `/api/story-shot-generations/${encodeURIComponent(generation.id)}/thumbnail`
     : generation.outputUrl ||
       `/api/story-shot-generations/${encodeURIComponent(generation.id)}/file`;
+  return /^https?:\/\//.test(path) ? path : `${BASE}${path}`;
+}
+
+export async function composeStoryVersion(version: StoryVersion): Promise<StoryComposition> {
+  const response = await requestJson<{ ok: boolean; job: StoryComposition }>(
+    `/api/story-versions/${encodeURIComponent(version.id)}/compose`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expectedStoryHash: version.storyHash,
+        confirmed: true,
+      }),
+    },
+  );
+  return response.job;
+}
+
+export function storyCompositionMediaUrl(composition: StoryComposition, download = false) {
+  const path = download
+    ? `/api/videos/${encodeURIComponent(composition.id)}/download`
+    : composition.videoUrl || `/api/videos/${encodeURIComponent(composition.id)}/file`;
   return /^https?:\/\//.test(path) ? path : `${BASE}${path}`;
 }
 

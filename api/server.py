@@ -139,7 +139,7 @@ from api.services.video_generation import (
     normalize_caption_srt,
 )
 from api.services.scene_generation import build_scene_generation_result
-from api.services.video_composer import CompositionScene, compose_video
+from api.services.video_composer import CompositionScene, TimedVideoOverlay, compose_video
 from api.services.post_production import (
     analyze_post_production,
     idempotency_key as post_production_idempotency_key,
@@ -3643,6 +3643,12 @@ class StoryShotGenerateIn(BaseModel):
     confirmed: Literal[True]
 
 
+class StoryComposeIn(BaseModel):
+    expectedStoryHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    baseVideoJobId: str | None = Field(default=None, min_length=1, max_length=160)
+    confirmed: Literal[True]
+
+
 class VideoCreateIn(BaseModel):
     scriptId: str
     avatarId: str | None = Field(default=None, max_length=160)
@@ -4248,9 +4254,13 @@ def _story_project(script_id: str) -> dict[str, Any] | None:
         row = conn.execute(
             "SELECT * FROM story_projects WHERE script_id = ?", (script_id,)
         ).fetchone()
-        return _story_project_from_row(conn, row)
+        project = _story_project_from_row(conn, row)
     finally:
         conn.close()
+    active_version = project.get("activeVersion") if project else None
+    if active_version:
+        active_version["composition"] = _story_composition_job(active_version["id"])
+    return project
 
 
 def _save_story_brief(script_id: str, brief: StoryBrief) -> dict[str, Any]:
@@ -5860,6 +5870,246 @@ def story_shot_generation_thumbnail(generation_id: str) -> FileResponse:
     if not path:
         raise HTTPException(status_code=404, detail="Thumbnail não encontrada.")
     return FileResponse(path, media_type="image/jpeg")
+
+
+def _story_composition_job(version_id: str) -> dict[str, Any] | None:
+    return next(
+        (
+            job
+            for job in _load_video_jobs()
+            if job.get("isStoryComposition")
+            and job.get("storyVersionId") == version_id
+        ),
+        None,
+    )
+
+
+def _story_narration_job(script_id: str, requested_job_id: str | None) -> dict[str, Any]:
+    if requested_job_id:
+        candidates = [_job_store().get("video", requested_job_id)]
+    else:
+        candidates = _load_video_jobs()
+    for job in candidates:
+        if not job or job.get("scriptId") != script_id or job.get("status") != "pronto":
+            continue
+        if job.get("isScene") or job.get("isPreview") or job.get("isStoryComposition"):
+            continue
+        if _local_output_path(job.get("outputPath")) or str(
+            job.get("remoteVideoUrl") or job.get("videoUrl") or ""
+        ).startswith("https://"):
+            return job
+    raise _story_error(
+        409,
+        "STORY_NARRATION_SOURCE_REQUIRED",
+        "Nenhum vídeo-base pronto com a narração completa foi encontrado para este roteiro.",
+    )
+
+
+def _story_srt_time(seconds: float) -> str:
+    milliseconds = max(0, round(seconds * 1000))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    whole_seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d},{milliseconds:03d}"
+
+
+def _story_caption_track(speech: str, duration: float) -> str:
+    words = speech_words(speech)
+    if not words:
+        return ""
+    cues: list[str] = []
+    chunk_size = 7
+    for cue_index, start in enumerate(range(0, len(words), chunk_size), start=1):
+        end = min(len(words), start + chunk_size)
+        start_seconds = duration * start / len(words)
+        end_seconds = duration * end / len(words)
+        cues.append(
+            f"{cue_index}\n{_story_srt_time(start_seconds)} --> {_story_srt_time(end_seconds)}\n"
+            + " ".join(words[start:end])
+        )
+    return "\n\n".join(cues) + "\n"
+
+
+def _compose_story_video(version_id: str, payload: StoryComposeIn) -> dict[str, Any]:
+    authorization = _authorize_story_production(version_id)
+    version = authorization["version"]
+    if version["storyHash"] != payload.expectedStoryHash:
+        raise _story_error(
+            409, "STORY_VERSION_CONFLICT", "O storyboard mudou. Recarregue antes de montar."
+        )
+    shots = _story_shots(version_id)
+    incomplete = [
+        shot["shotId"]
+        for shot in shots
+        if not shot.get("currentGeneration")
+        or shot["currentGeneration"].get("status") != "completed"
+        or not _local_output_path(shot["currentGeneration"].get("outputPath"))
+    ]
+    if incomplete:
+        raise _story_error(
+            422,
+            "STORY_SHOTS_INCOMPLETE",
+            "Conclua e salve todos os shots antes de montar: " + ", ".join(incomplete),
+        )
+    script_id = str(authorization["project"]["scriptId"])
+    narration_job = _story_narration_job(script_id, payload.baseVideoJobId)
+    profile = _production_profile(script_id) or {}
+    music_track_id = str(profile.get("musicTrackId") or "").strip() or None
+    music_track = _music_track(music_track_id)
+    music_path = _music_track_path(music_track_id) if music_track else None
+    music_volume = float(profile.get("musicVolume") or 0.12)
+    source_generations = [
+        str(shot["currentGeneration"]["id"])
+        for shot in sorted(shots, key=lambda item: int(item["order"]))
+    ]
+    composition_key = hashlib.sha256(
+        json.dumps(
+            {
+                "storyVersionId": version_id,
+                "storyHash": version["storyHash"],
+                "baseNarrationJobId": narration_job["id"],
+                "sourceGenerations": source_generations,
+                "musicTrackId": music_track_id,
+                "musicVolume": music_volume if music_track_id else None,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    job_id = f"story-compose-{composition_key}"
+    existing = _job_store().get("video", job_id)
+    if existing and existing.get("status") == "pronto" and _local_output_path(
+        existing.get("outputPath")
+    ):
+        return existing
+
+    output_root = _composed_video_output_dir(script_id) / "story"
+    output_path = output_root / f"{job_id}.mp4"
+    now = _now()
+    job = existing or {
+        "id": job_id,
+        "scriptId": script_id,
+        "provider": "local",
+        "criadoEm": now,
+    }
+    job.update(
+        {
+            "status": "processando",
+            "progresso": 35,
+            "atualizadoEm": now,
+            "outputPath": str(output_path.relative_to(ROOT)),
+            "videoUrl": f"/api/videos/{quote(job_id, safe='')}/file",
+            "isComposed": True,
+            "isStoryComposition": True,
+            "storyVersionId": version_id,
+            "sourceShotGenerations": source_generations,
+            "baseNarrationJobId": narration_job["id"],
+            "submissionState": "local_composing",
+        }
+    )
+    _job_store().upsert("video", job, idempotency_key=f"story-compose:{composition_key}")
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        narration_path = _copy_or_download_video(
+            narration_job, output_root / f"{job_id}-narration.mp4"
+        )
+        duration = _probe_video_duration(narration_path)
+        words = speech_words(authorization["source"]["speech"])
+        if not words or duration <= 0:
+            raise RuntimeError("A narração-base não possui duração ou fala válida.")
+        overlays: list[TimedVideoOverlay] = []
+        ordered_manifest: list[dict[str, Any]] = []
+        for shot in sorted(shots, key=lambda item: int(item["order"])):
+            generation = shot["currentGeneration"]
+            path = _local_output_path(generation.get("outputPath"))
+            if not path:
+                raise RuntimeError(f"Arquivo do {shot['shotId']} não foi encontrado.")
+            speech_range = shot["prompt"]["speech"]
+            start_seconds = duration * int(speech_range["startWordIndex"]) / len(words)
+            end_seconds = duration * int(speech_range["endWordIndex"]) / len(words)
+            overlays.append(
+                TimedVideoOverlay(
+                    path=path,
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                    shot_id=shot["shotId"],
+                    strategy=generation["strategy"],
+                )
+            )
+            ordered_manifest.append(
+                {
+                    "shotId": shot["shotId"],
+                    "order": shot["order"],
+                    "strategy": generation["strategy"],
+                    "generationId": generation["id"],
+                    "startSeconds": round(start_seconds, 3),
+                    "endSeconds": round(end_seconds, 3),
+                    "generatedAudioMuted": True,
+                }
+            )
+        captions_path = output_root / f"{job_id}.srt"
+        provider_captions = normalize_caption_srt(
+            str(narration_job.get("captionSrt") or "")
+        ).strip()
+        captions_path.write_text(
+            provider_captions
+            or _story_caption_track(authorization["source"]["speech"], duration),
+            encoding="utf-8",
+        )
+        manifest = compose_video(
+            [
+                CompositionScene(
+                    scene_id="story-mode",
+                    video_path=narration_path,
+                    timed_video_overlays=tuple(overlays),
+                    captions_path=captions_path,
+                )
+            ],
+            output_path,
+            background_music_path=music_path,
+            background_music_volume=music_volume,
+        )
+        final_duration = _probe_video_duration(output_path)
+        job.update(
+            {
+                "status": "pronto",
+                "progresso": 100,
+                "atualizadoEm": _now(),
+                "submissionState": "completed",
+                "duracaoSegundos": round(final_duration, 2),
+                "shotCount": len(overlays),
+                "storyShots": ordered_manifest,
+                "composition": manifest,
+                "narrationPolicy": "base_audio_continuous",
+                "captions": True,
+                "backgroundMusic": (
+                    _music_track_response(music_track) | {"volume": music_volume}
+                    if music_track
+                    else None
+                ),
+            }
+        )
+    except Exception as exc:
+        job.update(
+            {
+                "status": "erro",
+                "progresso": 0,
+                "erro": str(exc.detail) if isinstance(exc, HTTPException) else str(exc),
+                "submissionState": "local_failed",
+                "atualizadoEm": _now(),
+            }
+        )
+        _job_store().upsert("video", job, idempotency_key=f"story-compose:{composition_key}")
+        if isinstance(exc, HTTPException):
+            raise
+        raise _story_error(503, "STORY_COMPOSITION_FAILED", f"Falha na montagem local: {exc}")
+    _job_store().upsert("video", job, idempotency_key=f"story-compose:{composition_key}")
+    return job
+
+
+@app.post("/api/story-versions/{version_id}/compose")
+def compose_story_version(version_id: str, payload: StoryComposeIn) -> dict:
+    return {"ok": True, "job": _compose_story_video(version_id, payload)}
 
 
 @app.post("/api/story-versions/{version_id}/approve")

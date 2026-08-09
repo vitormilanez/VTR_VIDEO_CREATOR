@@ -30,6 +30,17 @@ class TimedOverlay:
 
 
 @dataclass(frozen=True)
+class TimedVideoOverlay:
+    """Vídeo visual em tela cheia; o áudio sempre continua vindo da cena-base."""
+
+    path: Path
+    start_seconds: float
+    end_seconds: float
+    shot_id: str = ""
+    strategy: str = "cinematic_broll"
+
+
+@dataclass(frozen=True)
 class CompositionScene:
     scene_id: str
     video_path: Path
@@ -40,6 +51,7 @@ class CompositionScene:
     visual_animation: str = "fade"
     overlay_paths: tuple[Path, ...] = ()
     timed_overlays: tuple[TimedOverlay, ...] = ()
+    timed_video_overlays: tuple[TimedVideoOverlay, ...] = ()
     captions_path: Path | None = None
 
 
@@ -196,6 +208,10 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
         _require_file(overlay.path, f"Overlay temporizado da {scene.scene_id}")
         if overlay.start_seconds < 0 or overlay.end_seconds <= overlay.start_seconds:
             raise ValueError(f"Intervalo inválido no overlay temporizado da {scene.scene_id}.")
+    for overlay in scene.timed_video_overlays:
+        _require_file(overlay.path, f"Vídeo temporizado da {scene.scene_id}")
+        if overlay.start_seconds < 0 or overlay.end_seconds <= overlay.start_seconds:
+            raise ValueError(f"Intervalo inválido no vídeo temporizado da {scene.scene_id}.")
     if scene.captions_path:
         _require_file(scene.captions_path, f"Legendas da {scene.scene_id}")
 
@@ -217,6 +233,10 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
     timed_overlay_start_index = overlay_start_index + len(scene.overlay_paths)
     for overlay in scene.timed_overlays:
         input_args.extend(["-loop", "1", "-i", str(overlay.path)])
+    timed_video_start_index = timed_overlay_start_index + len(scene.timed_overlays)
+    for overlay in scene.timed_video_overlays:
+        input_args.extend(["-i", str(overlay.path)])
+    caption_start_index = timed_video_start_index + len(scene.timed_video_overlays)
     for caption_asset, _start, _end in caption_assets:
         input_args.extend(["-loop", "1", "-i", str(caption_asset)])
     filters = [
@@ -268,8 +288,40 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
             f"enable='between(t,{overlay.start_seconds:.3f},{overlay.end_seconds:.3f})'[{output_label}]"
         )
         previous = output_label
+    for video_index, overlay in enumerate(scene.timed_video_overlays):
+        input_index = timed_video_start_index + video_index
+        overlay_label = f"timedvideo{video_index}"
+        output_label = f"timedvideocomposed{video_index}"
+        target_duration = overlay.end_seconds - overlay.start_seconds
+        source_duration = max(0.05, _probe_duration(overlay.path))
+        visible_duration = min(source_duration, target_duration)
+        freeze_duration = max(0.0, target_duration - visible_duration)
+        video_filters = [
+            f"[{input_index}:v]scale=1080:1920:force_original_aspect_ratio=increase",
+            "crop=1080:1920",
+            "fps=30",
+            f"trim=duration={visible_duration:.3f}",
+            "setpts=PTS-STARTPTS",
+        ]
+        if freeze_duration > 0.001:
+            video_filters.append(
+                f"tpad=stop_mode=clone:stop_duration={freeze_duration:.3f}"
+            )
+        video_filters.extend(
+            [
+                f"setpts=PTS+{overlay.start_seconds:.3f}/TB",
+                "format=yuv420p",
+            ]
+        )
+        filters.append(",".join(video_filters) + f"[{overlay_label}]")
+        filters.append(
+            f"[{previous}][{overlay_label}]overlay=0:0:shortest=0:eof_action=pass:"
+            f"enable='between(t,{overlay.start_seconds:.3f},{overlay.end_seconds:.3f})'"
+            f"[{output_label}]"
+        )
+        previous = output_label
     for cue_index, (_caption_asset, start, end) in enumerate(caption_assets):
-        input_index = timed_overlay_start_index + len(scene.timed_overlays) + cue_index
+        input_index = caption_start_index + cue_index
         output_label = f"captioned{cue_index}"
         filters.append(f"[{input_index}:v]format=rgba[caption{cue_index}]")
         filters.append(
@@ -400,6 +452,18 @@ def compose_video(
                     "animation": scene.visual_animation,
                     "audioSource": "avatar",
                 }
+            if scene.timed_video_overlays:
+                avatar_segment["timedVideoOverlays"] = [
+                    {
+                        "shotId": overlay.shot_id,
+                        "strategy": overlay.strategy,
+                        "startSeconds": overlay.start_seconds,
+                        "endSeconds": overlay.end_seconds,
+                        "audioSource": "base_narration",
+                        "generatedAudioMuted": True,
+                    }
+                    for overlay in scene.timed_video_overlays
+                ]
             manifest.append(avatar_segment)
             if scene.slide_path and scene.slide_mode != "during":
                 slide = workdir / f"scene-{index:02d}-slide.mp4"

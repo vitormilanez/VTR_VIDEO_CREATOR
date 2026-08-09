@@ -158,5 +158,23 @@ Status: concluído.
 
 ## Próximos slices MVP
 
-- MVP-3 — compositor final com vídeo por shot, narração contínua, legendas e música;
+- MVP-3 — compositor final com vídeo por shot, narração contínua, legendas e música: concluído;
 - MVP-4 — fixture medieval, testes P0 e validação final única da suíte completa.
+
+## Slice MVP-3 — Composição final
+
+Status: concluído.
+
+- “Montar vídeo” só libera quando todos os shots da revisão aprovada têm MP4 local;
+- o vídeo-base pronto mais recente do roteiro fornece uma única trilha contínua de narração;
+- os shots são ordenados pelo plano e entram em tela cheia nos intervalos da fala;
+- todos os áudios produzidos pelos shots, inclusive B-roll, são descartados na montagem;
+- vídeos são normalizados para 1080×1920 e shots curtos congelam o último frame até o fim
+  do intervalo, sem repetir o clipe;
+- legendas do vídeo-base são preservadas; quando não há SRT, uma faixa sincronizada é
+  criada deterministicamente a partir da fala aprovada;
+- a música escolhida no perfil é aplicada pelo mixer local existente;
+- composição, fontes, ordem, intervalos e política de áudio ficam no manifesto do job;
+- o MP4 final pode ser assistido e baixado no próprio Story Mode;
+- validação focada: 12 testes do orquestrador/compositor e typecheck aprovados, incluindo
+  ordem visual e prova sintética de que o B-roll não substitui a narração.
