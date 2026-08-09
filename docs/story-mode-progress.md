@@ -65,9 +65,33 @@ Implementado:
 - validação local completa: 35 testes web e 258 testes Python aprovados; 2 smoke
   tests de providers reais permaneceram ignorados.
 
+## Slice 16C — Story Critic, orçamento e aprovação
+
+Status: concluído.
+
+Implementado:
+
+- contrato estruturado do Story Critic com códigos estáveis para narrativa,
+  continuidade, história, medicina, redundância e provider;
+- avaliação obrigatória de todos os shots, incluindo dificuldade, riscos e provider
+  recomendado;
+- orçamento recalculado localmente por estratégia, com custo inicial, pior caso,
+  limite de jobs e limite de regenerações;
+- taxas de job configuráveis, sem preços externos fixados silenciosamente no código;
+- bloqueios estáveis para teto ausente, taxa ausente, jobs excedidos e custo acima do
+  orçamento;
+- cache, deduplicação, tokens e uma única correção de schema para a crítica;
+- versionamento de críticas: refazer cria nova revisão e mantém o histórico;
+- crítica inválida preserva integralmente a revisão válida anterior;
+- aprovação humana vincula Story Hash, Critic Hash e Budget Hash;
+- gate reutilizável que impede qualquer reserva de shot sem plano e orçamento
+  aprovados;
+- nenhuma chamada real a Anthropic ou HeyGen durante os testes;
+- validação local completa: 35 testes web e 264 testes Python aprovados; 2 smoke
+  tests de providers reais permaneceram ignorados.
+
 ## Próximos slices
 
-- 16C — Story Critic e orçamento;
 - 16D — Storyboard na interface;
 - 16E — Orquestrador por shot e Asset Store;
 - 16F — B-roll em vídeo no compositor;

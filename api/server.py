@@ -120,6 +120,17 @@ from api.services.story_director import (
     build_story_prompt,
     story_cache_payload,
 )
+from api.services.story_critic import (
+    STORY_CRITIC_CONTRACT_VERSION,
+    STORY_CRITIC_PROMPT_VERSION,
+    STORY_CRITIC_SCHEMA,
+    StoryCriticError,
+    build_story_critic_prompt,
+    configured_provider_rates,
+    critic_cache_payload,
+    estimate_story_budget,
+    validate_story_critique,
+)
 from api.services.video_generation import (
     DIRECT_VIDEO_DURATIONS,
     direct_video_payload,
@@ -171,6 +182,8 @@ _PAID_GENERATION_LOCKS_GUARD = threading.Lock()
 _PAID_GENERATION_LOCKS: dict[str, threading.RLock] = {}
 _STORY_PLAN_INFLIGHT: dict[str, Future[dict[str, Any]]] = {}
 _STORY_PLAN_INFLIGHT_LOCK = threading.Lock()
+_STORY_CRITIQUE_INFLIGHT: dict[str, Future[dict[str, Any]]] = {}
+_STORY_CRITIQUE_INFLIGHT_LOCK = threading.Lock()
 
 
 def _paid_generation_lock(script_id: str) -> threading.RLock:
@@ -407,11 +420,29 @@ def _ai_db() -> sqlite3.Connection:
             request_fingerprint TEXT NOT NULL UNIQUE,
             prompt_version TEXT NOT NULL,
             model TEXT NOT NULL,
+            active_critique_id TEXT,
+            budget_approved INTEGER NOT NULL DEFAULT 0,
+            budget_approval_json TEXT,
             approved INTEGER NOT NULL DEFAULT 0,
             approved_at TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(story_project_id) REFERENCES story_projects(id),
             UNIQUE(story_project_id, story_revision)
+        );
+        CREATE TABLE IF NOT EXISTS story_critiques (
+            id TEXT PRIMARY KEY,
+            story_version_id TEXT NOT NULL,
+            critique_revision INTEGER NOT NULL,
+            critique_json TEXT NOT NULL,
+            budget_json TEXT NOT NULL,
+            critique_hash TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL UNIQUE,
+            contract_version TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            model TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(story_version_id) REFERENCES story_versions(id),
+            UNIQUE(story_version_id, critique_revision)
         );
         """
     )
@@ -442,6 +473,16 @@ def _ai_db() -> sqlite3.Connection:
     ):
         try:
             conn.execute(f"ALTER TABLE script_editor_states ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    for column, definition in (
+        ("active_critique_id", "TEXT"),
+        ("budget_approved", "INTEGER NOT NULL DEFAULT 0"),
+        ("budget_approval_json", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE story_versions ADD COLUMN {column} {definition}")
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
@@ -3495,6 +3536,22 @@ class StoryPlanCreateIn(StoryBriefSaveIn):
     confirmed: Literal[True]
 
 
+class StoryCritiqueCreateIn(BaseModel):
+    expectedStoryHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expectedProviderCapabilitiesVersion: str = Field(min_length=1, max_length=160)
+    confirmed: Literal[True]
+    forceNewVersion: bool = False
+    idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class StoryPlanApprovalIn(BaseModel):
+    critiqueId: str = Field(min_length=1, max_length=160)
+    expectedStoryHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expectedBudgetHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    approvalActor: str = Field(default="editor_user", min_length=1, max_length=120)
+    confirmed: Literal[True]
+
+
 class VideoCreateIn(BaseModel):
     scriptId: str
     avatarId: str | None = Field(default=None, max_length=160)
@@ -3912,11 +3969,60 @@ def _story_version_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "requestFingerprint": row["request_fingerprint"],
         "promptVersion": row["prompt_version"],
         "model": row["model"],
+        "activeCritiqueId": row["active_critique_id"],
+        "budgetApproved": bool(row["budget_approved"]),
+        "budgetApproval": (
+            json.loads(str(row["budget_approval_json"]))
+            if row["budget_approval_json"]
+            else None
+        ),
         "approved": bool(row["approved"]),
         "approvedAt": row["approved_at"],
         "createdAt": row["created_at"],
         "plan": plan,
     }
+
+
+def _story_critique_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "storyVersionId": row["story_version_id"],
+        "critiqueRevision": int(row["critique_revision"]),
+        "critique": json.loads(str(row["critique_json"])),
+        "budget": json.loads(str(row["budget_json"])),
+        "critiqueHash": row["critique_hash"],
+        "requestFingerprint": row["request_fingerprint"],
+        "contractVersion": row["contract_version"],
+        "promptVersion": row["prompt_version"],
+        "model": row["model"],
+        "createdAt": row["created_at"],
+    }
+
+
+def _story_version(version_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        return _story_version_from_row(
+            conn.execute(
+                "SELECT * FROM story_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+        )
+    finally:
+        conn.close()
+
+
+def _story_critique(critique_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        return _story_critique_from_row(
+            conn.execute(
+                "SELECT * FROM story_critiques WHERE id = ?", (critique_id,)
+            ).fetchone()
+        )
+    finally:
+        conn.close()
 
 
 def _story_project_from_row(
@@ -3933,6 +4039,13 @@ def _story_project_from_row(
                 (row["active_story_version"],),
             ).fetchone()
         )
+        if active_version and active_version.get("activeCritiqueId"):
+            active_version["activeCritique"] = _story_critique_from_row(
+                conn.execute(
+                    "SELECT * FROM story_critiques WHERE id = ?",
+                    (active_version["activeCritiqueId"],),
+                ).fetchone()
+            )
     return {
         "id": row["id"],
         "scriptId": row["script_id"],
@@ -4357,6 +4470,500 @@ def create_script_story_plan(script_id: str, payload: StoryPlanCreateIn) -> dict
     finally:
         with _STORY_PLAN_INFLIGHT_LOCK:
             _STORY_PLAN_INFLIGHT.pop(request_key, None)
+
+
+def _story_version_context(
+    version_id: str,
+    *,
+    expected_story_hash: str,
+    expected_provider_capabilities_version: str,
+) -> dict[str, Any]:
+    version = _story_version(version_id)
+    if not version:
+        raise _story_error(404, "STORY_VERSION_NOT_FOUND", "Versão narrativa não encontrada.")
+    conn = _ai_db()
+    try:
+        project_row = conn.execute(
+            "SELECT * FROM story_projects WHERE id = ?", (version["storyProjectId"],)
+        ).fetchone()
+        project = _story_project_from_row(conn, project_row)
+    finally:
+        conn.close()
+    if not project or project.get("activeStoryVersion") != version_id:
+        raise _story_error(
+            409,
+            "STORY_VERSION_NOT_ACTIVE",
+            "Esta versão não é mais o Story Plan ativo.",
+        )
+    if version["storyHash"] != expected_story_hash:
+        raise _story_error(
+            409,
+            "STORY_HASH_CONFLICT",
+            "O Story Plan foi alterado. Recarregue antes de continuar.",
+        )
+    source = _story_source_context(
+        project["scriptId"],
+        expected_script_revision=version["scriptRevision"],
+        expected_final_speech_hash=version["finalSpeechHash"],
+        script_contract_version=version["scriptContractVersion"],
+    )
+    provider_context = _story_capability_context(
+        expected_provider_capabilities_version,
+        script_id=project["scriptId"],
+    )
+    if version["providerCapabilitiesVersion"] != provider_context[
+        "providerCapabilitiesVersion"
+    ]:
+        raise _story_error(
+            409,
+            "STORY_PROVIDER_VERSION_CONFLICT",
+            "O plano usa uma versão antiga das capabilities do provider.",
+        )
+    return {
+        "version": version,
+        "project": project,
+        "source": source,
+        "providerContext": provider_context,
+        "brief": StoryBrief.model_validate(project["brief"]),
+    }
+
+
+def _save_story_critique(
+    *,
+    story_version_id: str,
+    critique: dict[str, Any],
+    budget: dict[str, Any],
+    request_fingerprint: str,
+    model: str,
+) -> dict[str, Any]:
+    conn = _ai_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM story_critiques WHERE request_fingerprint = ?",
+            (request_fingerprint,),
+        ).fetchone()
+        if existing:
+            saved = _story_critique_from_row(existing)
+            if not saved:
+                raise RuntimeError("Crítica narrativa existente não pôde ser lida.")
+            return saved
+        row = conn.execute(
+            "SELECT COALESCE(MAX(critique_revision), 0) AS revision FROM story_critiques WHERE story_version_id = ?",
+            (story_version_id,),
+        ).fetchone()
+        revision = int(row["revision"] or 0) + 1
+        critique_id = "story-critique-" + request_fingerprint[:20]
+        now = _now()
+        critique_hash = story_canonical_hash(critique)
+        conn.execute(
+            """INSERT INTO story_critiques(
+                   id, story_version_id, critique_revision, critique_json,
+                   budget_json, critique_hash, request_fingerprint,
+                   contract_version, prompt_version, model, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                critique_id,
+                story_version_id,
+                revision,
+                json.dumps(critique, ensure_ascii=False),
+                json.dumps(budget, ensure_ascii=False),
+                critique_hash,
+                request_fingerprint,
+                STORY_CRITIC_CONTRACT_VERSION,
+                STORY_CRITIC_PROMPT_VERSION,
+                model,
+                now,
+            ),
+        )
+        project_status = (
+            "reviewed"
+            if critique["decision"] == "ready" and budget["approvalEligible"]
+            else "budget_blocked"
+            if budget["issues"]
+            else "changes_required"
+        )
+        conn.execute(
+            """UPDATE story_versions
+               SET active_critique_id=?, approved=0, approved_at=NULL,
+                   budget_approved=0, budget_approval_json=NULL
+               WHERE id=?""",
+            (critique_id, story_version_id),
+        )
+        conn.execute(
+            """UPDATE story_projects SET status=?, updated_at=?
+               WHERE id=(SELECT story_project_id FROM story_versions WHERE id=?)""",
+            (project_status, now, story_version_id),
+        )
+        saved_row = conn.execute(
+            "SELECT * FROM story_critiques WHERE id = ?", (critique_id,)
+        ).fetchone()
+        conn.commit()
+        saved = _story_critique_from_row(saved_row)
+    finally:
+        conn.close()
+    if not saved:
+        raise RuntimeError("Não foi possível persistir a crítica narrativa.")
+    return saved
+
+
+def _story_critic_model_call(
+    *,
+    model: str,
+    system: list[dict[str, Any]],
+    user: str,
+) -> tuple[Any, str]:
+    import anthropic
+
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model=model,
+        max_tokens=4000,
+        system=system,
+        output_config={"format": {"type": "json_schema", "schema": STORY_CRITIC_SCHEMA}},
+        messages=[{"role": "user", "content": user}],
+    )
+    raw_text = "".join(getattr(block, "text", "") for block in message.content)
+    return message, raw_text
+
+
+def _run_story_critic(
+    *,
+    context: dict[str, Any],
+    model: str,
+    repair_model: str,
+) -> dict[str, Any]:
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise _story_error(
+            503,
+            "ANTHROPIC_NOT_CONFIGURED",
+            "Defina ANTHROPIC_API_KEY para usar o Story Critic.",
+        )
+    system, user = build_story_critic_prompt(
+        plan=context["version"]["plan"],
+        brief=context["brief"],
+        allowed_provider_strategies=context["providerContext"]["providerStrategies"],
+    )
+    last_error = StoryCriticError(
+        "STORY_CRITIC_SCHEMA_INVALID", "A crítica não passou no contrato."
+    )
+    for attempt in range(2):
+        selected_model = model if attempt == 0 else repair_model
+        request_user = user
+        if attempt:
+            request_user += "\n\n" + build_repair_instruction(
+                last_error.code, last_error.message
+            )
+        try:
+            message, raw = _story_critic_model_call(
+                model=selected_model,
+                system=system,
+                user=request_user,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "story_critic_provider_error model=%s attempt=%s type=%s",
+                selected_model,
+                attempt + 1,
+                type(exc).__name__,
+            )
+            raise _story_error(
+                502,
+                "STORY_CRITIC_PROVIDER_ERROR",
+                "O Story Critic não respondeu. A crítica anterior foi preservada.",
+            ) from exc
+        _record_anthropic_usage(
+            "story.critique" if attempt == 0 else "story.critique.repair",
+            selected_model,
+            message,
+        )
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            critique = validate_story_critique(
+                parsed,
+                plan=context["version"]["plan"],
+                allowed_provider_strategies=context["providerContext"][
+                    "providerStrategies"
+                ],
+            )
+            return {
+                "critique": critique,
+                "model": model,
+                "repairModel": selected_model if attempt else None,
+                "retryCount": attempt,
+            }
+        except json.JSONDecodeError as exc:
+            last_error = StoryCriticError("STORY_CRITIC_JSON_INVALID", str(exc))
+        except StoryCriticError as exc:
+            last_error = exc
+    raise _story_error(
+        502,
+        last_error.code,
+        "A crítica continuou inválida após uma correção. A versão anterior foi preservada.",
+    )
+
+
+@app.get("/api/story-versions/{version_id}/critique")
+def get_story_version_critique(version_id: str) -> dict:
+    version = _story_version(version_id)
+    if not version:
+        raise _story_error(404, "STORY_VERSION_NOT_FOUND", "Versão narrativa não encontrada.")
+    critique = (
+        _story_critique(str(version["activeCritiqueId"]))
+        if version.get("activeCritiqueId")
+        else None
+    )
+    return {"ok": True, "version": version, "critique": critique}
+
+
+@app.post("/api/story-versions/{version_id}/critique")
+def create_story_version_critique(
+    version_id: str,
+    payload: StoryCritiqueCreateIn,
+) -> dict:
+    if payload.forceNewVersion and not payload.idempotencyKey:
+        raise _story_error(
+            422,
+            "CRITIQUE_IDEMPOTENCY_KEY_REQUIRED",
+            "Informe uma chave de idempotência para refazer a crítica.",
+        )
+    context = _story_version_context(
+        version_id,
+        expected_story_hash=payload.expectedStoryHash,
+        expected_provider_capabilities_version=payload.expectedProviderCapabilitiesVersion,
+    )
+    model = str(os.getenv("ANTHROPIC_STORY_CRITIC_MODEL") or "").strip()
+    if not model:
+        raise _story_error(
+            503,
+            "STORY_CRITIC_MODEL_NOT_CONFIGURED",
+            "Defina ANTHROPIC_STORY_CRITIC_MODEL com um modelo premium disponível.",
+        )
+    repair_model = str(os.getenv("ANTHROPIC_STORY_REPAIR_MODEL") or model).strip()
+    force_key = payload.idempotencyKey if payload.forceNewVersion else None
+    cache_payload = critic_cache_payload(
+        plan=context["version"]["plan"],
+        brief=context["brief"],
+        story_hash=context["version"]["storyHash"],
+        story_revision=context["version"]["storyRevision"],
+        provider_capabilities_version=context["providerContext"][
+            "providerCapabilitiesVersion"
+        ],
+        allowed_provider_strategies=context["providerContext"]["providerStrategies"],
+        model=model,
+        force_key=force_key,
+    )
+    request_fingerprint = story_canonical_hash(cache_payload)
+    request_key = _ai_cache_key("story.critique", cache_payload)
+    owner = False
+    with _STORY_CRITIQUE_INFLIGHT_LOCK:
+        future = _STORY_CRITIQUE_INFLIGHT.get(request_key)
+        if future is None:
+            future = Future()
+            _STORY_CRITIQUE_INFLIGHT[request_key] = future
+            owner = True
+    if not owner:
+        try:
+            response = future.result(timeout=180)
+        except FutureTimeoutError as exc:
+            raise _story_error(
+                409,
+                "STORY_CRITIQUE_IN_PROGRESS",
+                "Uma crítica idêntica ainda está em andamento.",
+            ) from exc
+        return {**response, "deduplicated": True}
+
+    try:
+        cached = None if payload.forceNewVersion else _ai_cache_get(
+            "story.critique", cache_payload
+        )
+        critic_result: dict[str, Any] | None = None
+        if cached and isinstance(cached.get("critique"), dict):
+            try:
+                critique = validate_story_critique(
+                    cached["critique"],
+                    plan=context["version"]["plan"],
+                    allowed_provider_strategies=context["providerContext"][
+                        "providerStrategies"
+                    ],
+                )
+                critic_result = {
+                    "critique": critique,
+                    "model": str(cached.get("model") or model),
+                    "repairModel": cached.get("repairModel"),
+                    "retryCount": int(cached.get("retryCount") or 0),
+                }
+            except StoryCriticError:
+                critic_result = None
+        cache_hit = critic_result is not None
+        if critic_result is None:
+            critic_result = _run_story_critic(
+                context=context,
+                model=model,
+                repair_model=repair_model,
+            )
+            _ai_cache_put("story.critique", cache_payload, critic_result)
+        budget = estimate_story_budget(
+            plan=context["version"]["plan"],
+            brief=context["brief"],
+            provider_rates=configured_provider_rates(os.environ),
+        )
+        critique = _save_story_critique(
+            story_version_id=version_id,
+            critique=critic_result["critique"],
+            budget=budget,
+            request_fingerprint=request_fingerprint,
+            model=critic_result["model"],
+        )
+        response = {
+            "ok": True,
+            "critique": critique,
+            "version": _story_version(version_id),
+            "cacheHit": cache_hit,
+            "deduplicated": False,
+            "retryCount": critic_result["retryCount"],
+            "repairModel": critic_result["repairModel"],
+        }
+        future.set_result(response)
+        return response
+    except BaseException as exc:
+        future.set_exception(exc)
+        raise
+    finally:
+        with _STORY_CRITIQUE_INFLIGHT_LOCK:
+            _STORY_CRITIQUE_INFLIGHT.pop(request_key, None)
+
+
+def _approve_story_version(
+    version_id: str,
+    *,
+    critique_id: str,
+    expected_story_hash: str,
+    expected_budget_hash: str,
+    approval_actor: str,
+) -> dict[str, Any]:
+    version = _story_version(version_id)
+    if not version:
+        raise _story_error(404, "STORY_VERSION_NOT_FOUND", "Versão narrativa não encontrada.")
+    context = _story_version_context(
+        version_id,
+        expected_story_hash=expected_story_hash,
+        expected_provider_capabilities_version=version["providerCapabilitiesVersion"],
+    )
+    critique = _story_critique(critique_id)
+    if (
+        not critique
+        or critique["storyVersionId"] != version_id
+        or version.get("activeCritiqueId") != critique_id
+    ):
+        raise _story_error(
+            409,
+            "STORY_CRITIQUE_NOT_ACTIVE",
+            "A crítica informada não é a revisão ativa deste Story Plan.",
+        )
+    budget = estimate_story_budget(
+        plan=version["plan"],
+        brief=context["brief"],
+        provider_rates=configured_provider_rates(os.environ),
+    )
+    if budget["budgetHash"] != expected_budget_hash or critique["budget"][
+        "budgetHash"
+    ] != expected_budget_hash:
+        raise _story_error(
+            409,
+            "STORY_BUDGET_CHANGED",
+            "O orçamento mudou desde a crítica. Refaça a revisão antes de aprovar.",
+        )
+    if not budget["approvalEligible"]:
+        first_issue = budget["issues"][0]
+        raise _story_error(422, first_issue["code"], first_issue["message"])
+    if critique["critique"]["decision"] != "ready":
+        raise _story_error(
+            422,
+            "STORY_CRITIQUE_NOT_READY",
+            "Resolva os problemas da crítica antes de aprovar o Story Plan.",
+        )
+    approval = {
+        "actor": approval_actor,
+        "approvedAt": _now(),
+        "storyHash": version["storyHash"],
+        "critiqueId": critique_id,
+        "critiqueHash": critique["critiqueHash"],
+        "budgetHash": expected_budget_hash,
+        "maxBudgetUsd": budget["maxBudgetUsd"],
+        "estimatedWorstCaseUsd": budget["estimatedWorstCaseUsd"],
+        "worstCaseHeyGenJobs": budget["worstCaseHeyGenJobs"],
+    }
+    conn = _ai_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """UPDATE story_versions
+               SET approved=1, approved_at=?, budget_approved=1,
+                   budget_approval_json=?
+               WHERE id=? AND active_critique_id=?""",
+            (
+                approval["approvedAt"],
+                json.dumps(approval, ensure_ascii=False),
+                version_id,
+                critique_id,
+            ),
+        )
+        conn.execute(
+            """UPDATE story_projects SET status='approved', updated_at=?
+               WHERE id=? AND active_story_version=?""",
+            (approval["approvedAt"], version["storyProjectId"], version_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "version": _story_version(version_id),
+        "project": _story_project(context["project"]["scriptId"]),
+        "approval": approval,
+    }
+
+
+def _authorize_story_production(version_id: str) -> dict[str, Any]:
+    version = _story_version(version_id)
+    if not version:
+        raise _story_error(404, "STORY_VERSION_NOT_FOUND", "Versão narrativa não encontrada.")
+    approval = version.get("budgetApproval")
+    if not version.get("approved") or not version.get("budgetApproved") or not approval:
+        raise _story_error(
+            422,
+            "STORY_BUDGET_APPROVAL_REQUIRED",
+            "Aprove o Story Plan e o orçamento antes de reservar qualquer shot.",
+        )
+    context = _story_version_context(
+        version_id,
+        expected_story_hash=version["storyHash"],
+        expected_provider_capabilities_version=version["providerCapabilitiesVersion"],
+    )
+    budget = estimate_story_budget(
+        plan=version["plan"],
+        brief=context["brief"],
+        provider_rates=configured_provider_rates(os.environ),
+    )
+    if not budget["approvalEligible"] or budget["budgetHash"] != approval.get("budgetHash"):
+        raise _story_error(
+            409,
+            "STORY_BUDGET_APPROVAL_STALE",
+            "O orçamento aprovado não corresponde mais ao plano e às taxas atuais.",
+        )
+    return {**context, "budget": budget, "approval": approval}
+
+
+@app.post("/api/story-versions/{version_id}/approve")
+def approve_story_version(version_id: str, payload: StoryPlanApprovalIn) -> dict:
+    result = _approve_story_version(
+        version_id,
+        critique_id=payload.critiqueId,
+        expected_story_hash=payload.expectedStoryHash,
+        expected_budget_hash=payload.expectedBudgetHash,
+        approval_actor=payload.approvalActor,
+    )
+    return {"ok": True, **result}
 
 
 @app.get("/api/scripts/{script_id}/production-profile")
