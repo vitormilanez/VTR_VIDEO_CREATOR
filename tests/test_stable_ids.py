@@ -152,7 +152,7 @@ class StableIdTests(unittest.TestCase):
             30,
         )
         self.assertIn("Tome 5 mg", text)
-        self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
+        self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, text)
 
     def test_final_narration_compliance_accepts_safe_educational_text(self) -> None:
         text = server._validate_final_narration(
@@ -166,7 +166,7 @@ class StableIdTests(unittest.TestCase):
             None,
             15,
         )
-        self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
+        self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, text)
 
     def test_final_narration_allows_shorter_actual_duration_than_target(self) -> None:
         text = server._validate_final_narration(
@@ -178,7 +178,7 @@ class StableIdTests(unittest.TestCase):
             45,
         )
         self.assertIn("contexto", text)
-        self.assertIn(server.MANDATORY_VIDEO_OUTRO, text)
+        self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, text)
 
     def test_final_narration_blocks_placeholder_script(self) -> None:
         with self.assertRaises(server.HTTPException) as raised:
@@ -227,8 +227,8 @@ class StableIdTests(unittest.TestCase):
         self.assertIn("trinta segundos", prompt)
         self.assertIn("Follow the supplied script closely", prompt)
         self.assertIn("Do not add burned-in captions", prompt)
-        self.assertTrue(prompt.count(server.MANDATORY_VIDEO_OUTRO) >= 2)
-        self.assertIn("This must be the final sentence", prompt)
+        self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, prompt)
+        self.assertIn("End exactly where the approved narration ends", prompt)
         self.assertIn("Let the narration determine the final duration", prompt)
 
     def test_direct_short_video_payload_uses_continuous_speech_and_speed(self) -> None:
@@ -461,7 +461,7 @@ class StableIdTests(unittest.TestCase):
         )
         self.assertIn("Texto falado revisado.", prompt)
         self.assertNotIn("Texto original", prompt)
-        self.assertIn(server.MANDATORY_VIDEO_OUTRO, prompt)
+        self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, prompt)
 
     def test_video_prompt_respects_custom_outro(self) -> None:
         custom_outro = "Continue acompanhando para entender os próximos estudos."

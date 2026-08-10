@@ -828,17 +828,12 @@ function RoteiroDetalhe() {
       setNarrationText((current) => removeNarrationOutro(current, outroText));
       setOutroText("");
       setSpeechMode("direto");
-    } else if (!outroText.trim()) {
-      setOutroText(DEFAULT_OUTRO);
-      setDisplayText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
-      setSpokenText("");
-      setNarrationText((current) => normalizeNarrationOutro(current, DEFAULT_OUTRO));
     }
   }
 
   async function persistCurrentScript() {
     if (!draft) throw new Error("Roteiro não carregado.");
-    const canonicalText = ensureNarrationOutro(displayText, outroText);
+    const canonicalText = displayText.trim();
     const requested = {
       ...draft,
       textoFalado: canonicalText,
@@ -979,7 +974,7 @@ function RoteiroDetalhe() {
       detail: cinematicMode
         ? "O Cinematic cria a encenação sem usar o Scene Plan antigo."
         : heygenAgentMode
-          ? "O HeyGen Video Agent decide a estrutura visual e os cortes."
+          ? "Job único com o avatar principal; para dois looks use produção guiada pelo app."
           : avatarMode === "single"
             ? "Look único não precisa de plano de cenas."
             : scenePlan
@@ -1963,7 +1958,7 @@ function RoteiroDetalhe() {
                       <Sparkles className="h-4 w-4 text-primary" /> HeyGen Video Agent
                     </span>
                     <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-                      O HeyGen decide os cortes, interações e visuais do vídeo a partir do roteiro.
+                      O HeyGen monta um job único com o avatar principal a partir do roteiro.
                     </span>
                   </button>
                   <button
@@ -2005,10 +2000,10 @@ function RoteiroDetalhe() {
                 {generationMode === "video_agent" ? (
                   <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                     <span className="font-semibold text-foreground">Modo autônomo do HeyGen.</span>{" "}
-                    Enviamos fala aprovada, avatar, voz, humor, duração e formato. Nenhuma direção
-                    cinematic entra neste fluxo. Não é necessário criar Scene Plan, slides ou render
-                    local; a montagem e os elementos visuais são produzidos pelo HeyGen e consomem
-                    créditos dele.
+                    Enviamos fala aprovada, avatar principal, voz, humor, duração e formato. Ele não
+                    troca entre dois looks no mesmo job; para duas posições, use Produção guiada pelo
+                    app, que gera cenas separadas e contínuas. Nenhuma direção cinematic entra neste
+                    fluxo.
                   </div>
                 ) : cinematicMode ? (
                   <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
@@ -2052,7 +2047,7 @@ function RoteiroDetalhe() {
                       : cinematicMode
                         ? "O Cinematic organiza câmera, encenação e acontecimentos dentro deste tempo aproximado."
                         : heygenAgentMode
-                          ? "O HeyGen Video Agent organiza ritmo, cortes e visuais dentro deste tempo aproximado."
+                          ? "O HeyGen Video Agent organiza um job único dentro deste tempo aproximado."
                           : "O app distribui a fala e as cenas dentro deste tempo aproximado."}
                 </p>
                 {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
@@ -2229,12 +2224,6 @@ function RoteiroDetalhe() {
                             id="outro-text"
                             value={outroText}
                             onChange={(event) => setOutroText(event.target.value)}
-                            onBlur={() =>
-                              setDisplayText((current) => {
-                                editorRevisionRef.current += 1;
-                                return normalizeNarrationOutro(current, outroText);
-                              })
-                            }
                             placeholder="Ex.: Me siga para mais dicas."
                             maxLength={180}
                           />
@@ -2681,7 +2670,7 @@ function buildNarrationText(script: Script, outro = DEFAULT_OUTRO): string {
   // Se o roteiro ja veio com o texto falado gerado pela IA (fluxo com tom
   // editorial), usa esse texto pronto em vez de remontar as partes.
   if (script.textoFalado?.trim()) {
-    return ensureNarrationOutro(script.textoFalado, outro);
+    return script.textoFalado.trim();
   }
   const body = [
     script.hook,
@@ -2693,17 +2682,7 @@ function buildNarrationText(script: Script, outro = DEFAULT_OUTRO): string {
     .map((part) => part.trim())
     .filter(Boolean)
     .join("\n\n");
-  return normalizeNarrationOutro(body || outro, outro);
-}
-
-function ensureNarrationOutro(text: string, outro: string): string {
-  const cleanText = text.trim();
-  const cleanOutro = outro.replace(/\s+/g, " ").trim();
-  if (!cleanOutro || !cleanText) return cleanText || cleanOutro;
-  if (cleanText.toLocaleLowerCase("pt-BR").endsWith(cleanOutro.toLocaleLowerCase("pt-BR"))) {
-    return cleanText;
-  }
-  return `${cleanText}\n\n${cleanOutro}`;
+  return (body || outro).trim();
 }
 
 function editorScriptSignature(script: Script): string {

@@ -344,7 +344,7 @@ describe("script editor React interactions", () => {
       expect(saveScript).toHaveBeenCalledWith(
         expect.objectContaining({
           id: "script-test",
-          textoFalado: `${nextSpeech}\n\n${baseScript.outroText}`,
+          textoFalado: nextSpeech,
           titulo: baseScript.titulo,
         }),
       ),
@@ -355,9 +355,7 @@ describe("script editor React interactions", () => {
 
     firstRender.unmount();
     render(<RoteiroDetalhe />);
-    expect(await screen.findByLabelText("Fala final")).toHaveValue(
-      `${nextSpeech}\n\n${baseScript.outroText}`,
-    );
+    expect(await screen.findByLabelText("Fala final")).toHaveValue(nextSpeech);
   });
 
   it("keeps an AI rewrite as the canonical speech after saving", async () => {

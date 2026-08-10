@@ -36,16 +36,6 @@ export function narrationQualityIssues(
     if (pattern.regex.test(normalized)) issues.push(pattern.message);
   }
 
-  const selectedOutro = durationSeconds === 10 ? "" : outro.replace(/\s+/g, " ").trim();
-  if (selectedOutro) {
-    const outroMatches = normalized.match(new RegExp(escapeRegExp(selectedOutro), "gi")) ?? [];
-    if (outroMatches.length !== 1) {
-      issues.push("A frase final deve aparecer exatamente uma vez.");
-    } else if (!normalized.toLowerCase().endsWith(selectedOutro.toLowerCase())) {
-      issues.push("A frase final precisa ser a última frase.");
-    }
-  }
-
   const assessment = assessScriptDuration(text, durationSeconds as DurationPreset);
   if (assessment.status === "blocking") issues.push(assessment.message);
 

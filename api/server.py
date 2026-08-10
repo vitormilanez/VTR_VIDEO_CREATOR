@@ -2418,21 +2418,19 @@ def _video_prompt(
 ) -> str:
     texto = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
     omit_outro = duration_seconds == 10
-    selected_outro = "" if omit_outro else re.sub(r"\s+", " ", outro_text).strip() or MANDATORY_VIDEO_OUTRO
+    selected_outro = "" if omit_outro else re.sub(r"\s+", " ", outro_text).strip()
     if omit_outro:
         texto = _strip_video_outros(texto, outro_text)
     if optimize_pronunciation:
         texto = prepare_script_for_heygen_voice(texto)
-    if selected_outro and selected_outro.lower() not in texto.lower():
-        texto = f"{texto.rstrip()}\n{selected_outro}"
-
     ending_direction = (
         "Start speaking immediately and end on the hook's strongest point. Do not add a closing phrase, "
         "spoken call to action, greeting, intro sequence, or outro sequence."
         if omit_outro
         else (
-            "End the spoken narration exactly once with: "
-            f'"{selected_outro}" This must be the final sentence.'
+            "End exactly where the approved narration ends. Do not add a default closing phrase, "
+            "spoken call to action, greeting, intro sequence, or outro sequence unless it is already "
+            "written in the supplied script."
         )
     )
 
@@ -12316,10 +12314,8 @@ def _validate_final_narration(
     text = narration_text.strip() if narration_text and narration_text.strip() else _script_text(script)
     if not text:
         raise HTTPException(status_code=422, detail="O texto falado esta vazio.")
-    selected_outro = "" if duration_seconds == 10 else re.sub(r"\s+", " ", outro).strip()
+    selected_outro = ""
     final_text = _strip_video_outros(text, outro) if duration_seconds == 10 else text
-    if selected_outro and selected_outro.lower() not in final_text.lower():
-        final_text = f"{final_text.rstrip()} {selected_outro}"
     quality_issues = [
         issue
         for issue in _narration_quality_issues(final_text, duration_seconds, selected_outro)
