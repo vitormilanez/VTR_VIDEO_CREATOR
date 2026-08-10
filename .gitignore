@@ -41,6 +41,7 @@ tmp/
 
 # Exports gerados pelo botao "Salvar local" (regeneraveis)
 content/packs/
+content/biblioteca/
 
 # Biblioteca local de vídeos produzidos (arquivos finais e artefatos de renderização)
 content/videos/
