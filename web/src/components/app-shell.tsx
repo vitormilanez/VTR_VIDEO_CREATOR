@@ -15,6 +15,7 @@ import {
   Scissors,
   Newspaper,
   Layers3,
+  Clapperboard,
 } from "lucide-react";
 import {
   Sidebar,
@@ -58,6 +59,7 @@ const navGroups: Array<{ label: string | null; items: NavItem[] }> = [
     items: [
       { title: "Producao de videos", url: "/producao", icon: Film },
       { title: "Kit gráfico local", url: "/kit-local", icon: Layers3 },
+      { title: "DaVinci Resolve", url: "/davinci", icon: Clapperboard },
       { title: "Cortes", url: "/cortes", icon: Scissors },
       { title: "Avatares", url: "/avatares", icon: ScanFace },
       { title: "Pack de conteudo", url: "/packs", icon: PanelsTopLeft },
