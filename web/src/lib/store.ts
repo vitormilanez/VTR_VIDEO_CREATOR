@@ -91,6 +91,29 @@ const nextProgresso: Record<VideoJobStatus, number> = {
   erro: 0,
 };
 
+const LOCAL_SCRIPT_WRITE_TTL_MS = 2 * 60 * 1000;
+const localScriptWrites = new Map<string, number>();
+
+function markLocalScriptWrite(id: string) {
+  localScriptWrites.set(id, Date.now());
+}
+
+function hasFreshLocalScriptWrite(id: string) {
+  const writtenAt = localScriptWrites.get(id);
+  if (!writtenAt) return false;
+  if (Date.now() - writtenAt <= LOCAL_SCRIPT_WRITE_TTL_MS) return true;
+  localScriptWrites.delete(id);
+  return false;
+}
+
+function mergeHydratedScripts(incoming: Script[], current: Script[]) {
+  const currentById = new Map(current.map((script) => [script.id, script]));
+  return incoming.map((script) => {
+    const local = currentById.get(script.id);
+    return local && hasFreshLocalScriptWrite(script.id) ? local : script;
+  });
+}
+
 function randomInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -115,15 +138,21 @@ export const useStore = create<State>()(
           ideas: s.ideas.map((i) => (i.id === id ? { ...i, ...patch } : i)),
         })),
       addScript: (sc) =>
-        set((s) => ({
-          scripts: s.scripts.some((script) => script.id === sc.id)
-            ? s.scripts.map((script) => (script.id === sc.id ? sc : script))
-            : [sc, ...s.scripts],
-        })),
+        set((s) => {
+          markLocalScriptWrite(sc.id);
+          return {
+            scripts: s.scripts.some((script) => script.id === sc.id)
+              ? s.scripts.map((script) => (script.id === sc.id ? sc : script))
+              : [sc, ...s.scripts],
+          };
+        }),
       updateScript: (id, patch) =>
-        set((s) => ({
-          scripts: s.scripts.map((sc) => (sc.id === id ? { ...sc, ...patch } : sc)),
-        })),
+        set((s) => {
+          markLocalScriptWrite(id);
+          return {
+            scripts: s.scripts.map((sc) => (sc.id === id ? { ...sc, ...patch } : sc)),
+          };
+        }),
       removeScript: (id) =>
         set((s) => ({
           scripts: s.scripts.filter((script) => script.id !== id),
@@ -149,7 +178,7 @@ export const useStore = create<State>()(
         set((s) => ({
           trends: payload.trends ?? s.trends,
           ideas: payload.ideas ?? s.ideas,
-          scripts: payload.scripts ?? s.scripts,
+          scripts: payload.scripts ? mergeHydratedScripts(payload.scripts, s.scripts) : s.scripts,
           videoJobs: payload.videoJobs ?? s.videoJobs,
           calendarPosts: payload.calendarPosts ?? s.calendarPosts,
           performance: payload.performance ?? s.performance,
