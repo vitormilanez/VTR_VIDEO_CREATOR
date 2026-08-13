@@ -100,7 +100,6 @@ def test_generation_gate_allows_warning_but_blocks_hard_limit() -> None:
         "technical_error": None,
         "medical_review": "recommended",
         "human_review_approved": False,
-        "script_status": "aprovado_clinicamente",
         "final_saved": True,
         "final_confirmed": True,
     }
@@ -378,7 +377,6 @@ def test_required_medical_review_blocks_ideal_duration_without_title_side_effect
         technical_error=None,
         medical_review="required",
         human_review_approved=False,
-        script_status="aprovado_clinicamente",
         final_saved=True,
         final_confirmed=True,
     )
@@ -395,7 +393,6 @@ def test_required_medical_review_blocks_ideal_duration_without_title_side_effect
         ({"ai_operation_in_flight": True}, "ai_in_flight"),
         ({"schema_valid": False}, "ai_schema_invalid"),
         ({"technical_error": "Falha de rede"}, "technical_error"),
-        ({"script_status": "em_revisao"}, "script_not_ready"),
         ({"final_saved": False}, "unsaved"),
         ({"final_confirmed": False}, "not_confirmed"),
     ],
@@ -412,7 +409,6 @@ def test_generation_gate_reports_each_independent_blocker(
         "technical_error": None,
         "medical_review": "recommended",
         "human_review_approved": False,
-        "script_status": "aprovado_clinicamente",
         "final_saved": True,
         "final_confirmed": True,
     }
@@ -452,7 +448,7 @@ def test_video_endpoint_uses_central_duration_gate_before_provider(
     speech = words(word_count)
     script = {
         "id": "s-video-gate",
-        "status": "aprovado_clinicamente",
+        "status": "aguardando_validacao",
         "risco": "baixo",
         "textoFalado": speech,
     }

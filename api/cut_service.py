@@ -14,6 +14,11 @@ from typing import Any, Callable
 import requests
 
 from api.job_store import JobStore
+from api.services.medical_identity import (
+    MEDICAL_EDITORIAL_PROMPT,
+    ensure_medical_professional_identification,
+    safe_editorial_cta,
+)
 from api.services.transcript_service import transcription_python
 
 
@@ -100,6 +105,14 @@ def _slug(value: str) -> str:
 
 def _caption_python(root: Path) -> Path:
     return transcription_python(root)
+
+
+def _ensure_clip_captions(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mantém também respostas antigas do cache prontas para publicar."""
+    for clip in clips:
+        clip["cta"] = safe_editorial_cta(clip.get("cta"))
+        clip["caption"] = ensure_medical_professional_identification(clip.get("caption"))
+    return clips
 
 
 def _download_source(job_id: str, url: str, destination: Path) -> None:
@@ -635,7 +648,7 @@ def _local_clip_suggestions(
                     "hook": text[:180],
                     "summary": text[:320],
                     "cta": "Salve este trecho para rever depois.",
-                    "caption": text[:500],
+                    "caption": ensure_medical_professional_identification(text[:500]),
                     "cover": (title[:60] or "Trecho em destaque").upper(),
                     "hashtags": "#saude #bemestar #conteudoeducativo",
                     "reason": reason,
@@ -715,12 +728,14 @@ def _suggest_clips(
 ) -> tuple[list[dict[str, Any]], str]:
     if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")):
         return (
-            _local_clip_suggestions(
-                transcript,
-                count=count,
-                min_duration=min_duration,
-                max_duration=max_duration,
-                auto_duration=auto_duration,
+            _ensure_clip_captions(
+                _local_clip_suggestions(
+                    transcript,
+                    count=count,
+                    min_duration=min_duration,
+                    max_duration=max_duration,
+                    auto_duration=auto_duration,
+                )
             ),
             "local",
         )
@@ -755,12 +770,14 @@ Regras:
 - O trecho precisa comecar com contexto ou hook compreensivel.
 - Para saude, nao transforme a fala em prescricao ou promessa.
 - Score entre 0 e 100.
-- CTA, legenda e hashtags sao sugestoes editoriais, nao devem inventar fatos.
+- CTA, legenda e hashtags sao sugestoes editoriais, nao devem inventar fatos nem captar clientes.
+
+{MEDICAL_EDITORIAL_PROMPT}
 
 TRANSCRICAO:
 {timeline}"""
     cache_payload = {
-        "promptVersion": "context-safe-v3-margin",
+        "promptVersion": "context-safe-v4-editorial-profile",
         "timeline": timeline,
         "count": count,
         "minDuration": min_duration,
@@ -770,14 +787,17 @@ TRANSCRICAO:
     if cache_get:
         cached = cache_get("cuts.suggest", cache_payload)
         if cached and isinstance(cached.get("clips"), list):
-            return cached["clips"], "anthropic-cache"
+            return _ensure_clip_captions(cached["clips"]), "anthropic-cache"
     client = anthropic.Anthropic()
     model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
     try:
         message = client.messages.create(
             model=model,
             max_tokens=4000,
-            system="Voce e editor senior de videos curtos e conteudo medico responsavel.",
+            system=(
+                "Voce e editor senior de videos curtos e conteudo medico responsavel.\n\n"
+                + MEDICAL_EDITORIAL_PROMPT
+            ),
             output_config={"format": {"type": "json_schema", "schema": _clip_schema(count)}},
             messages=[{"role": "user", "content": prompt}],
         )
@@ -785,12 +805,14 @@ TRANSCRICAO:
         detail = str(exc).lower()
         if "authentication" in detail or "api_key" in detail or "auth_token" in detail:
             return (
-                _local_clip_suggestions(
-                    transcript,
-                    count=count,
-                    min_duration=min_duration,
-                    max_duration=max_duration,
-                    auto_duration=auto_duration,
+                _ensure_clip_captions(
+                    _local_clip_suggestions(
+                        transcript,
+                        count=count,
+                        min_duration=min_duration,
+                        max_duration=max_duration,
+                        auto_duration=auto_duration,
+                    )
                 ),
                 "local",
             )
@@ -824,9 +846,10 @@ TRANSCRICAO:
         clip["start"] = round(start, 3)
         clip["end"] = round(end, 3)
         clip["score"] = max(0, min(100, int(clip["score"])))
+        clip["cta"] = safe_editorial_cta(clip.get("cta"))
         clip["hook"] = context_text[:180]
         clip["summary"] = context_text[:320]
-        clip["caption"] = context_text[:500]
+        clip["caption"] = ensure_medical_professional_identification(context_text[:500])
         title_words = context_text.strip(" .,!?:;").split()[:8]
         if title_words:
             clip["title"] = " ".join(title_words) + ("..." if len(context_text.split()) > 8 else "")
@@ -860,7 +883,7 @@ TRANSCRICAO:
         record_usage("cuts.suggest", model, message)
     if cache_put:
         cache_put("cuts.suggest", cache_payload, {"clips": valid})
-    return valid, "anthropic"
+    return _ensure_clip_captions(valid), "anthropic"
 
 
 def process_cut_project(
@@ -956,6 +979,8 @@ def process_cut_project(
             cache_put=cache_put,
             record_usage=record_usage,
         )
+        for clip in clips:
+            clip["caption"] = ensure_medical_professional_identification(clip.get("caption"))
         _check_cancelled(job_id)
         update(
             progresso=58,

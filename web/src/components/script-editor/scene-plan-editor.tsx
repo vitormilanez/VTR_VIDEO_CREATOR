@@ -17,10 +17,13 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   generateSceneDirection,
   saveScenePlan,
+  type ClaudeSceneModel,
   type AvatarSetRole,
+  type SceneDirectionResult,
   type ScenePlan,
   type SceneTransitionStyle,
 } from "@/lib/api/local";
+import type { DurationPreset } from "@/lib/script-editor";
 
 const TRANSITION_OPTIONS: Array<{
   value: SceneTransitionStyle;
@@ -28,19 +31,9 @@ const TRANSITION_OPTIONS: Array<{
   description: string;
 }> = [
   {
-    value: "smooth",
-    label: "Suave",
-    description: "Dissolve rapidamente entre os dois looks.",
-  },
-  {
     value: "hard_cut",
     label: "Corte seco",
-    description: "Troca imediata, com mais ritmo e energia.",
-  },
-  {
-    value: "dip_to_black",
-    label: "Fade escuro",
-    description: "Passagem curta pelo preto para marcar a virada.",
+    description: "Troca imediata para preservar a voz e não misturar as tomadas.",
   },
 ];
 
@@ -101,7 +94,7 @@ function defaultSceneDraft(text: string, roles: AvatarSetRole[]): EditableScene[
   ];
 }
 
-function coerceToTwoSceneDraft(
+function suggestionsToSceneDraft(
   suggestions: Array<{ text: string; lookRole: AvatarSetRole }>,
   roles: AvatarSetRole[],
   fallbackText: string,
@@ -112,39 +105,17 @@ function coerceToTwoSceneDraft(
         text: scene.text,
         lookRole: scene.lookRole,
       }));
-  const firstText = source[0]?.text || "";
-  const secondText = source
-    .slice(1)
-    .map((scene) => scene.text)
-    .join(" ")
-    .trim();
-  const fallback = defaultSceneDraft(
-    source
-      .map((scene) => scene.text)
-      .join(" ")
-      .trim() || fallbackText,
-    roles,
-  );
-  return [
-    {
-      id: "scene-1",
-      text: firstText || fallback[0]?.text || "",
-      lookRole: resolveSceneRole(source[0]?.lookRole || roles[0] || "primary", 0, roles),
-      estimatedStart: 0,
-      estimatedEnd: 0,
-    },
-    {
-      id: "scene-2",
-      text: secondText || fallback[1]?.text || "",
-      lookRole: resolveSceneRole(
-        source[1]?.lookRole || roles[1] || roles[0] || "primary",
-        1,
-        roles,
-      ),
-      estimatedStart: 0,
-      estimatedEnd: 0,
-    },
-  ];
+  return source.map((scene, index) => ({
+    id: `scene-${index + 1}`,
+    text: scene.text,
+    lookRole: resolveSceneRole(
+      scene.lookRole || roles[index % Math.max(roles.length, 1)] || "primary",
+      index,
+      roles,
+    ),
+    estimatedStart: 0,
+    estimatedEnd: 0,
+  }));
 }
 
 function scenePlanToEditableScenes(plan: ScenePlan, roles: AvatarSetRole[]): EditableScene[] {
@@ -168,6 +139,7 @@ export function ScenePlanEditor({
   performancePlan,
   availableRoles,
   onSaved,
+  onApplyClaudePlan,
 }: {
   scriptId: string;
   loading: boolean;
@@ -175,7 +147,7 @@ export function ScenePlanEditor({
   fallbackText: string;
   displayText: string;
   spokenText: string;
-  durationSeconds: 10 | 15 | 30 | 45 | 60;
+  durationSeconds: DurationPreset;
   performancePlan: {
     tone: string;
     pace: string;
@@ -184,9 +156,16 @@ export function ScenePlanEditor({
   } | null;
   availableRoles: AvatarSetRole[];
   onSaved: (plan: ScenePlan) => void;
+  onApplyClaudePlan?: (input: {
+    adjustedScript: string;
+    scenes: EditableScene[];
+    transitionStyle: SceneTransitionStyle;
+  }) => Promise<ScenePlan>;
 }) {
   const [scenes, setScenes] = useState<EditableScene[]>([]);
-  const [transitionStyle, setTransitionStyle] = useState<SceneTransitionStyle>("smooth");
+  const [transitionStyle, setTransitionStyle] = useState<SceneTransitionStyle>("hard_cut");
+  const [modelTier, setModelTier] = useState<ClaudeSceneModel>("haiku");
+  const [claudeProposal, setClaudeProposal] = useState<SceneDirectionResult | null>(null);
   const [saving, setSaving] = useState(false);
   const [directing, setDirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -199,8 +178,9 @@ export function ScenePlanEditor({
         ? scenePlanToEditableScenes(plan, availableRoles)
         : defaultSceneDraft(fallbackText, availableRoles),
     );
-    setTransitionStyle(plan?.transitionStyle || "smooth");
+    setTransitionStyle(plan?.transitionStyle || "hard_cut");
     setError(null);
+    setClaudeProposal(null);
   }, [availableRoles, fallbackText, loading, plan]);
 
   function updateScene(index: number, patch: Partial<EditableScene>) {
@@ -246,22 +226,20 @@ export function ScenePlanEditor({
         tone: performancePlan?.tone,
         pace: performancePlan?.pace,
         emotion: performancePlan?.emotion,
+        modelTier,
       });
-      const nextScenes =
-        availableRoles.length >= 2
-          ? coerceToTwoSceneDraft(result.scenes, availableRoles, displayText || fallbackText)
-          : result.scenes.map((scene, index) => ({
-              id: `scene-${index + 1}`,
-              text: scene.text,
-              lookRole: resolveSceneRole(scene.lookRole, index, availableRoles),
-              estimatedStart: 0,
-              estimatedEnd: 0,
-            }));
+      const nextScenes = suggestionsToSceneDraft(
+        result.scenes,
+        availableRoles,
+        displayText || fallbackText,
+      );
       setScenes(nextScenes);
+      setClaudeProposal(result);
+      const fallbackNotice = result.fallbackUsed
+        ? ` O modelo Sonnet configurado não estava disponível; foi usado ${result.model}.`
+        : "";
       setDirectionNotice(
-        availableRoles.length >= 2
-          ? "Claude sugeriu uma divisão e o app manteve em 2 cenas, para preservar um único corte de look."
-          : "Claude sugeriu uma divisão. Revise e salve o plano quando estiver de acordo.",
+        `${result.modelTier === "sonnet" ? "Claude Sonnet" : "Claude Haiku"} ajustou o roteiro e sugeriu ${nextScenes.length} tomadas. Revise antes de aplicar.${fallbackNotice}`,
       );
     } catch (directionError) {
       setError(
@@ -278,11 +256,9 @@ export function ScenePlanEditor({
     if (targetScenes.some((scene) => !scene.text.trim())) {
       return "Cada cena precisa ter um texto falado.";
     }
-    if (
-      availableRoles.length >= 2 &&
-      new Set(targetScenes.map((scene) => scene.lookRole)).size < 2
-    ) {
-      return "Use pelo menos duas posições diferentes quando o Avatar Set estiver ativo.";
+    const selectedRoleCount = new Set(targetScenes.map((scene) => scene.lookRole)).size;
+    if (availableRoles.length >= 2 && selectedRoleCount !== 2) {
+      return "O modo duas câmeras usa exatamente duas posições diferentes do Avatar Set.";
     }
     return null;
   }
@@ -315,44 +291,40 @@ export function ScenePlanEditor({
     await persistScenes(true);
   }
 
-  async function organizeEverythingWithClaude() {
-    setDirecting(true);
+  async function applyClaudeProposal() {
+    if (!claudeProposal) return;
+    if (!onApplyClaudePlan) {
+      await persistScenes(true, scenes);
+      return;
+    }
+    const validationError = validateScenes(scenes);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setSaving(true);
     setError(null);
-    setDirectionNotice(null);
     try {
-      const result = await generateSceneDirection(scriptId, {
-        displayText,
-        spokenText,
-        durationSeconds,
-        tone: performancePlan?.tone,
-        pace: performancePlan?.pace,
-        emotion: performancePlan?.emotion,
+      const saved = await onApplyClaudePlan({
+        adjustedScript: claudeProposal.adjustedScript,
+        scenes,
+        transitionStyle,
       });
-      const nextScenes =
-        availableRoles.length >= 2
-          ? coerceToTwoSceneDraft(result.scenes, availableRoles, displayText || fallbackText)
-          : result.scenes.map((scene, index) => ({
-              id: `scene-${index + 1}`,
-              text: scene.text,
-              lookRole: resolveSceneRole(scene.lookRole, index, availableRoles),
-              estimatedStart: 0,
-              estimatedEnd: 0,
-            }));
-      const saved = await persistScenes(false, nextScenes);
-      if (!saved) return;
+      onSaved(saved);
+      setScenes(scenePlanToEditableScenes(saved, availableRoles));
+      setClaudeProposal(null);
       setDirectionNotice(
-        saved.scenes.length > 1
-          ? "Claude organizou as cenas e manteve a transição escolhida entre os looks."
-          : "Claude organizou e salvou o plano de cenas.",
+        "Roteiro ajustado e cortes salvos. O vídeo usará somente as duas câmeras escolhidas.",
       );
-    } catch (directionError) {
+      toast.success("Roteiro e Scene Plan aplicados.");
+    } catch (applyError) {
       setError(
-        directionError instanceof Error
-          ? directionError.message
-          : "Nao foi possivel organizar com Claude.",
+        applyError instanceof Error
+          ? applyError.message
+          : "Nao foi possivel aplicar o plano do Claude.",
       );
     } finally {
-      setDirecting(false);
+      setSaving(false);
     }
   }
 
@@ -360,22 +332,34 @@ export function ScenePlanEditor({
     <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h4 className="text-xs font-semibold">Claude organiza o vídeo</h4>
+          <h4 className="text-xs font-semibold">Direção multicâmera do Claude</h4>
           <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-            Você escolhe duração e avatar. O Claude divide a fala e alterna os looks sem inserir
-            cartela entre as cenas.
+            O Claude simplifica o roteiro médico, preserva os números necessários e propõe cortes
+            entre duas câmeras sem inserir cartela, música ou encerramento no meio do vídeo.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Select
+            value={modelTier}
+            onValueChange={(value) => setModelTier(value as ClaudeSceneModel)}
+          >
+            <SelectTrigger className="h-8 w-36 bg-background text-xs" aria-label="Modelo do Claude">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="haiku">Claude Haiku</SelectItem>
+              <SelectItem value="sonnet">Claude Sonnet</SelectItem>
+            </SelectContent>
+          </Select>
           <Button
             type="button"
             size="sm"
             variant="secondary"
-            onClick={() => void organizeEverythingWithClaude()}
+            onClick={() => void requestDirection()}
             disabled={loading || directing}
           >
             <Sparkles className="h-3.5 w-3.5" />{" "}
-            {directing ? "Claude organizando..." : "Fazer tudo com Claude"}
+            {directing ? "Claude revisando..." : "Revisar com Claude"}
           </Button>
           {scenes.length !== 2 && availableRoles.length >= 2 ? (
             <Button type="button" size="sm" variant="outline" onClick={useTwoScenes}>
@@ -388,18 +372,14 @@ export function ScenePlanEditor({
         </div>
       </div>
       <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-        <span className="font-semibold text-foreground">Fluxo automático:</span> 2 cenas com
-        posições diferentes, transição direta entre os looks e checklist final antes de enviar ao
-        HeyGen. Nenhuma cartela intermediária é gerada.
+        <span className="font-semibold text-foreground">Fluxo protegido:</span> cada tomada é gerada
+        separadamente no HeyGen, com o look fixo, a mesma voz e corte seco. Nenhuma cartela, b-roll
+        ou trilha entra entre as câmeras.
       </div>
       {scenes.length > 1 ? (
         <fieldset className="space-y-2">
           <legend className="text-xs font-semibold">Transição entre as cenas</legend>
-          <div
-            className="grid gap-2 sm:grid-cols-3"
-            role="radiogroup"
-            aria-label="Transição entre as cenas"
-          >
+          <div className="grid gap-2" role="radiogroup" aria-label="Transição entre as cenas">
             {TRANSITION_OPTIONS.map((option) => {
               const selected = transitionStyle === option.value;
               return (
@@ -524,6 +504,40 @@ export function ScenePlanEditor({
         <p className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-status-info">
           {directionNotice}
         </p>
+      ) : null}
+      {claudeProposal ? (
+        <div className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h5 className="text-xs font-semibold">Proposta do Claude</h5>
+              <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                Revise a fala e os cortes. Aplicar salva o roteiro ajustado antes do Scene Plan.
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void applyClaudeProposal()}
+              disabled={saving}
+            >
+              {saving ? "Aplicando..." : "Aplicar roteiro e cortes"}
+            </Button>
+          </div>
+          {claudeProposal.scriptChanges.length ? (
+            <ul className="space-y-1 text-[11px] text-muted-foreground">
+              {claudeProposal.scriptChanges.map((change, index) => (
+                <li key={`${index}-${change}`}>• {change}</li>
+              ))}
+            </ul>
+          ) : null}
+          <Textarea
+            aria-label="Roteiro ajustado pelo Claude"
+            value={claudeProposal.adjustedScript}
+            readOnly
+            rows={5}
+            className="bg-background text-xs leading-5"
+          />
+        </div>
       ) : null}
       {error ? (
         <p className="rounded-md border border-status-danger/30 bg-status-danger/5 px-3 py-2 text-xs text-status-danger">

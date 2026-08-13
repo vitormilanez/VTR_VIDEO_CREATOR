@@ -186,6 +186,7 @@ def test_medieval_critical_path_with_mocks_outputs_final_mp4(
         root = Path(temporary)
         monkeypatch.setattr(server, "OPERATIONAL_DB", root / "operations.db")
         monkeypatch.setattr(server, "COMPOSED_VIDEO_OUTPUTS", root / "composed")
+        monkeypatch.setattr(server, "SCRIPT_EXPORTS", root / "Exports" / "roteiro")
         source = medieval_source()
         provider_context = {
             "capabilities": {

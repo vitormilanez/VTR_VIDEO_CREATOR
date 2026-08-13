@@ -4,11 +4,18 @@ import type { HydratePayload } from "../store";
 import type { AppSettings, CalendarPost, EditorialTone, Idea, Script, Trend } from "../mock-data";
 import type { VideoJob } from "../mock-data";
 import type {
+  DurationAssessment,
   DurationPreset,
   EditorAssistResult,
   EditorOperation,
   MedicalReviewStatus,
 } from "../script-editor";
+import type {
+  CinematicMediaType,
+  CinematicPresenterMode,
+  CinematicSupportingImages,
+  CinematicVisualStyle,
+} from "../cinematic";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
 
@@ -257,7 +264,7 @@ export interface GenerateScriptInput {
   };
   articleAnalysis?: ArticleAnalysis | null;
   editorialTone: EditorialTone;
-  durationSeconds?: 10 | 15 | 30 | 45 | 60;
+  durationSeconds?: DurationPreset;
   outro?: string;
   requireClaude?: boolean;
 }
@@ -287,6 +294,36 @@ export async function generateScript(
     script: GeneratedScriptText;
   }>("/api/scripts/generate", input);
   return { provider: response.provider, script: response.script };
+}
+
+export interface CreateScriptFromDraftInput {
+  draftText: string;
+  title?: string;
+  familia: Idea["familia"];
+  editorialTone: EditorialTone;
+  durationSeconds: DurationPreset;
+}
+
+export interface ScriptFromDraftResult {
+  provider: "claude";
+  model: string;
+  promptVersion: string;
+  cacheHit: boolean;
+  deduplicated: boolean;
+  script: Script;
+  scenePlan: ScenePlan;
+  changes: string[];
+}
+
+/** Revisa um texto com Claude, salva o roteiro e cria cenas ainda sem gerar vídeo. */
+export async function createScriptFromDraft(
+  input: CreateScriptFromDraftInput,
+): Promise<ScriptFromDraftResult> {
+  const response = await postJson<{ ok: boolean } & ScriptFromDraftResult>(
+    "/api/scripts/from-draft",
+    input,
+  );
+  return response;
 }
 
 /** Persiste um roteiro gerado na aba Roteiros do Sheets. */
@@ -331,9 +368,14 @@ export async function saveCalendarPost(post: CalendarPost): Promise<CalendarPost
   return response.post;
 }
 
+export type PackFamily = "editorial" | "didatico" | "storytelling";
+export type PackTheme = "modernist-red" | "ocean-deep";
+
 export interface GeneratedPack {
   schemaVersion?: "institute-carousel-v1" | string;
   designDirection?: "institute_carousel_v1" | string;
+  family?: PackFamily;
+  themeId?: PackTheme;
   carousel: PackSlide[];
   slides?: PackSlide[];
   staticPost: {
@@ -416,6 +458,7 @@ export interface PackSlideFields {
   eyebrow: string;
   headline: string;
   subheadline: string;
+  coverNote: string;
   body: string;
   statistic: string;
   item1: PackSlideItem;
@@ -756,7 +799,10 @@ export interface MusicTrack {
   url: string;
 }
 
-export type AvatarSetRole = "primary" | "front" | "close" | "three_quarter" | "standing" | "wide";
+export type AvatarSetRole =
+  "primary" | "front" | "close" | "three_quarter" | "standing" | "seated" | "wide";
+
+export type ClaudeSceneModel = "haiku" | "sonnet";
 
 export interface AvatarSetLook {
   avatarId: string;
@@ -794,6 +840,7 @@ export interface ScenePlan {
 export interface SceneGenerationRequest {
   sceneId: string;
   order: number;
+  lookRole: AvatarSetRole;
   avatarId: string;
   voiceId: string;
   spokenText: string;
@@ -817,6 +864,18 @@ export interface SceneDirectionSuggestion {
   text: string;
   lookRole: AvatarSetRole;
   reason: string;
+}
+
+export interface SceneDirectionResult {
+  provider: "claude";
+  promptVersion: string;
+  model: string;
+  modelTier: ClaudeSceneModel;
+  requestedModel?: string;
+  fallbackUsed?: boolean;
+  adjustedScript: string;
+  scriptChanges: string[];
+  scenes: SceneDirectionSuggestion[];
 }
 
 export type VideoVisualType =
@@ -891,14 +950,31 @@ export interface PackCompliance {
 /** Gera o pack de conteudo real via Claude (server-side) a partir de um roteiro. */
 export async function generatePack(
   script: Script,
+  presentation?: { family: PackFamily; themeId: PackTheme },
 ): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
   const res = await fetch(`${BASE}/api/packs/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...script, scriptId: script.id }),
+    body: JSON.stringify({ ...script, scriptId: script.id, ...presentation }),
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel gerar o pack."));
   return (await res.json()) as { pack: GeneratedPack; compliance: PackCompliance };
+}
+
+/** Salva composição e tema do Pack localmente. Não chama Claude nem altera a copy. */
+export async function updatePackPresentation(
+  scriptId: string,
+  presentation: { family: PackFamily; themeId: PackTheme },
+): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+  const response = await requestJson<{
+    ok: boolean;
+    pack: GeneratedPack;
+    compliance: PackCompliance;
+  }>(`/api/packs/${encodeURIComponent(scriptId)}/presentation`, {
+    method: "PUT",
+    body: JSON.stringify(presentation),
+  });
+  return { pack: response.pack, compliance: response.compliance };
 }
 
 export async function fetchPack(scriptId: string): Promise<{
@@ -987,9 +1063,27 @@ export async function updatePackCarouselPhoto(
   return { pack: response.pack, compliance: response.compliance };
 }
 
+/** Salva a mensagem opcional exibida somente na caixa do Slide 1. */
+export async function updatePackCoverNote(
+  scriptId: string,
+  text: string,
+): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+  const response = await requestJson<{
+    ok: boolean;
+    pack: GeneratedPack;
+    compliance: PackCompliance;
+  }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/cover-note`, {
+    method: "PUT",
+    body: JSON.stringify({ text }),
+  });
+  return { pack: response.pack, compliance: response.compliance };
+}
+
 export interface PackForExport {
   schemaVersion?: GeneratedPack["schemaVersion"];
   designDirection?: GeneratedPack["designDirection"];
+  family?: PackFamily;
+  themeId?: PackTheme;
   carousel: PackSlide[];
   slides?: PackSlide[];
   staticPost: GeneratedPack["staticPost"];
@@ -1317,7 +1411,7 @@ export async function saveScenePlan(
     estimatedStart: number;
     estimatedEnd: number;
   }>,
-  transitionStyle: SceneTransitionStyle = "smooth",
+  transitionStyle: SceneTransitionStyle = "hard_cut",
 ): Promise<ScenePlan> {
   const response = await requestJson<{ ok: boolean; scenePlan: ScenePlan }>(
     `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan`,
@@ -1350,7 +1444,7 @@ export async function submitSceneGeneration(
   scriptId: string,
   input: {
     orientation: "portrait" | "landscape";
-    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    durationSeconds: DurationPreset;
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
     voiceMood: VoiceMood;
     captions: boolean;
@@ -1373,6 +1467,14 @@ export async function submitSceneGeneration(
   return { generation: response.generation, jobs: response.jobs };
 }
 
+export async function regenerateSceneVideo(jobId: string): Promise<VideoJob> {
+  const response = await postJson<{ ok: boolean; job: VideoJob }>(
+    `/api/videos/${encodeURIComponent(jobId)}/regenerate-scene`,
+    { confirmed: true },
+  );
+  return response.job;
+}
+
 export async function generateSceneDirection(
   scriptId: string,
   input: {
@@ -1382,18 +1484,17 @@ export async function generateSceneDirection(
     pace?: string;
     emotion?: string;
     emphasisWords?: string[];
-    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    durationSeconds: DurationPreset;
+    modelTier?: ClaudeSceneModel;
   },
-): Promise<{ provider: "claude"; promptVersion: string; scenes: SceneDirectionSuggestion[] }> {
-  const response = await requestJson<{
-    ok: boolean;
-    provider: "claude";
-    promptVersion: string;
-    scenes: SceneDirectionSuggestion[];
-  }>(`/api/scripts/${encodeURIComponent(scriptId)}/scene-plan/direct`, {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
+): Promise<SceneDirectionResult> {
+  const response = await requestJson<{ ok: boolean } & SceneDirectionResult>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan/direct`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
   return response;
 }
 
@@ -1414,7 +1515,7 @@ export async function generateVisualDirection(
     pace?: string;
     emotion?: string;
     emphasisWords?: string[];
-    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    durationSeconds: DurationPreset;
   },
 ): Promise<{ provider: "claude"; visualPlan: VisualPlan }> {
   const response = await requestJson<{ ok: boolean; provider: "claude"; visualPlan: VisualPlan }>(
@@ -1474,6 +1575,54 @@ export interface HuntTrendsResult {
   queries?: string[];
   failedStep?: string;
   detail?: string;
+}
+
+export interface CinematicAdjustInput {
+  sourceText: string;
+  durationSeconds: Exclude<DurationPreset, 10>;
+  supportingImages: CinematicSupportingImages;
+  presenterMode: CinematicPresenterMode;
+  mediaTypes: CinematicMediaType[];
+  visualStyle: CinematicVisualStyle;
+  requiredElements: string;
+  excludedElements: string;
+  criticalOnScreenText: string;
+  directionNotes: string;
+  avatarName?: string;
+  avatarType?: string;
+  avatarOrientation?: "portrait" | "landscape";
+}
+
+export interface CinematicAdjustment {
+  speech: string;
+  durationSeconds: Exclude<DurationPreset, 10>;
+  supportingImages: CinematicSupportingImages;
+  presenterMode: CinematicPresenterMode;
+  mediaTypes: CinematicMediaType[];
+  visualStyle: CinematicVisualStyle;
+  requiredElements: string;
+  excludedElements: string;
+  criticalOnScreenText: string;
+  directionNotes: string;
+  rationale: string;
+}
+
+export interface CinematicAdjustResult {
+  provider: "claude";
+  model: string;
+  adjusted: CinematicAdjustment;
+  assessment: DurationAssessment;
+  retryCount: number;
+  cacheHit: boolean;
+}
+
+export async function adjustCinematicWithClaude(
+  input: CinematicAdjustInput,
+): Promise<CinematicAdjustResult> {
+  return requestJson<CinematicAdjustResult>("/api/cinematic/adjust", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export async function huntTrends(): Promise<HuntTrendsResult> {
@@ -1655,7 +1804,7 @@ export async function createHeyGenVideo(
     avatarId?: string;
     voiceId?: string;
     orientation: "portrait" | "landscape";
-    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    durationSeconds: DurationPreset;
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
     voiceMood: VoiceMood;
     generationMode: GenerationMode;
@@ -1791,7 +1940,7 @@ export async function saveScriptEditorState(
 export async function naturalizeScript(input: {
   text: string;
   medicalCautions: string;
-  durationSeconds: 10 | 15 | 30 | 45 | 60;
+  durationSeconds: DurationPreset;
   outro: string;
   ctaMode?: "auto" | "manual" | "none" | "visual";
   manualCta?: string;
@@ -1876,6 +2025,7 @@ export type PostProductionStatus =
   | "transcribing"
   | "planning"
   | "preflight"
+  | "generating_pack"
   | "rendering_preview"
   | "preview_ready"
   | "failed"
@@ -1886,15 +2036,37 @@ export type PostProductionStatus =
 export interface PostProductionJob {
   id: string;
   kind: "post_production";
-  videoJobId: string;
+  videoJobId?: string | null;
+  uploadId?: string | null;
+  sourceName?: string;
   status: PostProductionStatus;
   progresso: number;
   etapa: string;
+  captionsStatus?: "ready" | "failed";
+  captionsPath?: string;
+  captionCueCount?: number;
   criadoEm: string;
   atualizadoEm: string;
   erro?: string;
   plannerMode?: "cache" | "fallback" | "anthropic";
+  requireClaude?: boolean;
+  generatePack?: boolean;
+  packStatus?: "ready" | "failed";
+  packPath?: string;
+  packImageCount?: number;
+  packError?: string;
 }
+
+export type VisualScreenPosition =
+  | "top_left"
+  | "top_center"
+  | "top_right"
+  | "center_left"
+  | "center"
+  | "center_right"
+  | "bottom_left"
+  | "bottom_center"
+  | "bottom_right";
 
 export interface VisualTimelineEvent {
   id: string;
@@ -1902,6 +2074,10 @@ export interface VisualTimelineEvent {
   endWordIndex: number;
   startMs: number;
   endMs: number;
+  timingSource?: "transcript" | "manual";
+  screenPosition?: VisualScreenPosition;
+  backgroundColor?: string;
+  backgroundOpacity?: number;
   spokenText: string;
   interactionType:
     | "none"
@@ -1909,8 +2085,14 @@ export interface VisualTimelineEvent {
     | "kinetic_text"
     | "progressive_list"
     | "supporting_visual"
-    | "cta_card";
+    | "cta_card"
+    | "definition_card"
+    | "number_card"
+    | "comparison_card"
+    | "quote_card"
+    | "evidence_card";
   visualText: string;
+  assetRef?: string | null;
   enabled: boolean;
   reviewStatus: "pending" | "approved" | "rejected";
   reason: string;
@@ -1929,6 +2111,34 @@ export interface PostProductionArtifacts {
     stale: boolean;
     events: VisualTimelineEvent[];
   };
+  visualPlan?: {
+    modelVersion?: string | null;
+    contentType?: string | null;
+    summary?: string | null;
+    strategy?: string | null;
+    noVisualReason?: string | null;
+  } | null;
+}
+
+export interface GeneratedContentPack {
+  pack: {
+    schemaVersion?: string;
+    caption?: string;
+    hashtags?: string[];
+    family?: string;
+    themeId?: string;
+    carousel?: Array<{
+      layoutId?: string;
+      variant?: string;
+      fields?: Record<string, unknown>;
+    }>;
+    slides?: Array<{
+      layoutId?: string;
+      variant?: string;
+      fields?: Record<string, unknown>;
+    }>;
+  };
+  images: string[];
 }
 
 export interface PreflightReport {
@@ -1945,10 +2155,27 @@ export interface PreflightReport {
 export async function createPostProduction(
   videoJobId: string,
   autoRender = false,
+  options?: { requireClaude?: boolean; generatePack?: boolean },
 ): Promise<PostProductionJob> {
   const response = await postJson<{ job: PostProductionJob }>("/api/post-production", {
     videoJobId,
     autoRender,
+    requireClaude: options?.requireClaude ?? false,
+    generatePack: options?.generatePack ?? false,
+  });
+  return response.job;
+}
+
+export async function createUploadedPostProduction(
+  uploadId: string,
+  sourceName: string,
+): Promise<PostProductionJob> {
+  const response = await postJson<{ job: PostProductionJob }>("/api/post-production", {
+    uploadId,
+    sourceName,
+    autoRender: false,
+    requireClaude: true,
+    generatePack: true,
   });
   return response.job;
 }
@@ -1980,12 +2207,35 @@ export async function fetchPostProductionArtifacts(
   );
 }
 
+export async function fetchPostProductionPack(jobId: string): Promise<GeneratedContentPack> {
+  const response = await requestJson<GeneratedContentPack>(
+    `/api/post-production/${encodeURIComponent(jobId)}/pack`,
+    {},
+  );
+  return {
+    ...response,
+    images: response.images.map((path) => (path.startsWith("http") ? path : `${BASE}${path}`)),
+  };
+}
+
 export async function updatePostProductionEvents(
   jobId: string,
   events: Array<
     Pick<VisualTimelineEvent, "id"> &
       Partial<
-        Pick<VisualTimelineEvent, "enabled" | "visualText" | "reviewStatus" | "interactionType">
+        Pick<
+          VisualTimelineEvent,
+          | "enabled"
+          | "startMs"
+          | "endMs"
+          | "timingSource"
+          | "screenPosition"
+          | "backgroundColor"
+          | "backgroundOpacity"
+          | "visualText"
+          | "reviewStatus"
+          | "interactionType"
+        >
       >
   >,
 ): Promise<{ job: PostProductionJob; timeline: PostProductionArtifacts["timeline"] }> {
@@ -2021,6 +2271,46 @@ export function postProductionPreviewUrl(jobId: string, download = false): strin
   return `${BASE}/api/post-production/${encodeURIComponent(jobId)}/preview${download ? "?download=true" : ""}`;
 }
 
+export interface LocalVideoKitInsert {
+  id: string;
+  uploadId: string;
+  sourceName: string;
+  sourceDurationSeconds: number;
+  timelineStartSeconds: number;
+  timelineEndSeconds: number;
+  sourceStartSeconds: number;
+  sourceEndSeconds: number;
+}
+
+export interface LocalVideoKitInsertAsset {
+  uploadId: string;
+  filename: string;
+  size: number;
+  durationSeconds: number;
+}
+
+export interface LocalVideoKitFiveStack {
+  enabled: boolean;
+  startSeconds?: number | null;
+  durationSeconds?: number | null;
+  lines: string[];
+}
+
+export type LocalVideoKitClaudeModelId =
+  "numberGlass" | "editorialClip" | "mechanismBars" | "evidenceStamp" | "glossarySource";
+
+export interface LocalVideoKitClaudeModel {
+  enabled: boolean;
+  startSeconds?: number | null;
+  durationSeconds?: number | null;
+  fields: string[];
+}
+
+export type LocalVideoKitClaudeInserts = Record<
+  LocalVideoKitClaudeModelId,
+  LocalVideoKitClaudeModel
+>;
+
 export interface LocalVideoKitConfig {
   name: string;
   role: string;
@@ -2048,6 +2338,10 @@ export interface LocalVideoKitConfig {
   includeLowerThird: boolean;
   includeSection: boolean;
   includeOutro: boolean;
+  manualVisualsEnabled?: boolean;
+  inserts: LocalVideoKitInsert[];
+  fiveStack?: LocalVideoKitFiveStack;
+  claudeInserts?: LocalVideoKitClaudeInserts;
 }
 
 export interface LocalVideoKitJob {
@@ -2058,6 +2352,9 @@ export interface LocalVideoKitJob {
   sourceName: string;
   sourcePath: string;
   sourceVideoJobId?: string | null;
+  sourceKitJobId?: string | null;
+  analysisJobId?: string | null;
+  transcriptReused?: boolean;
   outputPath: string;
   coverPath?: string;
   config: LocalVideoKitConfig;
@@ -2068,9 +2365,13 @@ export interface LocalVideoKitJob {
   atualizadoEm: string;
 }
 
-export async function uploadLocalVideoKitSource(
-  file: File,
-): Promise<{ uploadId: string; filename: string; size: number }> {
+export async function uploadLocalVideoKitSource(file: File): Promise<{
+  uploadId: string;
+  filename: string;
+  size: number;
+  analysisJob?: PostProductionJob;
+  analysisError?: string;
+}> {
   const response = await fetch(`${BASE}/api/local-video-kit/uploads`, {
     method: "POST",
     headers: {
@@ -2082,13 +2383,35 @@ export async function uploadLocalVideoKitSource(
   if (!response.ok) {
     throw new Error(await errorDetail(response, "Não foi possível enviar o vídeo local."));
   }
-  return (await response.json()) as { uploadId: string; filename: string; size: number };
+  return (await response.json()) as {
+    uploadId: string;
+    filename: string;
+    size: number;
+    analysisJob?: PostProductionJob;
+    analysisError?: string;
+  };
+}
+
+export async function uploadLocalVideoKitInsert(file: File): Promise<LocalVideoKitInsertAsset> {
+  const response = await fetch(`${BASE}/api/local-video-kit/insert-uploads`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "video/mp4",
+      "X-Filename": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, "Não foi possível enviar o clipe de insert."));
+  }
+  return (await response.json()) as LocalVideoKitInsertAsset;
 }
 
 export async function createLocalVideoKit(input: {
   uploadId?: string;
   videoJobId?: string;
   sourceKitJobId?: string;
+  analysisJobId?: string;
   sourceName: string;
   config: LocalVideoKitConfig;
 }): Promise<LocalVideoKitJob> {
@@ -2096,6 +2419,7 @@ export async function createLocalVideoKit(input: {
     uploadId: input.uploadId,
     videoJobId: input.videoJobId,
     sourceKitJobId: input.sourceKitJobId,
+    analysisJobId: input.analysisJobId,
     sourceName: input.sourceName,
     ...input.config,
   });
@@ -2105,6 +2429,14 @@ export async function createLocalVideoKit(input: {
 export async function fetchLocalVideoKit(jobId: string): Promise<LocalVideoKitJob> {
   const response = await requestJson<{ job: LocalVideoKitJob }>(
     `/api/local-video-kit/${encodeURIComponent(jobId)}`,
+    {},
+  );
+  return response.job;
+}
+
+export async function retryLocalVideoKit(jobId: string): Promise<LocalVideoKitJob> {
+  const response = await postJson<{ job: LocalVideoKitJob }>(
+    `/api/local-video-kit/${encodeURIComponent(jobId)}/retry`,
     {},
   );
   return response.job;
@@ -2125,6 +2457,10 @@ export function localVideoKitResultUrl(jobId: string, download = false): string 
 
 export function localVideoKitCoverUrl(jobId: string, download = false): string {
   return `${BASE}/api/local-video-kit/${encodeURIComponent(jobId)}/cover${download ? "?download=true" : ""}`;
+}
+
+export function localVideoKitInsertUrl(uploadId: string): string {
+  return `${BASE}/api/local-video-kit/insert-uploads/${encodeURIComponent(uploadId)}`;
 }
 
 export interface CutClip {

@@ -24,6 +24,7 @@ class SceneGenerationRequest:
 
     scene_id: str
     order: int
+    look_role: str
     avatar_id: str
     voice_id: str
     spoken_text: str
@@ -35,6 +36,7 @@ class SceneGenerationRequest:
         return {
             "sceneId": self.scene_id,
             "order": self.order,
+            "lookRole": self.look_role,
             "avatarId": self.avatar_id,
             "voiceId": self.voice_id,
             "spokenText": self.spoken_text,
@@ -108,6 +110,7 @@ def build_scene_generation_result(
             raise ValueError(f"Cena {index} inválida.")
         scene_id = str(raw_scene.get("id") or raw_scene.get("sceneId") or f"scene-{index}").strip()
         avatar_id = str(raw_scene.get("avatarId") or "").strip()
+        look_role = str(raw_scene.get("lookRole") or "primary").strip() or "primary"
         if not scene_id or scene_id in seen_ids:
             raise ValueError(f"ID duplicado ou vazio na cena {index}.")
         if not avatar_id:
@@ -121,6 +124,7 @@ def build_scene_generation_result(
             SceneGenerationRequest(
                 scene_id=scene_id,
                 order=index,
+                look_role=look_role,
                 avatar_id=avatar_id,
                 voice_id=voice_id.strip(),
                 spoken_text=spoken_text,

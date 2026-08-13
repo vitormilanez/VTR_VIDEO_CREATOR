@@ -10,6 +10,7 @@ import {
   generateAndPersistScript,
 } from "@/lib/script-generation";
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
+import type { DurationPreset } from "@/lib/script-editor";
 import { useStore } from "@/lib/store";
 import { expandIdeas, saveIdea, saveScript, setSheetStatus } from "@/lib/api/local";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
@@ -43,7 +44,7 @@ function IdeiaDetalhe() {
   const [draft, setDraft] = useState(idea);
   const [toneOpen, setToneOpen] = useState(false);
   const [editorialTone, setEditorialTone] = useState<EditorialTone>("neutro");
-  const [scriptDuration, setScriptDuration] = useState<10 | 15 | 30 | 45 | 60>(45);
+  const [scriptDuration, setScriptDuration] = useState<DurationPreset>(45);
   const [scriptOutro, setScriptOutro] = useState(DEFAULT_OUTRO);
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
   const [isRefreshingSource, setIsRefreshingSource] = useState(false);

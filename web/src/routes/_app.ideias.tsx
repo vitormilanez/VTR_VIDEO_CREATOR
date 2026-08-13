@@ -12,15 +12,17 @@ import { WeeklyArchiveSwitch } from "@/components/weekly-archive-switch";
 import { ToneSelectDialog } from "@/components/tone-select-dialog";
 import { CaptureScriptChoices } from "@/components/capture-script-choices";
 import { EditorialSignals } from "@/components/editorial-signals";
+import { CreateScriptFromDraftDialog } from "@/components/create-script-from-draft-dialog";
 import { evaluateIdeaQuality } from "@/lib/idea-quality";
 import {
   generateAndPersistCaptureScripts,
   generateAndPersistScript,
 } from "@/lib/script-generation";
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
+import type { DurationPreset } from "@/lib/script-editor";
 import { familiaLabel, ideaStatusLabel, prioridadeLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
-import { splitWeekly, type WeeklyView } from "@/lib/weekly-archive";
+import { splitWeeklyUnique, type WeeklyView } from "@/lib/weekly-archive";
 import {
   analyzeArticle,
   appendIdea,
@@ -131,6 +133,12 @@ function formatIdeaCreatedAt(value: string) {
   });
 }
 
+function ideaArchiveKey(idea: Idea) {
+  return [idea.titulo, idea.hook, idea.linkOrigem || ""]
+    .map((value) => value.trim().toLocaleLowerCase("pt-BR"))
+    .join("\u0000");
+}
+
 function IdeiasLayout() {
   return <Outlet />;
 }
@@ -174,12 +182,12 @@ export function IdeiasPage() {
     persistIdea: boolean;
   } | null>(null);
   const [editorialTone, setEditorialTone] = useState<EditorialTone>("neutro");
-  const [scriptDuration, setScriptDuration] = useState<10 | 15 | 30 | 45 | 60>(45);
+  const [scriptDuration, setScriptDuration] = useState<DurationPreset>(45);
   const [scriptOutro, setScriptOutro] = useState(DEFAULT_OUTRO);
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
   const [captureChoices, setCaptureChoices] = useState<Script[]>([]);
 
-  const weekly = splitWeekly(ideas, (idea) => idea.criadoEm);
+  const weekly = splitWeeklyUnique(ideas, (idea) => idea.criadoEm, ideaArchiveKey);
   const weeklyIdeas = weeklyView === "current" ? weekly.current : weekly.archive;
 
   const filtered = weeklyIdeas.filter((i) => {
@@ -388,9 +396,14 @@ export function IdeiasPage() {
       return;
     }
     const alreadySaved = ideas.some((existing) => existing.id === idea.id);
+    const analysis = articleOpen ? articleResult?.analysis : null;
+    // Radix bloqueia interacoes quando dois Dialogs modais permanecem abertos.
+    // Fecha a origem no mesmo render em que o seletor de tom e exibido.
+    setArticleOpen(false);
+    setManualOpen(false);
     abrirEscolhaDeTom(idea, {
       persistIdea: !alreadySaved,
-      analysis: articleOpen ? articleResult?.analysis : null,
+      analysis,
     });
   }
 
@@ -446,6 +459,7 @@ export function IdeiasPage() {
               }}
             />
           </Dialog>
+          <CreateScriptFromDraftDialog triggerVariant="secondary" />
           <Dialog open={manualOpen} onOpenChange={setManualOpen}>
             <DialogTrigger asChild>
               <Button size="sm">
@@ -482,6 +496,8 @@ export function IdeiasPage() {
         onChange={setWeeklyView}
         currentCount={weekly.current.length}
         archiveCount={weekly.archive.length}
+        currentLabel="Geradas"
+        archiveLabel="Arquivadas"
       />
       {weeklyView === "current" ? (
         <NextStepBanner

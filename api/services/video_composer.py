@@ -54,6 +54,8 @@ class CompositionScene:
     timed_overlays: tuple[TimedOverlay, ...] = ()
     timed_video_overlays: tuple[TimedVideoOverlay, ...] = ()
     captions_path: Path | None = None
+    trim_technical_silence: bool = False
+    max_technical_silence_seconds: float = 0.45
 
 
 def _filter_path(path: Path) -> str:
@@ -136,6 +138,60 @@ def _probe_duration(path: Path) -> float:
         raise RuntimeError("Duração inválida retornada pelo FFprobe.") from exc
 
 
+_SILENCE_START_PATTERN = re.compile(r"silence_start:\s*([0-9.]+)")
+_SILENCE_END_PATTERN = re.compile(r"silence_end:\s*([0-9.]+)")
+
+
+def _technical_silence_padding(
+    source: Path,
+    *,
+    duration: float,
+    ffmpeg: str,
+    maximum_seconds: float,
+) -> tuple[float, float]:
+    """Retorna somente silêncio técnico nas bordas, sem cortar pausas de fala.
+
+    A margem é deliberadamente curta. Uma tomada com pausa narrativa maior que
+    essa não é alterada; o corte deve continuar sendo decidido pelo Scene Plan.
+    """
+    if duration <= 0.8 or maximum_seconds <= 0:
+        return 0.0, 0.0
+    process = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-i",
+            str(source),
+            "-af",
+            "silencedetect=noise=-42dB:d=0.10",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    if process.returncode != 0:
+        return 0.0, 0.0
+    log = process.stderr or ""
+    starts = [float(value) for value in _SILENCE_START_PATTERN.findall(log)]
+    ends = [float(value) for value in _SILENCE_END_PATTERN.findall(log)]
+    leading = 0.0
+    trailing = 0.0
+    if starts and starts[0] <= 0.03 and ends:
+        leading = min(maximum_seconds, max(0.0, ends[0]))
+    if starts:
+        tail_start = starts[-1]
+        if duration - tail_start <= maximum_seconds + 0.08:
+            tail_end = ends[-1] if ends and ends[-1] >= tail_start else duration
+            trailing = min(maximum_seconds, max(0.0, tail_end - tail_start))
+    if leading + trailing >= duration - 0.5:
+        return 0.0, 0.0
+    return round(leading, 3), round(trailing, 3)
+
+
 def _mix_background_music(
     video_path: Path,
     music_path: Path,
@@ -195,7 +251,7 @@ def _require_file(path: Path, label: str) -> None:
         raise FileNotFoundError(f"{label} não encontrado: {path}")
 
 
-def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) -> None:
+def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) -> dict[str, float]:
     _require_file(scene.video_path, f"Vídeo da {scene.scene_id}")
     if scene.slide_path and scene.slide_mode == "during":
         _require_file(scene.slide_path, f"Apoio visual da {scene.scene_id}")
@@ -216,9 +272,23 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
     if scene.captions_path:
         _require_file(scene.captions_path, f"Legendas da {scene.scene_id}")
 
+    source_duration = _probe_duration(scene.video_path)
+    leading_trim = 0.0
+    trailing_trim = 0.0
+    if scene.trim_technical_silence:
+        leading_trim, trailing_trim = _technical_silence_padding(
+            scene.video_path,
+            duration=source_duration,
+            ffmpeg=ffmpeg,
+            maximum_seconds=min(max(scene.max_technical_silence_seconds, 0.0), 0.8),
+        )
+    trimmed_end = max(0.1, source_duration - trailing_trim)
+
     caption_assets: list[tuple[Path, float, float]] = []
     if scene.captions_path:
         for cue_index, (start, end, text) in enumerate(_srt_cues(scene.captions_path)):
+            start = max(0.0, start - leading_trim)
+            end = max(start + 0.01, end - leading_trim)
             caption_text = destination.with_suffix(f".caption-{cue_index:02d}.png")
             _caption_image(text, caption_text)
             caption_assets.append((caption_text, start, end))
@@ -240,10 +310,20 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
     caption_start_index = timed_video_start_index + len(scene.timed_video_overlays)
     for caption_asset, _start, _end in caption_assets:
         input_args.extend(["-loop", "1", "-i", str(caption_asset)])
+    base_video = "[0:v]"
+    if leading_trim or trailing_trim:
+        base_video += f"trim=start={leading_trim:.3f}:end={trimmed_end:.3f},setpts=PTS-STARTPTS,"
     filters = [
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+        base_video
+        + "scale=1080:1920:force_original_aspect_ratio=decrease,"
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,fps=30[base]"
     ]
+    audio_map = "0:a:0"
+    if leading_trim or trailing_trim:
+        filters.append(
+            f"[0:a]atrim=start={leading_trim:.3f}:end={trimmed_end:.3f},asetpts=PTS-STARTPTS[audio]"
+        )
+        audio_map = "[audio]"
     previous = "base"
     if slide_input_index is not None:
         start = scene.visual_start_seconds
@@ -337,7 +417,7 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
             "-map",
             f"[{previous}]",
             "-map",
-            "0:a:0",
+            audio_map,
             "-c:v",
             "libx264",
             "-preset",
@@ -359,6 +439,7 @@ def _normalize_scene(scene: CompositionScene, destination: Path, ffmpeg: str) ->
         ]
     )
     _run(input_args)
+    return {"leadingSeconds": leading_trim, "trailingSeconds": trailing_trim}
 
 
 def _render_slide(slide_path: Path, destination: Path, duration: float, ffmpeg: str) -> None:
@@ -521,6 +602,8 @@ def compose_video(
     background_music_path: Path | None = None,
     background_music_volume: float = 0.12,
     transition_style: str = "hard_cut",
+    end_card_path: Path | None = None,
+    end_card_duration_seconds: float = 0.0,
     ffmpeg_binary: str | None = None,
 ) -> dict[str, Any]:
     """Compõe cenas em ordem e retorna um manifesto das transições aplicadas."""
@@ -552,9 +635,11 @@ def compose_video(
         manifest: list[dict[str, Any]] = []
         for index, scene in enumerate(scene_list, start=1):
             normalized = workdir / f"scene-{index:02d}.mp4"
-            _normalize_scene(scene, normalized, ffmpeg)
+            technical_silence_trim = _normalize_scene(scene, normalized, ffmpeg)
             segments.append(normalized)
             avatar_segment: dict[str, Any] = {"sceneId": scene.scene_id, "kind": "avatar", "cut": "hard"}
+            if technical_silence_trim["leadingSeconds"] or technical_silence_trim["trailingSeconds"]:
+                avatar_segment["technicalSilenceTrim"] = technical_silence_trim
             if scene.slide_path and scene.slide_mode == "during":
                 avatar_segment["visualOverlay"] = {
                     "kind": "video_slide",
@@ -588,6 +673,18 @@ def compose_video(
                         "durationSeconds": scene.slide_duration_seconds,
                     }
                 )
+        if end_card_path:
+            end_card = workdir / "medical-end-card.mp4"
+            _render_slide(end_card_path, end_card, end_card_duration_seconds, ffmpeg)
+            segments.append(end_card)
+            manifest.append(
+                {
+                    "sceneId": "medical-end-card",
+                    "kind": "medical_end_card",
+                    "cut": "hard",
+                    "durationSeconds": end_card_duration_seconds,
+                }
+            )
         concatenated = workdir / "concatenated.mp4" if background_music_path else output_path
         transitions: list[dict[str, Any]] = []
         if transition_style == "hard_cut" or len(segments) == 1:
@@ -618,6 +715,10 @@ def compose_video(
         "cutPolicy": transition_style,
         "transitions": transitions,
         "segments": manifest,
+        "endCard": {
+            "enabled": bool(end_card_path),
+            "durationSeconds": end_card_duration_seconds if end_card_path else 0.0,
+        },
         "backgroundMusic": (
             {
                 "enabled": True,

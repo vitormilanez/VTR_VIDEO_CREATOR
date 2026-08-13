@@ -1,9 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { StatusBadge } from "@/components/status-badge";
-import { CompliancePanel, HighlightedText } from "@/components/compliance-panel";
-import { StatusTimeline, type TimelineStep } from "@/components/status-timeline";
+import { CompliancePanel } from "@/components/compliance-panel";
 import { WithTooltip } from "@/components/with-tooltip";
 import { ConfirmAction } from "@/components/confirm-action";
 import {
@@ -38,7 +36,6 @@ import {
   removeNarrationOutro,
   videoAgentNarrationQualityIssues,
 } from "@/lib/script-quality";
-import { editorialToneLabel, prioridadeLabel, riskLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import {
   createHeyGenPreview,
@@ -54,6 +51,7 @@ import {
   fetchScenePlan,
   runScriptEditorAssist,
   saveProductionProfile,
+  saveScenePlan,
   saveScriptEditorState,
   saveScript,
   submitSceneGeneration,
@@ -64,6 +62,7 @@ import {
   type MusicTrack,
   type GenerationMode,
   type ScenePlan,
+  type SceneTransitionStyle,
   type SceneGenerationResult,
   type VoiceMood,
 } from "@/lib/api/local";
@@ -76,8 +75,9 @@ import {
   type EditorAssistResult,
   type EditorOperation,
   type MedicalReviewStatus,
+  type DurationPreset,
 } from "@/lib/script-editor";
-import type { Prioridade, Script, ScriptStatus } from "@/lib/mock-data";
+import type { Script } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -232,7 +232,7 @@ function RoteiroDetalhe() {
   );
   const [sceneGenerationPlanLoading, setSceneGenerationPlanLoading] = useState(false);
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
-  const [durationSeconds, setDurationSeconds] = useState<10 | 15 | 30 | 45 | 60>(
+  const [durationSeconds, setDurationSeconds] = useState<DurationPreset>(
     initialCaptureDuration ?? 45,
   );
   const [speechMode, setSpeechMode] = useState<"natural" | "fiel" | "direto" | "enfatico">(
@@ -326,7 +326,6 @@ function RoteiroDetalhe() {
   }, [displayText, durationSeconds, heygenAgentMode, technicalQualityIssues]);
   const blockingQualityIssues = technicalQualityIssues;
   const hasHighCreditConsumption = durationSeconds >= 45;
-  const approvalReady = draft?.status === "aprovado_clinicamente";
   const narrationWords = durationAssessment.wordCount;
   const estimatedSpeechSeconds = Math.max(0, Math.round(durationAssessment.estimatedSeconds));
   const baseMedicalReviewStatus = medicalReviewForRisk(
@@ -597,15 +596,34 @@ function RoteiroDetalhe() {
         ) || [],
     [catalog?.avatars, selectedAvatarSet],
   );
-  const avatarSetReady = Boolean(
-    selectedAvatarSet && selectedSetLooks.length >= 2 && primaryAvatarId,
+  const selectedSetGroupIds = useMemo(
+    () => new Set(selectedSetLooks.map((item) => item.avatar.groupId).filter(Boolean)),
+    [selectedSetLooks],
   );
+  const avatarSetIdentityReady = Boolean(
+    selectedSetLooks.length >= 2 && selectedSetGroupIds.size === 1,
+  );
+  const avatarSetDirectReady = Boolean(
+    selectedSetLooks.length >= 2 &&
+    selectedSetLooks.every(({ avatar }) => avatar.supportsDirectAvatar !== false),
+  );
+  const avatarSetReady = Boolean(
+    selectedAvatarSet &&
+    selectedSetLooks.length >= 2 &&
+    primaryAvatarId &&
+    avatarSetIdentityReady &&
+    avatarSetDirectReady,
+  );
+  const scenePlanLookIds = useMemo(
+    () => new Set((scenePlan?.scenes || []).map((scene) => scene.avatarId).filter(Boolean)),
+    [scenePlan],
+  );
+  const scenePlanUsesExactlyTwoLooks =
+    avatarMode !== "set" || !scenePlan || scenePlanLookIds.size === 2;
+  const longFormRequiresTwoCameras = durationSeconds > 60 && avatarMode !== "set";
   const productionModeReady =
-    heygenAgentMode ||
-    avatarMode === "single" ||
-    Boolean(avatarMode === "set" && sceneGenerationPlan);
-  const selectedAvatarReady =
-    heygenAgentMode || avatarMode === "single" ? Boolean(avatarId) : avatarSetReady;
+    avatarMode === "set" ? Boolean(sceneGenerationPlan) : heygenAgentMode || Boolean(avatarId);
+  const selectedAvatarReady = avatarMode === "set" ? avatarSetReady : Boolean(avatarId);
   const sceneRoles = useMemo<AvatarSetRole[]>(
     () => selectedAvatarSet?.looks.map((look) => look.role) || ["primary"],
     [selectedAvatarSet],
@@ -618,7 +636,6 @@ function RoteiroDetalhe() {
     technicalError: editorTechnicalError,
     medicalReviewStatus,
     humanReviewApproved,
-    scriptStatus: draft?.status ?? "aguardando_validacao",
     finalSaved: !dirty,
     // O modal de confirmação cobre esta etapa; o backend recebe o valor explícito.
     finalConfirmed: true,
@@ -634,7 +651,9 @@ function RoteiroDetalhe() {
     paidVersionReady &&
     editorGenerationGate.allowed &&
     selectedAvatarReady &&
-    productionModeReady;
+    productionModeReady &&
+    scenePlanUsesExactlyTwoLooks &&
+    !longFormRequiresTwoCameras;
 
   function chooseAvatar(nextAvatarId: string) {
     setAvatarMode("single");
@@ -653,17 +672,28 @@ function RoteiroDetalhe() {
     setPrimaryAvatarId(primaryLook.avatarId);
     setAvatarId(primaryLook.avatarId);
     setVoiceId(nextAvatarSet.voiceId);
+    setMusicTrackId(null);
+    setGenerationMode("direct");
   }
 
   useEffect(() => {
+    if (avatarMode === "set" && musicTrackId) setMusicTrackId(null);
+  }, [avatarMode, musicTrackId]);
+
+  useEffect(() => {
+    if (avatarMode === "set" && generationMode !== "direct") setGenerationMode("direct");
+  }, [avatarMode, generationMode]);
+
+  useEffect(() => {
     if (
+      avatarMode !== "set" &&
       selectedAvatar &&
       generationMode === "direct" &&
       selectedAvatar.supportsDirectAvatar === false
     ) {
       setGenerationMode("video_agent");
     }
-  }, [generationMode, selectedAvatar]);
+  }, [avatarMode, generationMode, selectedAvatar]);
 
   useEffect(() => {
     if (!profileLoaded || !avatarId || !voiceId || (avatarMode === "set" && !avatarSetReady))
@@ -677,7 +707,7 @@ function RoteiroDetalhe() {
       avatarMode,
       avatarSetId || "",
       primaryAvatarId,
-      musicTrackId || "",
+      avatarMode === "set" ? "" : musicTrackId || "",
       musicVolume,
       cinematicPrompt,
     ].join("|");
@@ -692,7 +722,7 @@ function RoteiroDetalhe() {
         avatarMode,
         avatarSetId: avatarMode === "set" ? avatarSetId : null,
         primaryAvatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
-        musicTrackId,
+        musicTrackId: avatarMode === "set" ? null : musicTrackId,
         musicVolume,
         cinematicPrompt,
       })
@@ -816,7 +846,7 @@ function RoteiroDetalhe() {
     setDraft((d) => (d ? { ...d, [key]: value } : d));
   }
 
-  function setProductionDuration(nextDuration: 10 | 15 | 30 | 45 | 60) {
+  function setProductionDuration(nextDuration: DurationPreset) {
     editorRevisionRef.current += 1;
     setDurationSeconds(nextDuration);
     setLastEditorResult(null);
@@ -831,9 +861,9 @@ function RoteiroDetalhe() {
     }
   }
 
-  async function persistCurrentScript() {
+  async function persistCurrentScript(nextText?: string) {
     if (!draft) throw new Error("Roteiro não carregado.");
-    const canonicalText = displayText.trim();
+    const canonicalText = (nextText ?? displayText).trim();
     const requested = {
       ...draft,
       textoFalado: canonicalText,
@@ -874,6 +904,25 @@ function RoteiroDetalhe() {
     return { saved, version };
   }
 
+  async function applyClaudeScenePlan(input: {
+    adjustedScript: string;
+    scenes: Array<{
+      id: string;
+      text: string;
+      lookRole: AvatarSetRole;
+      estimatedStart: number;
+      estimatedEnd: number;
+    }>;
+    transitionStyle: SceneTransitionStyle;
+  }) {
+    await persistCurrentScript(input.adjustedScript);
+    const savedPlan = await saveScenePlan(id, input.scenes, input.transitionStyle);
+    setScenePlan(savedPlan);
+    setHumanReviewApproved(false);
+    setLastEditorResult(null);
+    return savedPlan;
+  }
+
   const complianceFields = {
     titulo: draft.titulo,
     hook: draft.hook,
@@ -884,10 +933,6 @@ function RoteiroDetalhe() {
     cuidados: draft.cuidadosMedicos,
   };
 
-  const timeline = buildScriptTimeline(draft.status, {
-    criadoEm: draft.criadoEm,
-    validadoEm: draft.validadoEm,
-  });
   const productionBlockedReason = !editorGenerationGate.allowed
     ? editorGenerationGate.reason
     : !editorStateLoaded
@@ -902,27 +947,30 @@ function RoteiroDetalhe() {
               ? "Carregando perfil de producao do roteiro."
               : cinematicMode && !cinematicPrompt.trim()
                 ? "Escreva a direção cinematic antes de enviar este modo."
-                : avatarMode === "set" && !selectedAvatarSet
-                  ? "Selecione um Avatar Set."
-                  : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
-                    ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
-                    : !heygenAgentMode && avatarMode === "set" && !productionModeReady
-                      ? 'Clique em "Fazer tudo com Claude" para organizar cenas e cortes antes de enviar.'
-                      : !avatarId
-                        ? "Selecione um avatar pronto."
-                        : !voiceId
-                          ? "Selecione uma voz."
-                          : saving
-                            ? "Salvando roteiro."
-                            : null;
+                : longFormRequiresTwoCameras
+                  ? "Vídeos acima de 60s exigem o Avatar Set de duas câmeras."
+                  : avatarMode === "set" && !selectedAvatarSet
+                    ? "Selecione um Avatar Set."
+                    : !heygenAgentMode && avatarMode === "set" && !avatarSetIdentityReady
+                      ? "As duas câmeras precisam pertencer à mesma identidade HeyGen."
+                      : !heygenAgentMode && avatarMode === "set" && !avatarSetDirectReady
+                        ? "As duas câmeras precisam ser compatíveis com Direct Avatar da HeyGen."
+                        : !heygenAgentMode && avatarMode === "set" && !avatarSetReady
+                          ? "O Avatar Set precisa ter duas posições disponíveis no catálogo."
+                          : !heygenAgentMode &&
+                              avatarMode === "set" &&
+                              !scenePlanUsesExactlyTwoLooks
+                            ? "O Scene Plan precisa usar exatamente os dois looks escolhidos."
+                            : !heygenAgentMode && avatarMode === "set" && !productionModeReady
+                              ? 'Clique em "Revisar com Claude" e aplique o roteiro com os cortes antes de enviar.'
+                              : !avatarId
+                                ? "Selecione um avatar pronto."
+                                : !voiceId
+                                  ? "Selecione uma voz."
+                                  : saving
+                                    ? "Salvando roteiro."
+                                    : null;
   const productionChecklist = [
-    {
-      label: "Roteiro revisado",
-      ready: approvalReady,
-      detail: approvalReady
-        ? "Status Pronto"
-        : 'Mude o status para "Pronto" em Roteiro → Ver contexto.',
-    },
     {
       label: "Roteiro salvo",
       ready: !dirty,
@@ -943,7 +991,9 @@ function RoteiroDetalhe() {
       detail:
         !heygenAgentMode && avatarMode === "set"
           ? selectedAvatarSet
-            ? `${selectedSetLooks.length} look(s) carregado(s).`
+            ? avatarSetIdentityReady
+              ? `${selectedSetLooks.length} look(s) da mesma identidade HeyGen.`
+              : "Os looks precisam pertencer à mesma identidade HeyGen."
             : "Escolha um conjunto de looks."
           : selectedAvatar
             ? selectedAvatar.name
@@ -978,8 +1028,8 @@ function RoteiroDetalhe() {
           : avatarMode === "single"
             ? "Look único não precisa de plano de cenas."
             : scenePlan
-              ? `${scenePlan.scenes.length} cena(s) salvas.`
-              : 'Clique em "Fazer tudo com Claude".',
+              ? `${scenePlan.scenes.length} cena(s) salvas com ${scenePlanLookIds.size} look(s).`
+              : 'Clique em "Revisar com Claude" e aplique o roteiro com os cortes.',
     },
     ...(!heygenAgentMode && avatarMode === "set" && scenePlan && scenePlan.scenes.length > 1
       ? [
@@ -1055,7 +1105,7 @@ function RoteiroDetalhe() {
           speechMode,
           voiceMood,
           generationMode,
-          musicTrackId,
+          musicTrackId: avatarMode === "set" ? null : musicTrackId,
           musicVolume,
           cinematicPrompt,
         });
@@ -1136,20 +1186,20 @@ function RoteiroDetalhe() {
   }
 
   async function aplicarTrilhaNoVideoFinal() {
-    if (!musicTrackId || !avatarId || !voiceId) return;
+    if (avatarMode === "set" || !musicTrackId || !avatarId || !voiceId) return;
     setMixingMusic(true);
     try {
       // Garante que um clique logo após escolher a faixa já use essa escolha,
       // sem depender do autosave com debounce da tela.
       await saveProductionProfile(id, {
-        avatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
+        avatarId,
         voiceId,
         speechMode,
         voiceMood,
         generationMode,
-        avatarMode,
-        avatarSetId: avatarMode === "set" ? avatarSetId : null,
-        primaryAvatarId: avatarMode === "set" ? primaryAvatarId : avatarId,
+        avatarMode: "single",
+        avatarSetId: null,
+        primaryAvatarId: avatarId,
         musicTrackId,
         musicVolume,
         cinematicPrompt,
@@ -1269,8 +1319,8 @@ function RoteiroDetalhe() {
 
   async function gerarPrevia() {
     if (!draft || !script) return;
-    if (!approvalReady) {
-      toast.error('Conclua a revisão e altere o status do roteiro para "Pronto".');
+    if (medicalReviewStatus === "required" && !humanReviewApproved) {
+      toast.error("A revisão médica obrigatória precisa ser aprovada antes da prévia.");
       return;
     }
     setPreviewing(true);
@@ -1334,7 +1384,7 @@ function RoteiroDetalhe() {
                   <Film className="mr-1 h-4 w-4" /> Ver vídeo
                 </Link>
               </Button>
-              {avatarMode === "set" && musicTrackId ? (
+              {avatarMode !== "set" && musicTrackId ? (
                 <Button
                   size="sm"
                   variant="secondary"
@@ -1406,7 +1456,6 @@ function RoteiroDetalhe() {
                       previewing ||
                       !selectedAvatarReady ||
                       !voiceId ||
-                      !approvalReady ||
                       !editorStateLoaded ||
                       !paidScriptVersion.finalSpeechHash
                     }
@@ -1465,30 +1514,22 @@ function RoteiroDetalhe() {
             : durationAnnouncement}
         </div>
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge {...scriptStatusLabel[draft.status]} />
-            <StatusBadge {...riskLabel[draft.risco]} />
-            <StatusBadge {...prioridadeLabel[draft.prioridade]} />
-            {draft.editorialTone ? (
-              <StatusBadge {...editorialToneLabel[draft.editorialTone]} />
-            ) : null}
-            {draft.link ? (
-              <a
-                href={draft.link}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-status-info underline-offset-2 hover:underline"
-              >
-                Fonte / artigo original
-              </a>
-            ) : null}
-          </div>
+          {draft.link ? (
+            <a
+              href={draft.link}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex text-xs text-status-info underline-offset-2 hover:underline"
+            >
+              Ver fonte / artigo original
+            </a>
+          ) : null}
 
           <div id="roteiro-editar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
             <SectionHeading
               index={1}
-              title="Roteiro"
-              description="A fala final aprovada é a fonte do vídeo. O contexto editorial fica recolhido."
+              title="O que será dito no vídeo"
+              description="Edite somente o título e a fala. Os dados de origem ficam preservados em segundo plano."
             />
             <div className="mt-4 space-y-4">
               <Field label="Título" htmlFor="script-title">
@@ -1668,97 +1709,6 @@ function RoteiroDetalhe() {
                 />
                 {lastEditorResult ? <QualityChecks result={lastEditorResult} /> : null}
               </div>
-              <Accordion type="single" collapsible>
-                <AccordionItem value="context">
-                  <AccordionTrigger>Ver contexto do roteiro</AccordionTrigger>
-                  <AccordionContent>
-                    <div className="grid gap-3 pt-2 md:grid-cols-2">
-                      <Field label="Tema">
-                        <Input value={draft.tema} onChange={(e) => set("tema", e.target.value)} />
-                      </Field>
-                      <Field label="Hook">
-                        <Textarea
-                          rows={2}
-                          value={draft.hook}
-                          onChange={(e) => set("hook", e.target.value)}
-                        />
-                      </Field>
-                      <Field label="Dor / conflito">
-                        <Textarea
-                          rows={2}
-                          value={draft.dorConflito}
-                          onChange={(e) => set("dorConflito", e.target.value)}
-                        />
-                      </Field>
-                      <Field label="Explicação simples">
-                        <Textarea
-                          rows={3}
-                          value={draft.explicacaoSimples}
-                          onChange={(e) => set("explicacaoSimples", e.target.value)}
-                        />
-                      </Field>
-                      <Field label="Virada / provocação">
-                        <Textarea
-                          rows={3}
-                          value={draft.virada}
-                          onChange={(e) => set("virada", e.target.value)}
-                        />
-                      </Field>
-                      <Field label="Encerramento">
-                        <Textarea
-                          rows={2}
-                          value={draft.cta}
-                          onChange={(e) => set("cta", e.target.value)}
-                        />
-                      </Field>
-                      <Field label="Cuidados médicos">
-                        <Textarea
-                          rows={2}
-                          value={draft.cuidadosMedicos}
-                          onChange={(e) => set("cuidadosMedicos", e.target.value)}
-                        />
-                      </Field>
-                      <Field label="Formato">
-                        <Input
-                          value={draft.formatoSugerido}
-                          onChange={(e) => set("formatoSugerido", e.target.value)}
-                        />
-                      </Field>
-                      <Field label="Prioridade">
-                        <Select
-                          value={draft.prioridade}
-                          onValueChange={(v) => set("prioridade", v as Prioridade)}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="alta">Alta</SelectItem>
-                            <SelectItem value="media">Media</SelectItem>
-                            <SelectItem value="baixa">Baixa</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                      <Field label="Status">
-                        <Select
-                          value={draft.status}
-                          onValueChange={(v) => set("status", v as ScriptStatus)}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="aguardando_validacao">Rascunho</SelectItem>
-                            <SelectItem value="em_revisao">Em edição</SelectItem>
-                            <SelectItem value="aprovado_clinicamente">Pronto</SelectItem>
-                            <SelectItem value="rejeitado">Arquivado</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                    </div>
-                  </AccordionContent>
-                </AccordionItem>
-              </Accordion>
             </div>
           </div>
 
@@ -1947,9 +1897,10 @@ function RoteiroDetalhe() {
                   <button
                     type="button"
                     aria-pressed={generationMode === "video_agent"}
+                    disabled={avatarMode === "set"}
                     onClick={() => setGenerationMode("video_agent")}
                     className={cn(
-                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
+                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50",
                       generationMode === "video_agent" &&
                         "border-primary bg-primary/5 ring-1 ring-primary/30",
                     )}
@@ -1964,9 +1915,10 @@ function RoteiroDetalhe() {
                   <button
                     type="button"
                     aria-pressed={generationMode === "cinematic"}
+                    disabled={avatarMode === "set"}
                     onClick={() => setGenerationMode("cinematic")}
                     className={cn(
-                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
+                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50",
                       generationMode === "cinematic" &&
                         "border-primary bg-primary/5 ring-1 ring-primary/30",
                     )}
@@ -1981,9 +1933,10 @@ function RoteiroDetalhe() {
                   <button
                     type="button"
                     aria-pressed={generationMode === "story"}
+                    disabled={avatarMode === "set"}
                     onClick={() => setGenerationMode("story")}
                     className={cn(
-                      "cursor-pointer rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      "cursor-pointer rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
                       generationMode === "story" &&
                         "border-primary bg-primary/5 ring-1 ring-primary/30",
                     )}
@@ -1997,13 +1950,21 @@ function RoteiroDetalhe() {
                     </span>
                   </button>
                 </div>
-                {generationMode === "video_agent" ? (
+                {avatarMode === "set" ? (
+                  <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                    <span className="font-semibold text-foreground">
+                      Produção multicâmera protegida.
+                    </span>{" "}
+                    Este Avatar Set usa somente Produção guiada pelo app: uma tomada Direct Avatar
+                    por cena, sem b-roll, trilha, mistura de áudio ou job único do HeyGen.
+                  </div>
+                ) : generationMode === "video_agent" ? (
                   <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                     <span className="font-semibold text-foreground">Modo autônomo do HeyGen.</span>{" "}
                     Enviamos fala aprovada, avatar principal, voz, humor, duração e formato. Ele não
-                    troca entre dois looks no mesmo job; para duas posições, use Produção guiada pelo
-                    app, que gera cenas separadas e contínuas. Nenhuma direção cinematic entra neste
-                    fluxo.
+                    troca entre dois looks no mesmo job; para duas posições, use Produção guiada
+                    pelo app, que gera cenas separadas e contínuas. Nenhuma direção cinematic entra
+                    neste fluxo.
                   </div>
                 ) : cinematicMode ? (
                   <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
@@ -2024,7 +1985,7 @@ function RoteiroDetalhe() {
               <div className="space-y-2">
                 <Label className="text-xs">Duração</Label>
                 <div className="flex flex-wrap gap-2">
-                  {([10, 15, 30, 45, 60] as const).map((seconds) => (
+                  {([10, 15, 30, 45, 60, 90, 120, 180] as const).map((seconds) => (
                     <button
                       key={seconds}
                       type="button"
@@ -2048,8 +2009,14 @@ function RoteiroDetalhe() {
                         ? "O Cinematic organiza câmera, encenação e acontecimentos dentro deste tempo aproximado."
                         : heygenAgentMode
                           ? "O HeyGen Video Agent organiza um job único dentro deste tempo aproximado."
-                          : "O app distribui a fala e as cenas dentro deste tempo aproximado."}
+                          : "O app distribui a fala em tomadas separadas e corta somente entre as duas câmeras."}
                 </p>
+                {durationSeconds > 60 ? (
+                  <p className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-status-info">
+                    Vídeos longos usam obrigatoriamente duas câmeras, com uma chamada HeyGen por
+                    tomada.
+                  </p>
+                ) : null}
                 {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
               </div>
               <Accordion type="single" collapsible>
@@ -2083,6 +2050,7 @@ function RoteiroDetalhe() {
                         <Select
                           value={generationMode}
                           onValueChange={(value) => setGenerationMode(value as GenerationMode)}
+                          disabled={avatarMode === "set"}
                         >
                           <SelectTrigger>
                             <SelectValue />
@@ -2094,9 +2062,15 @@ function RoteiroDetalhe() {
                             >
                               Direct Avatar
                             </SelectItem>
-                            <SelectItem value="video_agent">Video Agent</SelectItem>
-                            <SelectItem value="cinematic">Cinematic separado</SelectItem>
-                            <SelectItem value="story">História cinematográfica</SelectItem>
+                            <SelectItem value="video_agent" disabled={avatarMode === "set"}>
+                              Video Agent
+                            </SelectItem>
+                            <SelectItem value="cinematic" disabled={avatarMode === "set"}>
+                              Cinematic separado
+                            </SelectItem>
+                            <SelectItem value="story" disabled={avatarMode === "set"}>
+                              História cinematográfica
+                            </SelectItem>
                           </SelectContent>
                         </Select>
                       </Field>
@@ -2136,28 +2110,35 @@ function RoteiroDetalhe() {
                           </SelectContent>
                         </Select>
                       </Field>
-                      <Field label="Trilha de fundo">
-                        <Select
-                          value={musicTrackId || "none"}
-                          onValueChange={(value) =>
-                            setMusicTrackId(value === "none" ? null : value)
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Sem trilha" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="none">Sem trilha</SelectItem>
-                            {musicTracks.map((track) => (
-                              <SelectItem key={track.id} value={track.id}>
-                                {track.name} · {track.mood}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </Field>
+                      {avatarMode === "set" ? (
+                        <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-status-info">
+                          Duas câmeras: sem trilha. O áudio original de cada tomada será unido em
+                          corte seco.
+                        </div>
+                      ) : (
+                        <Field label="Trilha de fundo">
+                          <Select
+                            value={musicTrackId || "none"}
+                            onValueChange={(value) =>
+                              setMusicTrackId(value === "none" ? null : value)
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Sem trilha" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">Sem trilha</SelectItem>
+                              {musicTracks.map((track) => (
+                                <SelectItem key={track.id} value={track.id}>
+                                  {track.name} · {track.mood}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                      )}
                     </div>
-                    {selectedMusicTrack ? (
+                    {avatarMode !== "set" && selectedMusicTrack ? (
                       <div className="mt-3 rounded-md border bg-muted/20 p-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-2 text-sm">
@@ -2194,10 +2175,12 @@ function RoteiroDetalhe() {
                         </div>
                       </div>
                     ) : null}
-                    <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-                      A música só é mixada localmente no MP4 final composto; não cria chamada Claude
-                      nem HeyGen.
-                    </p>
+                    {avatarMode !== "set" ? (
+                      <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+                        A música só é mixada localmente no MP4 final composto; não cria chamada
+                        Claude nem HeyGen.
+                      </p>
+                    ) : null}
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
                       <FriendlySwitch
                         icon={<Captions className="h-4 w-4" />}
@@ -2224,7 +2207,7 @@ function RoteiroDetalhe() {
                             id="outro-text"
                             value={outroText}
                             onChange={(event) => setOutroText(event.target.value)}
-                            placeholder="Ex.: Me siga para mais dicas."
+                            placeholder="Ex.: Salve para rever este ponto."
                             maxLength={180}
                           />
                           <Button
@@ -2365,6 +2348,7 @@ function RoteiroDetalhe() {
                     performancePlan={performancePlan}
                     availableRoles={sceneRoles}
                     onSaved={setScenePlan}
+                    onApplyClaudePlan={applyClaudeScenePlan}
                   />
                   <Accordion type="single" collapsible className="mt-3">
                     <AccordionItem value="scene-generation-details">
@@ -2464,37 +2448,11 @@ function RoteiroDetalhe() {
                   </AccordionItem>
                 </Accordion>
               ) : null}
-              <Accordion type="single" collapsible>
-                <AccordionItem value="review-highlight">
-                  <AccordionTrigger>Ver revisão com highlight</AccordionTrigger>
-                  <AccordionContent>
-                    <div className="space-y-2 pt-2 text-sm leading-relaxed">
-                      <Preview label="Hook" text={draft.hook} palavras={palavras} />
-                      <Preview
-                        label="Dor / conflito"
-                        text={draft.dorConflito}
-                        palavras={palavras}
-                      />
-                      <Preview
-                        label="Explicação"
-                        text={draft.explicacaoSimples}
-                        palavras={palavras}
-                      />
-                      <Preview label="Virada" text={draft.virada} palavras={palavras} />
-                      <Preview label="Encerramento" text={draft.cta} palavras={palavras} />
-                    </div>
-                  </AccordionContent>
-                </AccordionItem>
-              </Accordion>
             </div>
           </div>
         </div>
 
         <div id="roteiro-compliance" className="scroll-mt-20 space-y-3">
-          <div className="rounded-xl border bg-card p-4 shadow-sm">
-            <h3 className="mb-3 font-display text-sm font-semibold">Timeline</h3>
-            <StatusTimeline steps={timeline} />
-          </div>
           <ProductionReadinessCard
             catalogLoading={catalogLoading}
             catalogError={catalogError}
@@ -2502,7 +2460,6 @@ function RoteiroDetalhe() {
             voiceReady={Boolean(voiceId)}
             speechReady={blockingQualityIssues.length === 0}
             speechIssue={qualityIssues[0]}
-            approvalReady={approvalReady}
             saved={!dirty}
           />
           <CompliancePanel
@@ -2544,7 +2501,7 @@ function SceneGenerationSummary({
 }: {
   plan: SceneGenerationResult | null;
   loading: boolean;
-  durationSeconds: 10 | 15 | 30 | 45 | 60;
+  durationSeconds: DurationPreset;
   avatarMode: "single" | "set";
 }) {
   return (
@@ -2582,7 +2539,9 @@ function SceneGenerationSummary({
               >
                 <span className="font-semibold">Cena {request.order}</span>
                 <span>
-                  {avatarMode === "set" ? `Look ${request.avatarId}` : "Avatar principal"}
+                  {avatarMode === "set"
+                    ? `${request.lookRole} · Look ${request.avatarId}`
+                    : "Avatar principal"}
                 </span>
                 <span className="truncate text-muted-foreground">{request.spokenText}</span>
               </div>
@@ -2597,48 +2556,6 @@ function SceneGenerationSummary({
       )}
     </div>
   );
-}
-
-function buildScriptTimeline(
-  status: ScriptStatus,
-  ts: { criadoEm: string; validadoEm?: string },
-): TimelineStep[] {
-  const fmt = (iso?: string) => (iso ? new Date(iso).toLocaleString("pt-BR") : undefined);
-  if (status === "rejeitado") {
-    return [
-      { key: "criado", label: "Roteiro criado", state: "done", timestamp: fmt(ts.criadoEm) },
-      { key: "validado", label: "Arquivado", state: "error", hint: "Fora do fluxo de producao" },
-    ];
-  }
-  const order: ScriptStatus[] = ["aguardando_validacao", "em_revisao", "aprovado_clinicamente"];
-  const currentIdx = order.indexOf(status);
-  const labels: Record<ScriptStatus, string> = {
-    aguardando_validacao: "Rascunho",
-    em_revisao: "Em edicao",
-    aprovado_clinicamente: "Pronto",
-    rejeitado: "Arquivado",
-  };
-  return [
-    { key: "criado", label: "Roteiro criado", state: "done", timestamp: fmt(ts.criadoEm) },
-    ...order.map((k, i) => {
-      const state: TimelineStep["state"] =
-        i < currentIdx ? "done" : i === currentIdx ? "current" : "pending";
-      const step: TimelineStep = { key: k, label: labels[k], state };
-      if (k === "aprovado_clinicamente" && state === "done") {
-        step.timestamp = fmt(ts.validadoEm);
-      }
-      return step;
-    }),
-    {
-      key: "producao",
-      label: "Enviar para producao",
-      state: status === "aprovado_clinicamente" ? "current" : "pending",
-      hint:
-        status === "aprovado_clinicamente"
-          ? "Pronto para producao"
-          : "Quando o roteiro estiver pronto",
-    },
-  ];
 }
 
 function Field({
@@ -2687,17 +2604,4 @@ function buildNarrationText(script: Script, outro = DEFAULT_OUTRO): string {
 
 function editorScriptSignature(script: Script): string {
   return JSON.stringify(script);
-}
-
-function Preview({ label, text, palavras }: { label: string; text: string; palavras: string[] }) {
-  return (
-    <div>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-        {label}
-      </div>
-      <div className="text-sm">
-        <HighlightedText text={text} palavrasProibidas={palavras} />
-      </div>
-    </div>
-  );
 }

@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { EditorialTone } from "@/lib/mock-data";
+import type { DurationPreset } from "@/lib/script-editor";
 
 const TONE_OPTIONS: Array<{ value: EditorialTone; label: string; description: string }> = [
   {
@@ -33,7 +34,7 @@ const TONE_OPTIONS: Array<{ value: EditorialTone; label: string; description: st
   },
 ];
 
-const DURATIONS: Array<10 | 15 | 30 | 45 | 60> = [10, 15, 30, 45, 60];
+const DURATIONS: DurationPreset[] = [10, 15, 30, 45, 60, 90, 120, 180];
 
 export function ToneSelectDialog({
   open,
@@ -53,8 +54,8 @@ export function ToneSelectDialog({
   ideaTitle: string;
   tone: EditorialTone;
   onToneChange: (tone: EditorialTone) => void;
-  durationSeconds: 10 | 15 | 30 | 45 | 60;
-  onDurationChange: (value: 10 | 15 | 30 | 45 | 60) => void;
+  durationSeconds: DurationPreset;
+  onDurationChange: (value: DurationPreset) => void;
   outro: string;
   onOutroChange: (value: string) => void;
   isGenerating: boolean;
@@ -102,9 +103,7 @@ export function ToneSelectDialog({
             <ToggleGroup
               type="single"
               value={String(durationSeconds)}
-              onValueChange={(value) =>
-                value && onDurationChange(Number(value) as 10 | 15 | 30 | 45 | 60)
-              }
+              onValueChange={(value) => value && onDurationChange(Number(value) as DurationPreset)}
               className="justify-start"
             >
               {DURATIONS.map((seconds) => (
@@ -114,6 +113,13 @@ export function ToneSelectDialog({
               ))}
             </ToggleGroup>
           </div>
+
+          {durationSeconds > 60 ? (
+            <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-muted-foreground">
+              Vídeos longos serão produzidos depois pelo Avatar Set de duas câmeras, em tomadas
+              separadas e com corte seco.
+            </div>
+          ) : null}
 
           {durationSeconds === 10 ? (
             <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-muted-foreground">

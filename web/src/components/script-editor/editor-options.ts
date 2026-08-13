@@ -6,6 +6,7 @@ export const AVATAR_SET_ROLE_OPTIONS: Array<{ value: AvatarSetRole; label: strin
   { value: "close", label: "Close" },
   { value: "three_quarter", label: "3/4" },
   { value: "standing", label: "Em pé" },
+  { value: "seated", label: "Sentado" },
   { value: "wide", label: "Aberto" },
 ];
 

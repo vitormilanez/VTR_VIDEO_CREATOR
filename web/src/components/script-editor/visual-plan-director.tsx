@@ -27,6 +27,7 @@ import {
   type VideoVisualType,
   type VisualPlan,
 } from "@/lib/api/local";
+import type { DurationPreset } from "@/lib/script-editor";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -57,7 +58,7 @@ export function VisualPlanDirector({
   loading: boolean;
   displayText: string;
   spokenText: string;
-  durationSeconds: 10 | 15 | 30 | 45 | 60;
+  durationSeconds: DurationPreset;
   performancePlan: {
     tone: string;
     pace: string;

@@ -53,7 +53,6 @@ describe("editor permissions", () => {
     schemaValid: true,
     medicalReviewStatus: "recommended" as const,
     humanReviewApproved: false,
-    scriptStatus: "aprovado_clinicamente",
     finalSaved: true,
     finalConfirmed: true,
   };

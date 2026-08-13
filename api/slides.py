@@ -15,10 +15,18 @@ from typing import Any, Iterable
 
 from api.pack_design import (
     LAYOUT_SPECS,
+    PACK_FAMILIES,
     PACK_LAYOUTS,
+    PACK_THEMES,
     PHOTO_LIBRARY,
     normalize_slide,
     photo_asset,
+)
+from api.services.medical_identity import (
+    MEDICAL_EDUCATIONAL_DISCLAIMER,
+    MEDICAL_PROFESSIONAL_IDENTIFICATION,
+    MEDICAL_ROLE_AND_REGISTERED_SPECIALTY,
+    safe_editorial_cta,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,6 +44,21 @@ COLORS = {
     "muted": "#8496A8",
     "footer_dark": "#5D6E80",
     "subtle": "#63768A",
+}
+
+MODERNIST_COLORS = {
+    "dark": "#171717",
+    "deep": "#0C0C0C",
+    "light": "#F4EFE6",
+    "warm": "#E7DED1",
+    "white": "#FFFFFF",
+    "teal": "#C8392B",
+    "sand": "#E36A54",
+    "body_dark": "#3E3833",
+    "body_light": "#E9DFD2",
+    "muted": "#9A8E80",
+    "footer_dark": "#675E55",
+    "subtle": "#74685D",
 }
 
 FONT_ARCHIVO = ROOT / "assets/fonts/archivo/archivo-latin-wght-normal.woff2"
@@ -133,6 +156,18 @@ def _items(fields: dict[str, Any]) -> list[dict[str, str]]:
     return result
 
 
+def _cover_note(value: Any, *, overlay: bool = False) -> str:
+    """Bloco opcional da capa, com fonte reduzida no browser até caber."""
+    note = str(value or "").strip()
+    if not note:
+        return ""
+    classes = "cover-note cover-note-overlay" if overlay else "cover-note"
+    return (
+        f'<aside class="{classes}"><p class="cover-note-text auto-fit" '
+        f'data-max-font-size="44" data-min-font-size="24">{_esc(note)}</p></aside>'
+    )
+
+
 def _hero_photo(slide: dict[str, Any], index: int, total: int) -> str:
     f = slide["fields"]
     uri, meta = _photo(slide)
@@ -143,6 +178,7 @@ def _hero_photo(slide: dict[str, Any], index: int, total: int) -> str:
       {_brand(dark=True)}
       <div class="hero-copy"><div class="accent-bar"></div><div class="eyebrow">{_esc(f['eyebrow'])}</div>
         <h1 style="font-size:{size}px">{_esc(f['headline'])}</h1></div>
+      {_cover_note(f.get('coverNote'))}
       <div class="footer-row"><span>{_esc(f['footer'] or 'Arraste para o lado')}</span>{_counter(index,total,light=True)}</div>
     </section>"""
 
@@ -232,7 +268,7 @@ def _doctor_quote(slide: dict[str, Any], index: int, total: int) -> str:
     uri, meta = _photo(slide)
     caption = _esc(f["caption"])
     if caption.casefold().replace(".", "") in {"dr guilherme martins", "guilherme martins"}:
-        caption = "Endocrinologia e Metabologia"
+        caption = MEDICAL_ROLE_AND_REGISTERED_SPECIALTY
     return f"""<section class="slide doctor-quote {'bg-dark light-text' if dark else 'bg-warm'}">{_brand(dark=dark)}
       <div class="quote-copy"><div class="opening-quote">“</div><blockquote>{_esc(f['quote'])}</blockquote></div>
       <div class="quote-footer">{_photo_markup(uri, meta, 'quote-photo')}<div><strong>Dr. Guilherme Martins</strong><span>{caption}</span></div>
@@ -244,9 +280,13 @@ def _photo_overlay(slide: dict[str, Any], index: int, total: int) -> str:
     uri, meta = _photo(slide)
     size = _headline_size("photo_overlay", f["headline"], 84)
     top = slide.get("variant") == "text-top"
+    has_cover_note = bool(str(f.get("coverNote") or "").strip())
+    copy_classes = "overlay-copy" + (" overlay-copy-top" if top else "") + (
+        " overlay-copy-with-note" if top and has_cover_note else ""
+    )
     return f"""<section class="slide photo-overlay bg-deep">{_photo_markup(uri, meta)}<div class="photo-gradient"></div>{_brand(dark=True)}
-      <div class="overlay-copy {'overlay-copy-top' if top else ''}"><div class="accent-bar"></div><div class="eyebrow">{_esc(f['eyebrow'])}</div>
-      <h1 style="font-size:{size}px">{_esc(f['headline'])}</h1></div><div class="footer-row"><span>{_esc(f['footer'])}</span>{_counter(index,total,light=True)}</div></section>"""
+      <div class="{copy_classes}"><div class="accent-bar"></div><div class="eyebrow">{_esc(f['eyebrow'])}</div>
+      <h1 style="font-size:{size}px">{_esc(f['headline'])}</h1></div>{_cover_note(f.get('coverNote'), overlay=True)}<div class="footer-row"><span>{_esc(f['footer'])}</span>{_counter(index,total,light=True)}</div></section>"""
 
 
 def _do_dont(slide: dict[str, Any], index: int, total: int) -> str:
@@ -268,8 +308,8 @@ def _cta_photo(slide: dict[str, Any], index: int, total: int) -> str:
     body_size = _copy_size(str(f.get("body") or ""), base=32, medium=28, small=25, medium_at=52, small_at=66)
     return f"""<section class="slide cta-photo bg-dark {'photo-left' if left else ''}">{_photo_markup(uri, meta)}<div class="cta-fade"></div>
       {_brand(dark=True,cta=True)}<div class="cta-copy"><div class="accent-bar"></div><h1 style="font-size:{size}px">{_esc(f['headline'])}</h1>
-      <p style="font-size:{body_size}px">{_esc(f['body'])}</p><div class="cta-pill">{_esc(f['cta'])}</div></div>
-      <div class="cta-footer"><span>{_esc(f['disclaimer'])}</span>{_counter(index,total,light=True)}</div></section>"""
+      <p style="font-size:{body_size}px">{_esc(f['body'])}</p><div class="cta-pill">{_esc(safe_editorial_cta(f['cta']))}</div></div>
+      <div class="cta-footer"><div class="cta-compliance"><span>{_esc(MEDICAL_EDUCATIONAL_DISCLAIMER)}</span><strong>{_esc(MEDICAL_PROFESSIONAL_IDENTIFICATION)}</strong></div>{_counter(index,total,light=True)}</div></section>"""
 
 
 RENDERERS = {
@@ -300,7 +340,7 @@ def _css() -> str:
     h1,h2,h3,p{{margin:0}}h1,h2,h3{{text-wrap:balance}}p{{text-wrap:pretty}}.accent-bar{{width:120px;height:10px;background:{COLORS['teal']}}.accent-bar.small{{width:96px}}
     .footer-row{{position:absolute;z-index:8;left:80px;right:80px;bottom:88px;display:flex;justify-content:space-between;align-items:center;font-size:24px;font-weight:500;line-height:1.4;color:{COLORS['body_light']}}}
     .hero-photo>.photo{{position:absolute;left:0;top:430px;width:1080px;height:920px;object-fit:cover}}.hero-top-fade{{position:absolute;left:0;top:430px;width:1080px;height:300px;background:linear-gradient(180deg,{COLORS['dark']} 0%,rgba(10,26,47,0) 100%)}}
-    .hero-bottom-fade{{position:absolute;left:0;bottom:0;width:1080px;height:360px;background:linear-gradient(180deg,rgba(6,18,31,0),rgba(6,18,31,.9))}}.hero-copy{{position:absolute;z-index:5;left:80px;top:250px;width:920px;display:flex;flex-direction:column;gap:32px}}.hero-copy h1{{font-weight:800;line-height:.94;letter-spacing:-.035em;color:#fff}}
+    .hero-bottom-fade{{position:absolute;left:0;bottom:0;width:1080px;height:360px;background:linear-gradient(180deg,rgba(6,18,31,0),rgba(6,18,31,.9))}}.hero-copy{{position:absolute;z-index:5;left:80px;top:250px;width:920px;display:flex;flex-direction:column;gap:32px}}.hero-copy h1{{font-weight:800;line-height:.94;letter-spacing:-.035em;color:#fff}}.cover-note{{position:absolute;z-index:7;left:80px;bottom:174px;width:520px;height:232px;padding:28px 30px;border:1px solid rgba(244,242,237,.32);border-radius:18px;background:rgba(6,18,31,.78);box-shadow:0 16px 38px rgba(6,18,31,.25);display:flex;align-items:center}}.cover-note-text{{width:100%;height:176px;overflow:hidden;overflow-wrap:anywhere;font-weight:700;line-height:1.1;letter-spacing:-.02em;color:#fff;white-space:pre-wrap}}.cover-note-overlay{{top:350px;bottom:auto}}.overlay-copy-top.overlay-copy-with-note{{top:650px}}
     .photo-split{{display:flex}}.split-photo{{position:relative;width:486px;height:1350px;flex:none}}.split-photo img,.split-photo div{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}}.split-copy{{position:relative;flex:1;padding:96px 80px 88px 72px;display:flex;flex-direction:column}}.split-copy .brand{{position:static}}.split-spacer{{height:88px;flex:none}}.split-copy .eyebrow{{margin-top:32px}}.split-copy h1{{margin-top:28px;font-weight:800;line-height:1;letter-spacing:-.03em}}.split-copy p{{margin-top:40px;font-size:34px;line-height:1.5;color:{COLORS['body_dark']}}}.split-footer{{margin-top:auto;display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(10,26,47,.14);padding-top:28px;font-size:24px;color:{COLORS['footer_dark']}}}
     .statement-copy{{position:absolute;left:80px;right:80px;top:380px;display:flex;flex-direction:column;gap:44px}}.statement-copy h1{{font-weight:800;line-height:.94;letter-spacing:-.04em}}.statement-footer{{position:absolute;left:80px;right:80px;bottom:88px;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid rgba(10,26,47,.14);padding-top:32px;font-size:30px;line-height:1.4;color:{COLORS['body_dark']}}.big-statement.light-text .statement-footer{{border-color:rgba(244,242,237,.14);color:{COLORS['body_light']}}}.statement-footer>span{{max-width:640px}}
     .question-mark{{position:absolute;right:-60px;top:180px;font-size:760px;font-weight:800;line-height:.7;letter-spacing:-.06em;color:rgba(18,178,166,.10)}}.question-copy{{position:absolute;left:80px;right:80px;top:440px;display:flex;flex-direction:column;gap:48px}}.question-copy h1{{font-weight:800;line-height:.98;letter-spacing:-.035em}}.question-copy p{{max-width:820px;font-size:36px;line-height:1.5;color:{COLORS['body_dark']}}.question.light-text .question-copy p{{color:{COLORS['body_light']}}}
@@ -311,24 +351,63 @@ def _css() -> str:
     .quote-copy{{position:absolute;left:80px;right:80px;top:285px}}.opening-quote{{height:110px;font-family:'Instrument Serif';font-size:200px;line-height:.6;color:{COLORS['sand']}}blockquote{{max-width:900px;margin:0;font-family:'Instrument Serif';font-style:italic;font-size:82px;line-height:1.14;text-wrap:balance}}.quote-footer{{position:absolute;left:80px;right:80px;bottom:88px;display:flex;align-items:center;gap:32px;border-top:1px solid rgba(10,26,47,.16);padding-top:40px}}.doctor-quote.light-text .quote-footer{{border-color:rgba(244,242,237,.16)}}.quote-photo{{width:150px;height:150px;flex:none;border-radius:999px;object-fit:cover}}.quote-footer>div:not(.quote-counter):not(.counter){{display:flex;flex-direction:column;gap:8px}}.quote-footer strong{{font-size:38px;line-height:1.1}}.quote-footer span{{font-size:26px;line-height:1.3;color:{COLORS['footer_dark']}}.doctor-quote.light-text .quote-footer span{{color:{COLORS['body_light']}}}.quote-counter{{margin-left:auto}}
     .photo-overlay>.photo{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}}.photo-gradient{{position:absolute;inset:0;background:linear-gradient(180deg,rgba(6,18,31,.75) 0%,rgba(6,18,31,0) 38%,rgba(6,18,31,.9) 100%)}}.overlay-copy{{position:absolute;z-index:5;left:80px;right:80px;bottom:180px;display:flex;flex-direction:column;gap:32px}}.overlay-copy-top{{top:280px;bottom:auto}}.overlay-copy h1{{font-weight:800;line-height:.98;letter-spacing:-.03em;color:#fff}}
     .do-dont{{display:flex}}.avoid-panel,.prefer-panel{{position:relative;width:540px;padding:96px 48px 88px 80px;display:flex;flex-direction:column}}.avoid-panel{{background:{COLORS['dark']};color:{COLORS['light']}}}.prefer-panel{{background:{COLORS['light']};color:{COLORS['dark']};padding-left:48px;padding-right:80px}}.avoid-panel .brand{{position:static}}.compare-spacer{{height:120px}}.prefer-spacer{{height:167px}}.compare-label{{font-size:26px;font-weight:700;letter-spacing:.24em;text-transform:uppercase;color:{COLORS['teal']}}.muted-label{{color:{COLORS['muted']}}.compare-list{{margin-top:44px;display:flex;flex-direction:column;gap:36px}}.compare-item{{padding-top:32px;border-top:1px solid rgba(10,26,47,.16);font-size:40px;font-weight:600;line-height:1.15;letter-spacing:-.015em}}.avoid-panel .compare-item{{border-color:rgba(244,242,237,.16)}}.compare-note,.compare-counter{{margin-top:auto;font-size:22px;color:{COLORS['subtle']}}.compare-counter{{margin-left:auto}}
-    .cta-photo>.photo{{position:absolute;right:0;top:0;width:600px;height:1350px;object-fit:cover}}.cta-photo.photo-left>.photo{{left:0;right:auto}}.cta-fade{{position:absolute;right:0;top:0;width:600px;height:1350px;background:linear-gradient(90deg,{COLORS['dark']} 0%,rgba(10,26,47,.65) 34%,rgba(10,26,47,.18) 100%)}}.photo-left .cta-fade{{left:0;right:auto;transform:scaleX(-1)}}.cta-copy{{position:absolute;z-index:5;left:80px;top:500px;width:650px;display:flex;flex-direction:column;gap:34px}}.photo-left .cta-copy{{left:350px}}.cta-copy h1{{font-weight:800;line-height:.98;letter-spacing:-.03em;color:#fff}}.cta-copy p{{font-size:32px;line-height:1.45;color:{COLORS['body_light']}}.cta-pill{{display:inline-flex;align-self:flex-start;padding:28px 44px;border-radius:999px;background:{COLORS['teal']};color:{COLORS['deep']};font-size:32px;font-weight:700;line-height:1}}.cta-footer{{position:absolute;z-index:6;left:80px;right:80px;bottom:88px;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid rgba(244,242,237,.16);padding-top:28px;color:{COLORS['muted']}}.cta-footer>span{{max-width:620px;font-size:22px;line-height:1.4}}
+    .cta-photo>.photo{{position:absolute;right:0;top:0;width:600px;height:1350px;object-fit:cover}}.cta-photo.photo-left>.photo{{left:0;right:auto}}.cta-fade{{position:absolute;right:0;top:0;width:600px;height:1350px;background:linear-gradient(90deg,{COLORS['dark']} 0%,rgba(10,26,47,.65) 34%,rgba(10,26,47,.18) 100%)}}.photo-left .cta-fade{{left:0;right:auto;transform:scaleX(-1)}}.cta-copy{{position:absolute;z-index:5;left:80px;top:500px;width:650px;display:flex;flex-direction:column;gap:34px}}.photo-left .cta-copy{{left:350px}}.cta-copy h1{{font-weight:800;line-height:.98;letter-spacing:-.03em;color:#fff}}.cta-copy p{{font-size:32px;line-height:1.45;color:{COLORS['body_light']}}.cta-pill{{display:inline-flex;align-self:flex-start;padding:28px 44px;border-radius:999px;background:{COLORS['teal']};color:{COLORS['deep']};font-size:32px;font-weight:700;line-height:1}}.cta-footer{{position:absolute;z-index:6;left:80px;right:80px;bottom:48px;display:flex;justify-content:space-between;align-items:flex-end;gap:24px;border-top:1px solid rgba(244,242,237,.16);padding-top:22px;color:{COLORS['muted']}}.cta-compliance{{max-width:800px;display:flex;flex-direction:column;gap:10px}}.cta-compliance span{{color:{COLORS['body_light']};font-size:24px;line-height:1.36;font-weight:560}}.cta-compliance strong{{color:#fff;font-size:24px;line-height:1.38;font-weight:700;letter-spacing:-.012em}}
     """
     for name, value in COLORS.items():
         template = template.replace("{COLORS['" + name + "']}", value)
     return template.replace("{_font_css()}", _font_css()).replace("{{", "{").replace("}}", "}")
 
 
-def slide_html(slide: dict[str, Any], *, index: int, total: int) -> str:
+def _apply_theme(document: str, theme_id: str) -> str:
+    """Troca somente tokens fechados; conteúdo e composição permanecem intactos."""
+    if theme_id != "modernist-red":
+        return document
+    themed = document
+    for name, source in COLORS.items():
+        themed = themed.replace(source, MODERNIST_COLORS[name])
+    # Alguns overlays usam rgba para preservar opacidade sobre fotografia.
+    for source, target in {
+        "rgba(10,26,47": "rgba(23,23,23",
+        "rgba(6,18,31": "rgba(12,12,12",
+        "rgba(18,178,166": "rgba(200,57,43",
+        "rgba(244,242,237": "rgba(244,239,230",
+    }.items():
+        themed = themed.replace(source, target)
+    return themed
+
+
+def slide_html(
+    slide: dict[str, Any],
+    *,
+    index: int,
+    total: int,
+    family: str = "didatico",
+    theme_id: str = "ocean-deep",
+) -> str:
     normalized = normalize_slide(slide, index - 1)
     layout_id = normalized["layoutId"]
     if layout_id not in PACK_LAYOUTS:
         raise ValueError(f"Layout desconhecido: {layout_id}")
+    resolved_family = family if family in PACK_FAMILIES else "didatico"
+    resolved_theme = theme_id if theme_id in PACK_THEMES else "ocean-deep"
     body = RENDERERS[layout_id](normalized, index, total)
-    return f"<!doctype html><html lang='pt-BR'><head><meta charset='utf-8'><style>{_css()}</style></head><body>{body}</body></html>"
+    document = (
+        "<!doctype html>"
+        f"<html lang='pt-BR' data-family='{resolved_family}' data-theme='{resolved_theme}'>"
+        f"<head><meta charset='utf-8'><style>{_css()}</style></head><body>{body}<script>"
+        "(function(){const fit=()=>document.querySelectorAll('.auto-fit').forEach((node)=>{"
+        "const max=Number(node.dataset.maxFontSize||44);const min=Number(node.dataset.minFontSize||24);"
+        "let size=max;node.style.fontSize=size+'px';"
+        "while(size>min&&(node.scrollHeight>node.clientHeight+1||node.scrollWidth>node.clientWidth+1)){"
+        "size-=1;node.style.fontSize=size+'px';}node.dataset.fittedFontSize=String(size);});"
+        "if(document.fonts&&document.fonts.ready){document.fonts.ready.then(fit);}else{fit();}})();"
+        f"</script></body></html>"
+    )
+    return _apply_theme(document, resolved_theme)
 
 
 def _legacy_extra_html(title: str, body: str, *, width: int, height: int) -> str:
-    template = """<!doctype html><html><head><meta charset='utf-8'><style>__FONTS__*{box-sizing:border-box}html,body{margin:0;width:__WIDTH__px;height:__HEIGHT__px;overflow:hidden}body{background:__DARK__;color:#fff;font-family:Archivo;padding:96px 80px;display:flex;flex-direction:column}.ey{color:__TEAL__;font-size:22px;letter-spacing:.2em;text-transform:uppercase}h1{margin:auto 0 32px;font-size:82px;line-height:1;font-weight:800}p{margin:0 0 auto;font-size:34px;line-height:1.5;color:__BODY_LIGHT__}small{font-size:20px;color:__MUTED__}</style></head><body><div class='ey'>Instituto Guilherme Martins</div><h1>__TITLE__</h1><p>__BODY__</p><small>Conteúdo educativo. Não substitui avaliação médica individual.</small></body></html>"""
+    template = """<!doctype html><html><head><meta charset='utf-8'><style>__FONTS__*{box-sizing:border-box}html,body{margin:0;width:__WIDTH__px;height:__HEIGHT__px;overflow:hidden}body{background:__DARK__;color:#fff;font-family:Archivo;padding:96px 80px;display:flex;flex-direction:column}.ey{color:__TEAL__;font-size:22px;letter-spacing:.2em;text-transform:uppercase}h1{margin:auto 0 32px;font-size:82px;line-height:1;font-weight:800}p{margin:0 0 auto;font-size:34px;line-height:1.5;color:__BODY_LIGHT__}small{font-size:20px;line-height:1.45;color:__MUTED__}small strong{display:block;margin-top:10px;color:#fff}</style></head><body><div class='ey'>Instituto Guilherme Martins</div><h1>__TITLE__</h1><p>__BODY__</p><small>__DISCLAIMER__<strong>__IDENTIFICATION__</strong></small></body></html>"""
     return (
         template.replace("__FONTS__", _font_css())
         .replace("__WIDTH__", str(width))
@@ -339,6 +418,8 @@ def _legacy_extra_html(title: str, body: str, *, width: int, height: int) -> str
         .replace("__MUTED__", COLORS["muted"])
         .replace("__TITLE__", _esc(title))
         .replace("__BODY__", _esc(body))
+        .replace("__DISCLAIMER__", _esc(MEDICAL_EDUCATIONAL_DISCLAIMER))
+        .replace("__IDENTIFICATION__", _esc(MEDICAL_PROFESSIONAL_IDENTIFICATION))
     )
 
 
@@ -350,6 +431,8 @@ def render_pack_images(
     *,
     design_direction: str = "institute_carousel_v1",
     avatar_asset: dict[str, Any] | None = None,
+    family: str = "didatico",
+    theme_id: str = "ocean-deep",
     render_extras: bool = True,
 ) -> dict[str, Any]:
     """Renderiza carrossel 1080x1350 e, apenas para Packs legados, post/stories."""
@@ -370,7 +453,16 @@ def render_pack_images(
         page = context.new_page()
         try:
             for index, slide in enumerate(slides, start=1):
-                page.set_content(slide_html(slide, index=index, total=len(slides)), wait_until="networkidle")
+                page.set_content(
+                    slide_html(
+                        slide,
+                        index=index,
+                        total=len(slides),
+                        family=family,
+                        theme_id=theme_id,
+                    ),
+                    wait_until="networkidle",
+                )
                 page.evaluate("document.fonts.ready")
                 page.screenshot(path=str(car_dir / f"carrossel-{index:02d}.png"))
                 generated += 1
@@ -419,4 +511,6 @@ def render_pack_images(
         "width": 1080,
         "height": 1350,
         "scale": 1,
+        "family": family,
+        "themeId": theme_id,
     }

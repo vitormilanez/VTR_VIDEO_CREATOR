@@ -7,11 +7,30 @@ deterministico.
 from __future__ import annotations
 
 import re
+import unicodedata
 from copy import deepcopy
 from typing import Any
 
+from api.services.medical_identity import (
+    MEDICAL_DEFAULT_SAFE_CTA,
+    MEDICAL_EDUCATIONAL_DISCLAIMER,
+    MEDICAL_PROFESSIONAL_IDENTIFICATION,
+    ensure_medical_professional_identification,
+    has_medical_publication_notice,
+    has_prohibited_editorial_cta,
+    safe_editorial_cta,
+)
+
 PACK_SCHEMA_VERSION = "institute-carousel-v2"
 PACK_SLIDE_COUNT = 7
+
+# A apresentação é uma preferência local do Pack. Ela nunca participa do
+# prompt/cache de conteúdo e pode mudar sem chamar o Claude.
+PACK_FAMILIES = ("editorial", "didatico", "storytelling")
+PACK_THEMES = ("modernist-red", "ocean-deep")
+DEFAULT_PACK_FAMILY = "didatico"
+DEFAULT_PACK_THEME = "modernist-red"
+LEGACY_PACK_THEME = "ocean-deep"
 
 PACK_LAYOUTS = (
     "hero_photo",
@@ -55,9 +74,8 @@ PHOTO_LAYOUTS = {"hero_photo", "photo_split", "doctor_quote", "photo_overlay", "
 FULL_BLEED_PHOTO_LAYOUTS = {"hero_photo", "photo_overlay"}
 DARK_LAYOUTS = {"hero_photo", "big_statement", "three_points", "photo_overlay", "cta_photo"}
 
-# Os arquivos vieram no kit de design com nomes semanticos. No projeto eles ja
-# estavam versionados com o nome original do ensaio; o mapeamento evita duplicar
-# 55 MB de fotografias no Git.
+# Biblioteca canônica de fotos do Pack. Os IDs permanecem estáveis para que
+# carrosséis já salvos continuem apontando para a imagem escolhida.
 PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
     "wide-office": {
         "file": "data/pack_assets/photos/vine8178.jpg",
@@ -107,6 +125,150 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "facePointY": 0.30,
         "brightness": 0.46,
     },
+    "institute-desk-pose": {
+        "file": "data/pack_assets/photos/gui-instituto-escritorio-pose.png",
+        "name": "Escritorio com mao apoiada",
+        "description": "sentado a mesa, com livros e a marca do Instituto ao fundo",
+        "facePointX": 0.46,
+        "facePointY": 0.30,
+        "brightness": 0.40,
+    },
+    "institute-reading-front": {
+        "file": "data/pack_assets/photos/gui-instituto-leitura-frente.png",
+        "name": "Leitura de frente",
+        "description": "de frente a mesa com livro aberto e a marca do Instituto acima",
+        "facePointX": 0.50,
+        "facePointY": 0.34,
+        "brightness": 0.42,
+    },
+    "institute-reading-side": {
+        "file": "data/pack_assets/photos/gui-instituto-leitura-lateral.png",
+        "name": "Leitura lateral",
+        "description": "sentado de lado lendo um livro, com espaco escuro para texto",
+        "facePointX": 0.38,
+        "facePointY": 0.32,
+        "brightness": 0.36,
+    },
+    "white-polo-portrait": {
+        "file": "data/pack_assets/photos/gui-polo-retrato-escuro.jpeg",
+        "name": "Retrato de polo branco",
+        "description": "retrato vertical com mao no queixo e fundo escuro limpo",
+        "facePointX": 0.50,
+        "facePointY": 0.36,
+        "brightness": 0.34,
+    },
+    "vivance-horizontal-portrait": {
+        "file": "data/pack_assets/photos/gui-vivance-retrato-horizontal.png",
+        "name": "Vivance — retrato horizontal",
+        "description": "retrato horizontal externo, com marca parcial e espaco lateral para texto",
+        "facePointX": 0.46,
+        "facePointY": 0.38,
+        "brightness": 0.54,
+    },
+    "vivance-seated-sign": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-placa.png",
+        "name": "Vivance — sentado com placa",
+        "description": "sentado em primeiro plano com a placa do Instituto ao fundo e area livre a direita",
+        "facePointX": 0.31,
+        "facePointY": 0.39,
+        "brightness": 0.48,
+    },
+    "vivance-seated-full-body": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-corpo-inteiro.png",
+        "name": "Vivance — sentado corpo inteiro",
+        "description": "corpo inteiro sentado nos degraus, com fachada e marca do Instituto ao fundo",
+        "facePointX": 0.42,
+        "facePointY": 0.35,
+        "brightness": 0.50,
+    },
+    "vivance-standing-crossed-arms": {
+        "file": "data/pack_assets/photos/gui-vivance-em-pe-bracos-cruzados.png",
+        "name": "Vivance — em pe, bracos cruzados",
+        "description": "corpo inteiro em pe e de bracos cruzados diante da fachada do Instituto",
+        "facePointX": 0.45,
+        "facePointY": 0.25,
+        "brightness": 0.50,
+    },
+    "vivance-seated-close": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-close.png",
+        "name": "Vivance — sentado em close",
+        "description": "retrato vertical sentado, com a marca completa ao fundo e respiro a direita",
+        "facePointX": 0.29,
+        "facePointY": 0.34,
+        "brightness": 0.48,
+    },
+    "vivance-crossed-arms-close": {
+        "file": "data/pack_assets/photos/gui-vivance-bracos-cruzados-close.png",
+        "name": "Vivance — bracos cruzados em close",
+        "description": "retrato frontal de bracos cruzados com o simbolo do Instituto ao fundo",
+        "facePointX": 0.50,
+        "facePointY": 0.25,
+        "brightness": 0.51,
+    },
+    "vivance-office-thoughtful": {
+        "file": "data/pack_assets/photos/gui-vivance-escritorio-pensativo.png",
+        "name": "Vivance — escritorio pensativo",
+        "description": "sentado a mesa com as maos junto ao rosto, notebook e marca iluminada ao fundo",
+        "facePointX": 0.48,
+        "facePointY": 0.40,
+        "brightness": 0.32,
+    },
+    "vivance-office-standing": {
+        "file": "data/pack_assets/photos/gui-vivance-escritorio-em-pe.png",
+        "name": "Vivance — em pe no escritorio",
+        "description": "retrato vertical em pe no escritorio escuro, com a marca iluminada ao fundo",
+        "facePointX": 0.38,
+        "facePointY": 0.24,
+        "brightness": 0.34,
+    },
+    "vivance-outdoor-half-body": {
+        "file": "data/pack_assets/photos/gui-vivance-externo-meio-corpo.png",
+        "name": "Vivance — externo meio corpo",
+        "description": "retrato externo em meio corpo, com fachada, plantas e marca parcial ao fundo",
+        "facePointX": 0.50,
+        "facePointY": 0.24,
+        "brightness": 0.55,
+    },
+    "vivance-seated-portrait": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-retrato.png",
+        "name": "Vivance — sentado retrato",
+        "description": "retrato vertical sentado diante da marca, adequado para composicao central",
+        "facePointX": 0.43,
+        "facePointY": 0.28,
+        "brightness": 0.55,
+    },
+    "vivance-seated-close-alt": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-close-alternativo.png",
+        "name": "Vivance — sentado em close alternativo",
+        "description": "retrato vertical sentado em primeiro plano, com marca e area livre a direita",
+        "facePointX": 0.29,
+        "facePointY": 0.34,
+        "brightness": 0.48,
+    },
+    "vivance-outdoor-hands-pockets": {
+        "file": "data/pack_assets/photos/gui-vivance-externo-maos-bolsos.png",
+        "name": "Vivance — externo com maos nos bolsos",
+        "description": "retrato externo em pe com as maos nos bolsos e fachada desfocada",
+        "facePointX": 0.50,
+        "facePointY": 0.25,
+        "brightness": 0.55,
+    },
+    "vivance-crossed-arms-portrait": {
+        "file": "data/pack_assets/photos/gui-vivance-bracos-cruzados-retrato.png",
+        "name": "Vivance — bracos cruzados retrato",
+        "description": "retrato vertical frontal de bracos cruzados, com simbolo do Instituto ao fundo",
+        "facePointX": 0.51,
+        "facePointY": 0.25,
+        "brightness": 0.51,
+    },
+    "vivance-outdoor-full-body": {
+        "file": "data/pack_assets/photos/gui-vivance-externo-corpo-inteiro.png",
+        "name": "Vivance — externo corpo inteiro",
+        "description": "corpo inteiro em pe diante da fachada, com a marca do Instituto ao fundo",
+        "facePointX": 0.50,
+        "facePointY": 0.25,
+        "brightness": 0.55,
+    },
 }
 
 EMPTY_ITEM = {"title": "", "text": ""}
@@ -114,6 +276,7 @@ FIELD_NAMES = (
     "eyebrow",
     "headline",
     "subheadline",
+    "coverNote",
     "body",
     "statistic",
     "item1",
@@ -128,18 +291,21 @@ FIELD_NAMES = (
 )
 
 LAYOUT_SPECS: dict[str, dict[str, Any]] = {
-    "hero_photo": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 46, "footer": 48}},
+    "hero_photo": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 46, "coverNote": 180, "footer": 48}},
     "photo_split": {"required": ("headline", "body", "photoId"), "max": {"eyebrow": 22, "headline": 52, "body": 160, "footer": 48}},
     "big_statement": {"required": ("headline",), "max": {"headline": 64, "footer": 90}},
-    "question": {"required": ("headline",), "max": {"eyebrow": 22, "headline": 52, "body": 110, "footer": 48}},
-    "myth_fact": {"required": ("item1", "item2"), "max": {"body": 90}, "item_max": {"title": 12, "text": 38}},
+    "question": {"required": ("headline",), "max": {"eyebrow": 30, "headline": 52, "body": 110, "footer": 48}},
+    # Os dois painéis comportam duas linhas confortáveis. O limite anterior de
+    # 38 caracteres obrigava o modelo (ou o reparo local) a cortar a conclusão
+    # de fatos clínicos, transformando frases corretas em fragmentos.
+    "myth_fact": {"required": ("item1", "item2"), "max": {"body": 90}, "item_max": {"title": 12, "text": 72}},
     "number_stat": {"required": ("statistic", "headline", "caption"), "max": {"eyebrow": 22, "statistic": 6, "headline": 60, "body": 110, "caption": 72}},
     "three_points": {"required": ("headline", "item1", "item2", "item3"), "max": {"headline": 40}, "item_max": {"title": 24, "text": 90}},
-    "explainer": {"required": ("headline", "body"), "max": {"eyebrow": 22, "headline": 56, "body": 280, "disclaimer": 90}, "item_max": {"title": 24, "text": 54}},
+    "explainer": {"required": ("headline", "body"), "max": {"eyebrow": 22, "headline": 56, "body": 320, "disclaimer": 90}, "item_max": {"title": 24, "text": 54}},
     "doctor_quote": {"required": ("quote", "caption"), "max": {"quote": 90, "caption": 48}},
-    "photo_overlay": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 60, "footer": 48}},
+    "photo_overlay": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 60, "coverNote": 180, "footer": 48}},
     "do_dont": {"required": ("item1", "item2"), "max": {"disclaimer": 90}, "item_max": {"title": 34, "text": 34}},
-    "cta_photo": {"required": ("headline", "cta", "photoId", "disclaimer"), "max": {"headline": 62, "body": 70, "cta": 22, "disclaimer": 90}},
+    "cta_photo": {"required": ("headline", "cta", "photoId", "disclaimer", "footer"), "max": {"headline": 62, "body": 70, "cta": 22, "disclaimer": 220, "footer": 100}},
 }
 
 
@@ -235,7 +401,7 @@ def _fit_copy(value: Any, maximum: int) -> str:
     """Encurta copy sem terminar no início de uma nova frase."""
     text = _text(value)
     if len(text) <= maximum:
-        return text
+        return _remove_dangling_words(text)
     clipped = text[:maximum].rstrip()
     # Quando já existe uma frase completa dentro do limite, ela preserva o
     # sentido melhor do que um corte por palavra como "... funcionando. O".
@@ -277,13 +443,74 @@ _DANGLING_WORDS = {
     "sem",
 }
 
+_INCOMPLETE_TAIL_WORDS = _DANGLING_WORDS | {
+    "ainda",
+    "até",
+    "este",
+    "esta",
+    "foi",
+    "mas",
+    "nem",
+    "não",
+    "pode",
+    "podem",
+    "porque",
+    "quando",
+    "são",
+    "seu",
+    "seus",
+    "ser",
+    "sua",
+    "suas",
+    "vem",
+    "é",
+}
+
 
 def _remove_dangling_words(value: str) -> str:
     """Remove conectivos finais que denunciam um corte mecanico de copy."""
     text = _text(value)
-    while text and text.split()[-1].casefold().strip(".,;:") in _DANGLING_WORDS:
+    normalized_incomplete_words = {
+        "".join(
+            char
+            for char in unicodedata.normalize("NFKD", word.casefold())
+            if not unicodedata.combining(char)
+        )
+        for word in _INCOMPLETE_TAIL_WORDS
+    }
+    while text:
+        last_word = text.split()[-1].casefold().strip(".,;:!?()[]{}\"'")
+        normalized_last_word = "".join(
+            char
+            for char in unicodedata.normalize("NFKD", last_word)
+            if not unicodedata.combining(char)
+        )
+        if normalized_last_word not in normalized_incomplete_words:
+            break
         text = " ".join(text.split()[:-1]).rstrip(" ,;:-–—")
     return text
+
+
+def _looks_incomplete(value: Any) -> bool:
+    """Detecta caudas que denunciam fragmento cortado antes do renderer."""
+    text = _text(value)
+    if not text:
+        return False
+    last_word = text.split()[-1].casefold().strip(".,;:!?()[]{}\"'")
+    last_word = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", last_word)
+        if not unicodedata.combining(char)
+    )
+    incomplete_words = {
+        "".join(
+            char
+            for char in unicodedata.normalize("NFKD", word.casefold())
+            if not unicodedata.combining(char)
+        )
+        for word in _INCOMPLETE_TAIL_WORDS
+    }
+    return last_word in incomplete_words
 
 
 _GENERIC_MYTH_FALLBACKS = {
@@ -356,9 +583,9 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
         "statistic": "1",
         "quote": fields.get("headline") or fields.get("body") or "Cada caso precisa de avaliacao individual.",
         "caption": fields.get("footer") or "Dr. Guilherme Martins",
-        "cta": "Salve para revisar",
+        "cta": MEDICAL_DEFAULT_SAFE_CTA,
         "footer": "Arraste para o lado",
-        "disclaimer": "Conteudo educativo. Nao substitui avaliacao medica.",
+        "disclaimer": MEDICAL_EDUCATIONAL_DISCLAIMER,
         "photoId": "seated-front",
     }
     if layout_id == "cta_photo":
@@ -366,8 +593,9 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
             {
                 "headline": fields.get("headline") or "Converse com seu medico",
                 "body": fields.get("body") or "Use esta informacao para revisar sintomas e duvidas.",
-                "cta": fields.get("cta") or "Salve para revisar",
-                "disclaimer": fields.get("disclaimer") or "Conteudo educativo. Nao substitui avaliacao medica.",
+                "cta": safe_editorial_cta(fields.get("cta")),
+                "disclaimer": MEDICAL_EDUCATIONAL_DISCLAIMER,
+                "footer": MEDICAL_PROFESSIONAL_IDENTIFICATION,
                 "photoId": fields.get("photoId") or "seated-front",
             }
         )
@@ -498,6 +726,7 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
     mais invalide o Pack inteiro por uma diferenca editorial trivial.
     """
     repaired = deepcopy(pack)
+    repaired["caption"] = ensure_medical_professional_identification(repaired.get("caption"))
     raw_slides = pack_slides(repaired)
     if not raw_slides:
         return repaired
@@ -547,6 +776,15 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
         slides.append(slide)
 
     _repair_missing_context_slide(slides)
+    if len(slides) >= PACK_SLIDE_COUNT and isinstance(slides[-1], dict):
+        final_slide = slides[-1]
+        if final_slide.get("layoutId") == "cta_photo" and isinstance(final_slide.get("fields"), dict):
+            # Campos bloqueados: aviso integral e CTA editorial seguro no último slide.
+            final_slide["fields"]["cta"] = safe_editorial_cta(
+                final_slide["fields"].get("cta")
+            )
+            final_slide["fields"]["disclaimer"] = MEDICAL_EDUCATIONAL_DISCLAIMER
+            final_slide["fields"]["footer"] = MEDICAL_PROFESSIONAL_IDENTIFICATION
     repaired["slides"] = slides
     repaired["carousel"] = slides
     if migrated_six_slide_pack:
@@ -587,6 +825,17 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
         errors.append("slide 1 precisa usar hero_photo ou photo_overlay")
     if len(layouts) >= PACK_SLIDE_COUNT and layouts[-1] != "cta_photo":
         errors.append(f"slide {PACK_SLIDE_COUNT} precisa usar cta_photo")
+    elif (
+        len(layouts) >= PACK_SLIDE_COUNT
+        and _text(normalized[-1]["fields"].get("footer")) != MEDICAL_PROFESSIONAL_IDENTIFICATION
+    ):
+        errors.append(f"slide {PACK_SLIDE_COUNT}: footer precisa conter a identificacao profissional obrigatoria")
+    if len(layouts) >= PACK_SLIDE_COUNT and layouts[-1] == "cta_photo":
+        final_fields = normalized[-1]["fields"]
+        if _text(final_fields.get("disclaimer")) != MEDICAL_EDUCATIONAL_DISCLAIMER:
+            errors.append(f"slide {PACK_SLIDE_COUNT}: disclaimer precisa conter o aviso educativo completo")
+        if has_prohibited_editorial_cta(final_fields.get("cta")):
+            errors.append(f"slide {PACK_SLIDE_COUNT}: CTA comercial ou de captacao nao e permitido")
     if len(layouts) >= 4 and "explainer" not in layouts[2:5]:
         errors.append("slides 3 a 5 precisam incluir um explainer com contexto da IA")
     if len(set(layouts)) < 4:
@@ -613,6 +862,21 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
                     errors.append(f"slide {index}: {name} e obrigatorio para {layout_id}")
             elif not _text(value):
                 errors.append(f"slide {index}: {name} e obrigatorio para {layout_id}")
+
+        for name in ("headline", "body", "quote"):
+            if _looks_incomplete(fields.get(name)):
+                errors.append(f"slide {index}: {name} termina em frase incompleta")
+
+        if layout_id == "myth_fact":
+            expected_labels = (("item1", "mito"), ("item2", "fato"))
+            for item_name, expected_label in expected_labels:
+                item = fields.get(item_name) if isinstance(fields.get(item_name), dict) else {}
+                if _text(item.get("title")).casefold() != expected_label:
+                    errors.append(
+                        f"slide {index}: {item_name}.title precisa ser {expected_label.title()}"
+                    )
+                if _looks_incomplete(item.get("text")):
+                    errors.append(f"slide {index}: {item_name}.text termina em frase incompleta")
 
         for name, maximum in spec.get("max", {}).items():
             value = _text(fields.get(name))
@@ -648,6 +912,10 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
     caption = _text(pack.get("caption"))
     if not caption:
         errors.append("caption e obrigatoria")
+    elif not has_medical_publication_notice(caption):
+        errors.append("caption precisa conter o aviso completo e a identificacao profissional")
+    if has_prohibited_editorial_cta(caption):
+        errors.append("caption nao pode conter CTA comercial ou de captacao")
     if _EMOJI_RE.search(caption):
         errors.append("caption nao pode ter emojis")
     return list(dict.fromkeys(errors))

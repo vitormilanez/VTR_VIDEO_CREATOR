@@ -45,8 +45,10 @@ def test_story_composition_uses_completed_shots_in_order() -> None:
         root = Path(temporary)
         original_database = server.OPERATIONAL_DB
         original_outputs = server.COMPOSED_VIDEO_OUTPUTS
+        original_exports = server.SCRIPT_EXPORTS
         server.OPERATIONAL_DB = root / "operations.db"
         server.COMPOSED_VIDEO_OUTPUTS = root / "composed"
+        server.SCRIPT_EXPORTS = root / "Exports" / "roteiro"
         try:
             project, version = seed_story()
             context = authorization(project, version)
@@ -101,8 +103,13 @@ def test_story_composition_uses_completed_shots_in_order() -> None:
             assert [shot["shotId"] for shot in job["storyShots"]] == ["shot-01", "shot-02"]
             assert all(shot["generatedAudioMuted"] for shot in job["storyShots"])
             assert (server.ROOT / job["outputPath"]).is_file()
+            assert job["exportVersion"] == "1.1"
+            export_directory = server.ROOT / job["exportPath"]
+            assert (export_directory / "video-final.mp4").is_file()
+            assert len(list((export_directory / "tomadas").glob("*.mp4"))) == 3
             project_after = server._story_project("script-story")
             assert project_after["activeVersion"]["composition"]["id"] == job["id"]
         finally:
             server.OPERATIONAL_DB = original_database
             server.COMPOSED_VIDEO_OUTPUTS = original_outputs
+            server.SCRIPT_EXPORTS = original_exports

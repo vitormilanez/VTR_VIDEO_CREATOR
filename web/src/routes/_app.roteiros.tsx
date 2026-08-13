@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WeeklyArchiveSwitch } from "@/components/weekly-archive-switch";
 import { ConfirmAction } from "@/components/confirm-action";
+import { CreateScriptFromDraftDialog } from "@/components/create-script-from-draft-dialog";
 import { deleteScript } from "@/lib/api/local";
 import { familiaLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
@@ -126,7 +127,7 @@ export function RoteirosPage() {
   }
 
   return (
-    <AppShell title="Roteiros">
+    <AppShell title="Roteiros" actions={<CreateScriptFromDraftDialog />}>
       <WeeklyArchiveSwitch
         className="mb-3"
         value={weeklyView}

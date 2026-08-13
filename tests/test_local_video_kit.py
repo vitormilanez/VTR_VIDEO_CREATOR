@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -12,7 +13,16 @@ from api.services.local_video_captions import (
     write_caption_timeline,
 )
 from api.services.local_video_kit import (
+    CLAUDE_MIDNIGHT_MODELS,
+    _claude_midnight_data,
+    _claude_midnight_timing,
+    _claude_midnight_visual_filter,
     _detect_flat_horizontal_bars,
+    _five_stack_data,
+    _five_stack_timing,
+    _five_stack_visual_filter,
+    _generic_visual_events,
+    _insert_visual_filter,
     _kit_documents,
     _motion_filter,
     _motion_profile,
@@ -20,14 +30,80 @@ from api.services.local_video_kit import (
     _section_enabled,
     _section_transition,
     _section_timing,
+    _validate_visual_intervals,
     _voice_filters,
 )
+from api.services.medical_identity import (
+    MEDICAL_EDUCATIONAL_DISCLAIMER,
+    MEDICAL_MINIMUM_END_CARD_SECONDS,
+    MEDICAL_PROFESSIONAL_IDENTIFICATION,
+)
+from api.services.post_production_overlays import overlay_document
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class LocalVideoKitTests(unittest.TestCase):
+    def test_generic_visual_events_keep_only_safe_claude_suggestions(self) -> None:
+        events = _generic_visual_events(
+            {
+                "visualEvents": [
+                    {
+                        "id": "definition 1",
+                        "enabled": True,
+                        "interactionType": "definition_card",
+                        "visualText": "Uma definição clara",
+                        "startMs": 2000,
+                        "endMs": 5400,
+                        "screenPosition": "bottom_left",
+                        "backgroundColor": "#4A1F2B",
+                        "backgroundOpacity": 0.55,
+                    },
+                    {
+                        "id": "disabled",
+                        "enabled": False,
+                        "interactionType": "number_card",
+                        "startMs": 6000,
+                        "endMs": 9000,
+                    },
+                ]
+            },
+            12,
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["id"], "definition-1")
+        self.assertEqual(events[0]["interactionType"], "definition_card")
+        self.assertEqual((events[0]["start"], events[0]["end"]), (2.0, 5.4))
+        self.assertEqual(events[0]["screenPosition"], "bottom_left")
+        self.assertEqual(events[0]["backgroundColor"], "#4a1f2b")
+        self.assertEqual(events[0]["backgroundOpacity"], 0.55)
+
+    def test_overlay_document_applies_local_position_color_and_opacity(self) -> None:
+        document = overlay_document(
+            {
+                "interactionType": "caption_emphasis",
+                "visualText": "Informação importante",
+                "screenPosition": "bottom_left",
+                "backgroundColor": "#4A1F2B",
+                "backgroundOpacity": 0.55,
+            }
+        )
+
+        self.assertIn("position-bottom_left", document)
+        self.assertIn("justify-content:flex-start;align-items:flex-end", document)
+        self.assertIn("rgba(74,31,43,0.55)", document)
+
+    def test_overlapping_visual_models_are_rejected_before_ffmpeg(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "se sobrepõem"):
+            _validate_visual_intervals(
+                [
+                    ("Definição", 2.0, 5.0),
+                    ("Comparação", 4.0, 7.0),
+                ]
+            )
+
     def test_caption_cues_are_short_synced_and_clamped_to_video(self) -> None:
         transcript = {
             "words": [
@@ -177,6 +253,23 @@ class LocalVideoKitTests(unittest.TestCase):
         self.assertIn("#c8e05a", documents["opening"][0])
         self.assertIn("Título &amp; cuidado", documents["opening"][0])
         self.assertNotIn("Ponto 01", documents["section"][0])
+        self.assertIn(MEDICAL_EDUCATIONAL_DISCLAIMER, documents["outro"][0])
+        self.assertIn(MEDICAL_PROFESSIONAL_IDENTIFICATION, documents["outro"][0])
+        self.assertNotIn("Quer mais dicas", documents["outro"][0])
+
+    def test_local_kit_keeps_the_identification_slide_enabled(self) -> None:
+        from api import server
+
+        config = server._local_video_kit_config(
+            server.LocalVideoKitCreateIn(
+                uploadId="upload-123",
+                includeOutro=False,
+                outroTailSeconds=0,
+            )
+        )
+
+        self.assertTrue(config["includeOutro"])
+        self.assertEqual(config["outroTailSeconds"], MEDICAL_MINIMUM_END_CARD_SECONDS)
 
     def test_letterbox_detection_excludes_flat_border_rows(self) -> None:
         width, height = 270, 480
@@ -235,9 +328,304 @@ class LocalVideoKitTests(unittest.TestCase):
 
     def test_outro_tail_defaults_to_ten_seconds_and_is_clamped(self) -> None:
         self.assertEqual(_outro_tail_seconds({}), 10.0)
-        self.assertEqual(_outro_tail_seconds({"outroTailSeconds": 4.5}), 4.5)
-        self.assertEqual(_outro_tail_seconds({"outroTailSeconds": -2}), 0.0)
+        self.assertEqual(
+            _outro_tail_seconds({"outroTailSeconds": 4.5}),
+            MEDICAL_MINIMUM_END_CARD_SECONDS,
+        )
+        self.assertEqual(
+            _outro_tail_seconds({"outroTailSeconds": -2}),
+            MEDICAL_MINIMUM_END_CARD_SECONDS,
+        )
         self.assertEqual(_outro_tail_seconds({"outroTailSeconds": 200}), 120.0)
+
+    def test_insert_filter_uses_selected_clip_range_on_the_main_timeline(self) -> None:
+        filter_complex, output_label = _insert_visual_filter(
+            [
+                {
+                    "sourceStartSeconds": 4,
+                    "sourceEndSeconds": 7,
+                    "timelineStartSeconds": 12,
+                    "timelineEndSeconds": 15,
+                }
+            ],
+            input_start=7,
+        )
+
+        self.assertIn("[7:v]trim=start=4.000:end=7.000", filter_complex)
+        self.assertIn("setpts=PTS+12.000/TB", filter_complex)
+        self.assertIn("between(t,12.000,15.000)", filter_complex)
+        self.assertIn("repeatlast=0", filter_complex)
+        self.assertEqual(output_label, "base_insert_0")
+
+    def test_claude_five_stack_is_transparent_and_keeps_five_editable_rows(self) -> None:
+        documents = _kit_documents(
+            {
+                "manualVisualsEnabled": True,
+                "fiveStack": {
+                    "enabled": True,
+                    "lines": ["Um", "Dois", "Três", "Quatro", "Cinco"],
+                }
+            },
+            ROOT,
+        )
+
+        self.assertEqual(
+            [key for key in documents if key.startswith("fiveStackRow")],
+            ["fiveStackRow1", "fiveStackRow2", "fiveStackRow3", "fiveStackRow4", "fiveStackRow5"],
+        )
+        first, transparent = documents["fiveStackRow1"]
+        fifth, _ = documents["fiveStackRow5"]
+        self.assertTrue(transparent)
+        self.assertIn("background:transparent", first)
+        self.assertIn("Um", first)
+        self.assertIn("#6fe3d2", first)
+        self.assertIn("#ffb84d", fifth)
+
+    def test_claude_five_stack_staggers_over_the_main_video(self) -> None:
+        stack = _five_stack_data(
+            {
+                "manualVisualsEnabled": True,
+                "fiveStack": {"enabled": True, "startSeconds": 8, "durationSeconds": 5},
+            }
+        )
+        self.assertEqual(stack["lines"], list(stack["lines"]))
+        self.assertEqual(
+            _five_stack_timing({"manualVisualsEnabled": True, "fiveStack": stack}, 30),
+            (8.0, 5.0),
+        )
+
+        filter_complex, output = _five_stack_visual_filter(
+            input_start=9,
+            row_count=5,
+            base_label="base",
+            start=8,
+            end=13,
+        )
+        self.assertIn("[9:v]format=rgba", filter_complex)
+        self.assertIn("[13:v]format=rgba", filter_complex)
+        self.assertIn("between(t,8.000,13.000)", filter_complex)
+        self.assertIn("between(t,8.400,13.000)", filter_complex)
+        self.assertEqual(output, "base_five_stack_4")
+
+    def test_claude_midnight_models_are_transparent_and_all_editable(self) -> None:
+        requested = {
+            key: {"enabled": True, "fields": [f"{key}-{index}" for index in range(12)]}
+            for key in CLAUDE_MIDNIGHT_MODELS
+        }
+        normalized = _claude_midnight_data(
+            {"manualVisualsEnabled": True, "claudeInserts": requested}
+        )
+        documents = _kit_documents(
+            {"manualVisualsEnabled": True, "claudeInserts": requested}, ROOT
+        )
+
+        self.assertEqual(set(normalized), set(CLAUDE_MIDNIGHT_MODELS))
+        self.assertEqual(
+            {key.removeprefix("claude") for key in documents if key.startswith("claude")},
+            set(CLAUDE_MIDNIGHT_MODELS),
+        )
+        for key, defaults in CLAUDE_MIDNIGHT_MODELS.items():
+            document, transparent = documents[f"claude{key}"]
+            self.assertTrue(transparent)
+            self.assertIn("background:transparent", document)
+            self.assertIn("#6fe3d2", document)
+            self.assertEqual(len(normalized[key]["fields"]), len(defaults["fields"]))
+        self.assertIn("#07100f", documents["claudeevidenceStamp"][0])
+
+    def test_claude_midnight_models_have_timing_and_alpha_overlay_filters(self) -> None:
+        models = _claude_midnight_data(
+            {
+                "manualVisualsEnabled": True,
+                "claudeInserts": {
+                    "numberGlass": {"enabled": True, "startSeconds": 6, "durationSeconds": 4},
+                    "evidenceStamp": {"enabled": True, "startSeconds": 14, "durationSeconds": 5},
+                }
+            }
+        )
+        first_start, first_duration = _claude_midnight_timing("numberGlass", models["numberGlass"], 30)
+        second_start, second_duration = _claude_midnight_timing("evidenceStamp", models["evidenceStamp"], 30)
+        filter_complex, output = _claude_midnight_visual_filter(
+            [
+                ("numberGlass", first_start, first_start + first_duration),
+                ("evidenceStamp", second_start, second_start + second_duration),
+            ],
+            input_start=14,
+            base_label="base",
+        )
+
+        self.assertEqual((first_start, first_duration), (6.0, 4.0))
+        self.assertEqual((second_start, second_duration), (14.0, 5.0))
+        self.assertIn("[14:v]format=rgba", filter_complex)
+        self.assertIn("[15:v]format=rgba", filter_complex)
+        self.assertIn("fade=t=in:st=6.000:d=0.34:alpha=1", filter_complex)
+        self.assertIn("between(t,14.000,19.000)", filter_complex)
+        self.assertEqual(output, "base_claude_evidenceStamp")
+
+    def test_server_normalizes_all_claude_midnight_controls(self) -> None:
+        from api import server
+
+        payload = server.LocalVideoKitCreateIn(
+            manualVisualsEnabled=True,
+            claudeInserts={
+                "numberGlass": {"enabled": True, "fields": [" DADO ", "12%"]},
+                "evidenceStamp": {"enabled": True, "durationSeconds": 8},
+            }
+        )
+        config = server._local_video_kit_config(payload)
+
+        self.assertEqual(set(config["claudeInserts"]), set(CLAUDE_MIDNIGHT_MODELS))
+        self.assertTrue(config["claudeInserts"]["numberGlass"]["enabled"])
+        self.assertEqual(config["claudeInserts"]["numberGlass"]["fields"][:2], ["DADO", "12%"])
+        self.assertEqual(config["claudeInserts"]["evidenceStamp"]["durationSeconds"], 8.0)
+
+    def test_server_ignores_legacy_manual_models_without_explicit_opt_in(self) -> None:
+        from api import server
+
+        payload = server.LocalVideoKitCreateIn(
+            claudeInserts={"mechanismBars": {"enabled": True, "fields": ["LEGADO"]}},
+            fiveStack={"enabled": True, "lines": ["Um", "Dois", "Três", "Quatro", "Cinco"]},
+        )
+
+        config = server._local_video_kit_config(payload)
+
+        self.assertFalse(config["manualVisualsEnabled"])
+        self.assertFalse(config["fiveStack"]["enabled"])
+        self.assertFalse(config["claudeInserts"]["mechanismBars"]["enabled"])
+
+    def test_job_with_insert_is_validated_and_persisted_with_mocked_probe(self) -> None:
+        from api import server
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            uploads = root / "uploads"
+            uploads.mkdir()
+            (uploads / "upload-123.mp4").write_bytes(b"main-video")
+            insert_id = "kit-insert-0123456789abcdef"
+            (uploads / f"{insert_id}.mp4").write_bytes(b"insert-video")
+            with (
+                patch.object(server, "ROOT", root),
+                patch.object(server, "LOCAL_VIDEO_KIT_UPLOADS", uploads),
+                patch.object(server, "LOCAL_VIDEO_KIT_JOBS", root / "jobs"),
+                patch.object(server, "LOCAL_VIDEO_KIT_OUTPUTS", root / "outputs"),
+                patch.object(server, "probe_duration", return_value=30.0) as probe,
+                patch.object(server, "_launch_local_video_kit") as launch,
+                patch.object(server.shutil, "which", return_value="/usr/bin/tool"),
+            ):
+                result = server.create_local_video_kit(
+                    server.LocalVideoKitCreateIn(
+                        uploadId="upload-123",
+                        inserts=[
+                            server.LocalVideoKitInsertIn(
+                                id="insert-1",
+                                uploadId=insert_id,
+                                sourceName="apoio.mp4",
+                                sourceDurationSeconds=10,
+                                timelineStartSeconds=5,
+                                timelineEndSeconds=8,
+                                sourceStartSeconds=0,
+                                sourceEndSeconds=3,
+                            )
+                        ],
+                    )
+                )
+
+        self.assertEqual(result["job"]["config"]["inserts"][0]["uploadId"], insert_id)
+        probe.assert_called_once()
+        launch.assert_called_once_with(result["job"]["id"])
+
+    def test_render_reuses_transcript_created_before_claude(self) -> None:
+        from api import server
+
+        analysis_id = "post-0123456789abcdef"
+        upload_id = "kit-upload-0123456789abcdef"
+
+        class AnalysisStore:
+            def get(self, kind: str, job_id: str):
+                if kind == "post_production" and job_id == analysis_id:
+                    return {
+                        "id": analysis_id,
+                        "status": "needs_review",
+                        "uploadId": upload_id,
+                        "plannerMode": "anthropic",
+                    }
+                return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            uploads = root / "uploads"
+            post_outputs = root / "post-production"
+            analysis_directory = post_outputs / analysis_id
+            uploads.mkdir()
+            analysis_directory.mkdir(parents=True)
+            (uploads / f"{upload_id}.mp4").write_bytes(b"main-video")
+            transcript_payload = {"version": "transcript-ready", "words": []}
+            (analysis_directory / "transcript.json").write_text(
+                json.dumps(transcript_payload),
+                encoding="utf-8",
+            )
+            (analysis_directory / "timeline.json").write_text(
+                json.dumps({"version": "timeline-ready", "events": []}),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(server, "ROOT", root),
+                patch.object(server, "LOCAL_VIDEO_KIT_UPLOADS", uploads),
+                patch.object(server, "LOCAL_VIDEO_KIT_JOBS", root / "jobs"),
+                patch.object(server, "LOCAL_VIDEO_KIT_OUTPUTS", root / "outputs"),
+                patch.object(server, "POST_PRODUCTION_OUTPUTS", post_outputs),
+                patch.object(server, "_job_store", return_value=AnalysisStore()),
+                patch.object(
+                    server,
+                    "run_post_production_preflight",
+                    return_value={"ok": True, "findings": []},
+                ),
+                patch.object(server, "_launch_local_video_kit") as launch,
+                patch.object(server.shutil, "which", return_value="/usr/bin/tool"),
+            ):
+                result = server.create_local_video_kit(
+                    server.LocalVideoKitCreateIn(
+                        uploadId=upload_id,
+                        analysisJobId=analysis_id,
+                    )
+                )
+                reused = (
+                    root / "jobs" / result["job"]["id"] / "transcript.json"
+                ).read_text(encoding="utf-8")
+
+        self.assertTrue(result["job"]["transcriptReused"])
+        self.assertEqual(json.loads(reused), transcript_payload)
+        launch.assert_called_once_with(result["job"]["id"])
+
+    def test_repeated_source_range_is_rejected(self) -> None:
+        from api import server
+
+        with tempfile.TemporaryDirectory() as temporary:
+            uploads = Path(temporary)
+            insert_id = "kit-insert-0123456789abcdef"
+            (uploads / f"{insert_id}.mp4").write_bytes(b"insert-video")
+            config = {
+                "inserts": [
+                    {
+                        "uploadId": insert_id,
+                        "sourceDurationSeconds": 10,
+                        "timelineStartSeconds": 2,
+                        "timelineEndSeconds": 5,
+                        "sourceStartSeconds": 0,
+                        "sourceEndSeconds": 3,
+                    },
+                    {
+                        "uploadId": insert_id,
+                        "sourceDurationSeconds": 10,
+                        "timelineStartSeconds": 8,
+                        "timelineEndSeconds": 11,
+                        "sourceStartSeconds": 2,
+                        "sourceEndSeconds": 5,
+                    },
+                ]
+            }
+            with patch.object(server, "LOCAL_VIDEO_KIT_UPLOADS", uploads):
+                with self.assertRaisesRegex(Exception, "esse trecho do clipe já foi usado"):
+                    server._validate_local_video_kit_inserts(config, 30)
 
     def test_ready_production_video_can_be_selected_without_upload(self) -> None:
         from api import server
@@ -303,6 +691,33 @@ class LocalVideoKitTests(unittest.TestCase):
         self.assertEqual(result["job"]["sourceKitJobId"], "kit-source")
         self.assertEqual(result["job"]["sourcePath"], "original.mp4")
         launch.assert_called_once_with(result["job"]["id"])
+
+    def test_server_restart_marks_interrupted_local_render_as_retryable(self) -> None:
+        from api import server
+
+        with tempfile.TemporaryDirectory() as temporary:
+            jobs = Path(temporary) / "jobs"
+            active = jobs / "kit-active"
+            ready = jobs / "kit-ready"
+            active.mkdir(parents=True)
+            ready.mkdir(parents=True)
+            (active / "job.json").write_text(
+                '{"id":"kit-active","status":"processando","progresso":55}',
+                encoding="utf-8",
+            )
+            (ready / "job.json").write_text(
+                '{"id":"kit-ready","status":"pronto","progresso":100}',
+                encoding="utf-8",
+            )
+            with patch.object(server, "LOCAL_VIDEO_KIT_JOBS", jobs):
+                interrupted = server.reconcile_interrupted_local_video_kit_jobs()
+                active_job = server._get_local_video_kit_job("kit-active")
+                ready_job = server._get_local_video_kit_job("kit-ready")
+
+        self.assertEqual(interrupted, 1)
+        self.assertEqual(active_job["status"], "erro")
+        self.assertIn("Tentar novamente", active_job["erro"])
+        self.assertEqual(ready_job["status"], "pronto")
 
 
 if __name__ == "__main__":

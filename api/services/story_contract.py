@@ -23,7 +23,7 @@ STORY_CONTRACT_SCHEMA: dict[str, Any] = json.loads(
     STORY_CONTRACT_PATH.read_text(encoding="utf-8")
 )
 STORY_CONTRACT_VERSION = "story-contract-v2"
-STORY_PROMPT_VERSION = "story-director-v2"
+STORY_PROMPT_VERSION = "story-director-v3-editorial-profile"
 PROVIDER_STRATEGIES = ("video_agent", "direct_video", "local_compositor")
 
 

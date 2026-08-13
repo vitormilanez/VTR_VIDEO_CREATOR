@@ -13,6 +13,7 @@ import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as AppAvataresRouteImport } from './routes/_app.avatares'
 import { Route as AppCalendarioRouteImport } from './routes/_app.calendario'
+import { Route as AppCinematicRouteImport } from './routes/_app.cinematic'
 import { Route as AppConfiguracoesRouteImport } from './routes/_app.configuracoes'
 import { Route as AppCortesRouteImport } from './routes/_app.cortes'
 import { Route as AppIdeiasRouteImport } from './routes/_app.ideias'
@@ -49,6 +50,11 @@ const AppAvataresRoute = AppAvataresRouteImport.update({
 const AppCalendarioRoute = AppCalendarioRouteImport.update({
   id: '/calendario',
   path: '/calendario',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppCinematicRoute = AppCinematicRouteImport.update({
+  id: '/cinematic',
+  path: '/cinematic',
   getParentRoute: () => AppRoute,
 } as any)
 const AppConfiguracoesRoute = AppConfiguracoesRouteImport.update({
@@ -146,6 +152,7 @@ export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/avatares': typeof AppAvataresRoute
   '/calendario': typeof AppCalendarioRoute
+  '/cinematic': typeof AppCinematicRoute
   '/configuracoes': typeof AppConfiguracoesRoute
   '/cortes': typeof AppCortesRoute
   '/ideias': typeof AppIdeiasRouteWithChildren
@@ -168,6 +175,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/avatares': typeof AppAvataresRoute
   '/calendario': typeof AppCalendarioRoute
+  '/cinematic': typeof AppCinematicRoute
   '/configuracoes': typeof AppConfiguracoesRoute
   '/cortes': typeof AppCortesRoute
   '/kit-local': typeof AppKitLocalRoute
@@ -189,6 +197,7 @@ export interface FileRoutesById {
   '/_app': typeof AppRouteWithChildren
   '/_app/avatares': typeof AppAvataresRoute
   '/_app/calendario': typeof AppCalendarioRoute
+  '/_app/cinematic': typeof AppCinematicRoute
   '/_app/configuracoes': typeof AppConfiguracoesRoute
   '/_app/cortes': typeof AppCortesRoute
   '/_app/ideias': typeof AppIdeiasRouteWithChildren
@@ -215,6 +224,7 @@ export interface FileRouteTypes {
     | '/'
     | '/avatares'
     | '/calendario'
+    | '/cinematic'
     | '/configuracoes'
     | '/cortes'
     | '/ideias'
@@ -237,6 +247,7 @@ export interface FileRouteTypes {
   to:
     | '/avatares'
     | '/calendario'
+    | '/cinematic'
     | '/configuracoes'
     | '/cortes'
     | '/kit-local'
@@ -257,6 +268,7 @@ export interface FileRouteTypes {
     | '/_app'
     | '/_app/avatares'
     | '/_app/calendario'
+    | '/_app/cinematic'
     | '/_app/configuracoes'
     | '/_app/cortes'
     | '/_app/ideias'
@@ -310,6 +322,13 @@ declare module '@tanstack/react-router' {
       path: '/calendario'
       fullPath: '/calendario'
       preLoaderRoute: typeof AppCalendarioRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/cinematic': {
+      id: '/_app/cinematic'
+      path: '/cinematic'
+      fullPath: '/cinematic'
+      preLoaderRoute: typeof AppCinematicRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/configuracoes': {
@@ -500,6 +519,7 @@ const AppRoteirosRouteWithChildren = AppRoteirosRoute._addFileChildren(
 interface AppRouteChildren {
   AppAvataresRoute: typeof AppAvataresRoute
   AppCalendarioRoute: typeof AppCalendarioRoute
+  AppCinematicRoute: typeof AppCinematicRoute
   AppConfiguracoesRoute: typeof AppConfiguracoesRoute
   AppCortesRoute: typeof AppCortesRoute
   AppIdeiasRoute: typeof AppIdeiasRouteWithChildren
@@ -516,6 +536,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppAvataresRoute: AppAvataresRoute,
   AppCalendarioRoute: AppCalendarioRoute,
+  AppCinematicRoute: AppCinematicRoute,
   AppConfiguracoesRoute: AppConfiguracoesRoute,
   AppCortesRoute: AppCortesRoute,
   AppIdeiasRoute: AppIdeiasRouteWithChildren,

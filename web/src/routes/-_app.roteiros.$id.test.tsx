@@ -270,6 +270,17 @@ describe("script editor React interactions", () => {
     expect(within(getEditor()).getByRole("button", { name: "Salvar" })).toBeDisabled();
   });
 
+  it("keeps source context and legacy script status out of the writing workspace", async () => {
+    await renderEditor({ ...baseScript, status: "aguardando_validacao" });
+
+    expect(screen.getByText("O que será dito no vídeo")).toBeInTheDocument();
+    expect(screen.queryByText("Ver contexto do roteiro")).not.toBeInTheDocument();
+    expect(screen.queryByText("Timeline")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Status")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Prioridade")).not.toBeInTheDocument();
+    expect(screen.queryByText("Rascunho")).not.toBeInTheDocument();
+  });
+
   it("shows missing paid version in the final checklist instead of a false ready state", async () => {
     vi.mocked(fetchScriptEditorState).mockResolvedValue(
       editorState({

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="stylesheet" href="_ds/modernist-3856a42a-a32d-4d22-a8e9-524bda172b99/styles.css">
+<script src="_ds/modernist-3856a42a-a32d-4d22-a8e9-524bda172b99/_ds_bundle.js"></script>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #07100f; }
+  a { color: #6fe3d2; text-decoration: none; border-bottom: 1px solid #6fe3d2; }
+  a:hover { color: #ffb84d; border-bottom-color: #ffb84d; }
+  @keyframes v2Rise { from { opacity: 0; transform: translateY(22px); filter: blur(10px); } to { opacity: 1; transform: none; filter: blur(0); } }
+  @keyframes v2Wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+  @keyframes v2Up { from { clip-path: inset(100% 0 0 0); transform: translateY(18px); } to { clip-path: inset(0 0 0 0); transform: none; } }
+  @keyframes v2Line { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes v2Glow { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+</style>
+</helmet>
+
+<div style="font-family: 'Archivo', sans-serif; color: #eef4f5; background: radial-gradient(120% 80% at 12% 0%, #10262b 0%, #07100f 60%); padding: 60px 64px 110px; display: flex; flex-direction: column; gap: 44px;">
+
+  <div style="display: flex; flex-direction: column; gap: 18px;">
+    <div style="display: flex; align-items: center; gap: 14px;">
+      <span style="width: 44px; height: 3px; background: #6fe3d2; display: block;"></span>
+      <span style="font-size: 12px; font-weight: 700; letter-spacing: .3em; text-transform: uppercase; color: #6fe3d2;">Direção v2 · Midnight</span>
+    </div>
+    <h1 style="margin: 0; font-size: 66px; font-weight: 800; letter-spacing: -.045em; line-height: .96; max-width: 18ch;">Inserts de vidro sobre vídeo</h1>
+    <p style="margin: 0; max-width: 76ch; font-size: 17px; line-height: 1.6; color: rgba(238,244,245,.66); text-wrap: pretty;">Mesma arquitetura da v1 — flush left, régua de acento, zero raio — mas em painéis de vidro escuro com desfoque de fundo: o vídeo atravessa o insert em vez de ser tapado por ele. Paleta azul-petróleo / ciano do briefing, com âmbar reservado para um único número por cena.</p>
+    <div style="display: flex; gap: 10px; flex-wrap: wrap; padding-top: 6px;">
+      <button onClick="{{ cycleBg }}" style="font-family: inherit; font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #eef4f5; background: rgba(111,227,210,.08); border: 1px solid rgba(111,227,210,.4); padding: 12px 18px; cursor: pointer;" style-hover="background: rgba(111,227,210,.18);">{{ bgLabel }}</button>
+      <button onClick="{{ toggleSafe }}" style="font-family: inherit; font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #eef4f5; background: rgba(111,227,210,.08); border: 1px solid rgba(111,227,210,.4); padding: 12px 18px; cursor: pointer;" style-hover="background: rgba(111,227,210,.18);">{{ safeLabel }}</button>
+      <button onClick="{{ replay }}" style="font-family: inherit; font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #07100f; background: #6fe3d2; border: 1px solid #6fe3d2; padding: 12px 18px; cursor: pointer;" style-hover="background: #ffb84d; border-color: #ffb84d;">Reproduzir</button>
+      <a href="Inserts Amycretin.dc.html" style="font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; padding: 12px 4px;">Ver v1 clara</a>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: linear-gradient(90deg, rgba(111,227,210,.5), rgba(238,244,245,.08));"></div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, 300px); gap: 48px 40px;">
+
+    <!-- 01 -->
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div style="width: 281px; height: 499px; overflow: hidden; background: {{ stageBg }}; border: 1px solid rgba(238,244,245,.16);">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}"><div style="position: absolute; inset: 90px; border: 2px dashed rgba(111,227,210,.6);"></div></sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; right: 90px; bottom: 250px; display: flex; flex-direction: column; align-items: flex-start; gap: 20px;">
+              <div style="display: flex; align-items: center; gap: 14px; background: rgba(8,24,28,.55); backdrop-filter: blur(20px) saturate(1.3); border: 1px solid rgba(111,227,210,.35); padding: 12px 20px; animation: v2Rise .5s cubic-bezier(.2,.8,.2,1) both;">
+                <span style="width: 12px; height: 12px; background: #6fe3d2; display: block; animation: v2Glow 2s ease-in-out infinite;"></span>
+                <span style="font-size: 26px; font-weight: 700; letter-spacing: .26em; text-transform: uppercase; color: #6fe3d2;">Dado clínico</span>
+              </div>
+              <div style="overflow: hidden;">
+                <div style="font-size: 260px; font-weight: 800; letter-spacing: -.06em; line-height: .84; color: #ffb84d; text-shadow: 0 20px 60px rgba(0,0,0,.55); animation: v2Up .7s cubic-bezier(.2,.9,.2,1) .12s both;">24,3%</div>
+              </div>
+              <div style="height: 4px; width: 100%; background: linear-gradient(90deg, #6fe3d2, rgba(111,227,210,0)); transform-origin: left; animation: v2Line .6s cubic-bezier(.2,.8,.2,1) .38s both;"></div>
+              <div style="max-width: 840px; background: rgba(8,24,28,.5); backdrop-filter: blur(20px); border-left: 3px solid rgba(111,227,210,.7); padding: 18px 24px; animation: v2Rise .5s ease-out .5s both;">
+                <div style="font-size: 44px; font-weight: 600; line-height: 1.22; color: #eef4f5;">de redução de peso em 36 semanas</div>
+                <div style="font-size: 26px; letter-spacing: .06em; color: rgba(238,244,245,.6); padding-top: 8px;">formulação injetável · fase inicial</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 20px; font-weight: 700; letter-spacing: -.02em;">01 · Número em Vidro</div>
+        <div style="font-size: 13px; line-height: 1.5; color: rgba(238,244,245,.6);">Terço inferior · 0:38. O número sobe por trás de uma máscara e é a única coisa em âmbar na cena inteira.</div>
+      </div>
+    </div>
+
+    <!-- 02 -->
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div style="width: 281px; height: 499px; overflow: hidden; background: {{ stageBg }}; border: 1px solid rgba(238,244,245,.16);">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}"><div style="position: absolute; inset: 90px; border: 2px dashed rgba(111,227,210,.6);"></div></sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; right: 90px; top: 430px; width: 660px; display: flex; flex-direction: column; gap: 14px;">
+              <div style="display: flex; gap: 20px; align-items: center; background: rgba(8,24,28,.55); backdrop-filter: blur(22px) saturate(1.3); border: 1px solid rgba(238,244,245,.14); border-left: 3px solid #6fe3d2; padding: 22px 26px; animation: v2Rise .5s cubic-bezier(.2,.8,.2,1) 0s both;">
+                <span style="font-size: 26px; font-weight: 800; letter-spacing: .1em; color: #6fe3d2; min-width: 46px;">01</span>
+                <span style="font-size: 34px; font-weight: 600; line-height: 1.2;">GLP-1 — sinal de saciedade</span>
+              </div>
+              <div style="display: flex; gap: 20px; align-items: center; background: rgba(8,24,28,.55); backdrop-filter: blur(22px) saturate(1.3); border: 1px solid rgba(238,244,245,.14); border-left: 3px solid #6fe3d2; padding: 22px 26px; animation: v2Rise .5s cubic-bezier(.2,.8,.2,1) .1s both;">
+                <span style="font-size: 26px; font-weight: 800; letter-spacing: .1em; color: #6fe3d2; min-width: 46px;">02</span>
+                <span style="font-size: 34px; font-weight: 600; line-height: 1.2;">Amilina — controle da fome</span>
+              </div>
+              <div style="display: flex; gap: 20px; align-items: center; background: rgba(8,24,28,.55); backdrop-filter: blur(22px) saturate(1.3); border: 1px solid rgba(238,244,245,.14); border-left: 3px solid #6fe3d2; padding: 22px 26px; animation: v2Rise .5s cubic-bezier(.2,.8,.2,1) .2s both;">
+                <span style="font-size: 26px; font-weight: 800; letter-spacing: .1em; color: #6fe3d2; min-width: 46px;">03</span>
+                <span style="font-size: 34px; font-weight: 600; line-height: 1.2;">Esvaziamento gástrico mais lento</span>
+              </div>
+              <div style="display: flex; gap: 20px; align-items: center; background: rgba(8,24,28,.55); backdrop-filter: blur(22px) saturate(1.3); border: 1px solid rgba(238,244,245,.14); border-left: 3px solid rgba(111,227,210,.35); padding: 22px 26px; animation: v2Rise .5s cubic-bezier(.2,.8,.2,1) .3s both;">
+                <span style="font-size: 26px; font-weight: 800; letter-spacing: .1em; color: rgba(238,244,245,.5); min-width: 46px;">04</span>
+                <span style="font-size: 34px; font-weight: 600; line-height: 1.2; color: rgba(238,244,245,.72);">Oral: ~13% em 12 semanas</span>
+              </div>
+              <div style="display: flex; gap: 20px; align-items: center; background: rgba(255,184,77,.14); backdrop-filter: blur(22px) saturate(1.3); border: 1px solid rgba(255,184,77,.5); border-left: 3px solid #ffb84d; padding: 22px 26px; animation: v2Rise .5s cubic-bezier(.2,.8,.2,1) .4s both;">
+                <span style="font-size: 26px; font-weight: 800; letter-spacing: .1em; color: #ffb84d; min-width: 46px;">05</span>
+                <span style="font-size: 34px; font-weight: 700; line-height: 1.2;">Injetável: 24,3% em 36 semanas</span>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 20px; font-weight: 700; letter-spacing: -.02em;">02 · Pilha de Cinco</div>
+        <div style="font-size: 13px; line-height: 1.5; color: rgba(238,244,245,.6);">Coluna direita · 0:18. Escada de 0,1 s; a linha citada na fala acende em âmbar e as outras recuam para 72% de opacidade.</div>
+      </div>
+    </div>
+
+    <!-- 03 -->
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div style="width: 281px; height: 499px; overflow: hidden; background: {{ stageBg }}; border: 1px solid rgba(238,244,245,.16);">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}"><div style="position: absolute; inset: 90px; border: 2px dashed rgba(111,227,210,.6);"></div></sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; bottom: 180px; width: 620px; background: rgba(8,24,28,.62); backdrop-filter: blur(26px) saturate(1.3); border: 1px solid rgba(238,244,245,.16); box-shadow: 0 32px 80px rgba(0,0,0,.5); animation: v2Rise .55s cubic-bezier(.2,.8,.2,1) both;">
+              <div style="height: 4px; background: linear-gradient(90deg, #6fe3d2, rgba(111,227,210,0));"></div>
+              <div style="padding: 30px 32px 34px; display: flex; flex-direction: column; gap: 18px;">
+                <div style="display: flex; justify-content: space-between; align-items: baseline; font-size: 22px; font-weight: 700; letter-spacing: .24em; text-transform: uppercase; color: rgba(238,244,245,.55);">
+                  <span>Boletim clínico</span><span style="color: #6fe3d2;">N.º 04</span>
+                </div>
+                <div style="font-size: 64px; font-weight: 800; letter-spacing: -.04em; line-height: 1;">Uma molécula, dois receptores</div>
+                <div style="font-size: 30px; line-height: 1.34; color: rgba(238,244,245,.72);">A Amycretin foi desenvolvida para agir no GLP-1 e na amilina ao mesmo tempo — dois sinais de saciedade em um só tratamento.</div>
+                <div style="height: 1px; background: rgba(238,244,245,.18);"></div>
+                <div style="font-size: 22px; letter-spacing: .1em; text-transform: uppercase; color: rgba(238,244,245,.5);">Ensaios iniciais · 2025 · em desenvolvimento</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 20px; font-weight: 700; letter-spacing: -.02em;">03 · Recorte Editorial</div>
+        <div style="font-size: 13px; line-height: 1.5; color: rgba(238,244,245,.6);">Lateral inferior · 0:06. O vidro escuro deixa o vídeo passar por trás do texto — nada de placa branca sobre o rosto.</div>
+      </div>
+    </div>
+
+    <!-- 04 -->
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div style="width: 281px; height: 499px; overflow: hidden; background: {{ stageBg }}; border: 1px solid rgba(238,244,245,.16);">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}"><div style="position: absolute; inset: 90px; border: 2px dashed rgba(111,227,210,.6);"></div></sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; right: 90px; bottom: 260px; display: flex; flex-direction: column; gap: 30px;">
+              <div style="font-size: 30px; font-weight: 700; letter-spacing: .26em; text-transform: uppercase; color: #6fe3d2; animation: v2Rise .45s ease-out both;">Um alvo vs. dois</div>
+              <div style="display: flex; flex-direction: column; gap: 14px; animation: v2Rise .5s ease-out .14s both;">
+                <div style="font-size: 30px; font-weight: 600; color: rgba(238,244,245,.7);">Terapias atuais · 1 receptor</div>
+                <div style="height: 60px; width: 46%; background: rgba(238,244,245,.18); border: 1px solid rgba(238,244,245,.28); transform-origin: left; animation: v2Line .6s cubic-bezier(.2,.8,.2,1) .3s both;"></div>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 14px; animation: v2Rise .5s ease-out .42s both;">
+                <div style="font-size: 30px; font-weight: 700;">Amycretin · GLP-1 + amilina</div>
+                <div style="height: 60px; width: 100%; background: linear-gradient(90deg, #0e6b63, #6fe3d2); transform-origin: left; box-shadow: 0 12px 40px rgba(111,227,210,.28); animation: v2Line .7s cubic-bezier(.2,.8,.2,1) .58s both;"></div>
+              </div>
+              <div style="font-size: 24px; color: rgba(238,244,245,.5); animation: v2Rise .5s ease-out .85s both;">Esquema de mecanismos — não é comparação de eficácia</div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 20px; font-weight: 700; letter-spacing: -.02em;">04 · Barras de Mecanismo</div>
+        <div style="font-size: 13px; line-height: 1.5; color: rgba(238,244,245,.6);">Terço inferior · 0:20. Sem cartela: só tipografia e duas barras que crescem da esquerda sobre o vídeo.</div>
+      </div>
+    </div>
+
+    <!-- 05 -->
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div style="width: 281px; height: 499px; overflow: hidden; background: {{ stageBg }}; border: 1px solid rgba(238,244,245,.16);">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}"><div style="position: absolute; inset: 90px; border: 2px dashed rgba(111,227,210,.6);"></div></sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; right: 90px; bottom: 160px; background: rgba(8,24,28,.62); backdrop-filter: blur(26px) saturate(1.3); border: 1px solid rgba(238,244,245,.16); box-shadow: 0 32px 80px rgba(0,0,0,.5); animation: v2Rise .55s cubic-bezier(.2,.8,.2,1) both;">
+              <div style="display: flex; justify-content: space-between; align-items: center; padding: 18px 26px; border-bottom: 1px solid rgba(238,244,245,.16); font-size: 24px; font-weight: 700; letter-spacing: .22em; text-transform: uppercase; color: rgba(238,244,245,.6);">
+                <span>Status regulatório</span><span style="color: #6fe3d2;">Amycretin</span>
+              </div>
+              <div style="padding: 28px 26px 32px; display: flex; flex-direction: column; gap: 22px;">
+                <div style="font-size: 52px; font-weight: 800; letter-spacing: -.03em; line-height: 1.04;">Em desenvolvimento clínico</div>
+                <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px;">
+                  <div style="background: #6fe3d2; color: #07100f; padding: 14px 8px; font-size: 20px; font-weight: 800; letter-spacing: .06em; animation: v2Wipe .3s ease-out .1s both;">PRÉ-CLÍN.</div>
+                  <div style="background: #6fe3d2; color: #07100f; padding: 14px 8px; font-size: 20px; font-weight: 800; letter-spacing: .06em; animation: v2Wipe .3s ease-out .22s both;">FASE 1</div>
+                  <div style="background: #6fe3d2; color: #07100f; padding: 14px 8px; font-size: 20px; font-weight: 800; letter-spacing: .06em; animation: v2Wipe .3s ease-out .34s both;">FASE 2</div>
+                  <div style="background: rgba(238,244,245,.08); border: 1px solid rgba(238,244,245,.2); color: rgba(238,244,245,.45); padding: 13px 8px; font-size: 20px; font-weight: 800; letter-spacing: .06em;">FASE 3</div>
+                  <div style="background: rgba(238,244,245,.08); border: 1px solid rgba(238,244,245,.2); color: rgba(238,244,245,.45); padding: 13px 8px; font-size: 20px; font-weight: 800; letter-spacing: .06em;">APROV.</div>
+                </div>
+                <div style="font-size: 28px; line-height: 1.34; color: rgba(238,244,245,.72);">Ainda não disponível comercialmente. Converse com seu médico antes de qualquer decisão de tratamento.</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 20px; font-weight: 700; letter-spacing: -.02em;">05 · Selo de Evidência</div>
+        <div style="font-size: 13px; line-height: 1.5; color: rgba(238,244,245,.6);">Rodapé · 0:56. As três fases concluídas preenchem uma a uma, como barra de progresso.</div>
+      </div>
+    </div>
+
+    <!-- 06 -->
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div style="width: 281px; height: 499px; overflow: hidden; background: {{ stageBg }}; border: 1px solid rgba(238,244,245,.16);">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}"><div style="position: absolute; inset: 90px; border: 2px dashed rgba(111,227,210,.6);"></div></sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; top: 150px; width: 600px; background: rgba(8,24,28,.6); backdrop-filter: blur(24px) saturate(1.3); border: 1px solid rgba(238,244,245,.16); padding: 26px 28px 30px; display: flex; flex-direction: column; gap: 12px; animation: v2Wipe .5s cubic-bezier(.2,.8,.2,1) both;">
+              <div style="font-size: 22px; font-weight: 700; letter-spacing: .26em; text-transform: uppercase; color: #6fe3d2;">O termo</div>
+              <div style="font-size: 64px; font-weight: 800; letter-spacing: -.04em; line-height: 1;">Amilina</div>
+              <div style="font-size: 28px; line-height: 1.34; color: rgba(238,244,245,.72);">Hormônio liberado junto com a insulina. Sinaliza saciedade ao cérebro e desacelera o esvaziamento do estômago.</div>
+            </div>
+            <div style="position: absolute; left: 90px; bottom: 90px; display: flex; align-items: stretch; animation: v2Wipe .45s cubic-bezier(.2,.8,.2,1) .2s both;">
+              <div style="background: #6fe3d2; color: #07100f; padding: 14px 16px; font-size: 22px; font-weight: 800; letter-spacing: .18em; display: flex; align-items: center;">FONTE</div>
+              <div style="background: rgba(8,24,28,.62); backdrop-filter: blur(20px); border: 1px solid rgba(238,244,245,.16); border-left: 0; padding: 12px 20px; display: flex; flex-direction: column; gap: 2px;">
+                <div style="font-size: 24px; font-weight: 700;">Ensaios clínicos iniciais · fase 1/2</div>
+                <div style="font-size: 20px; color: rgba(238,244,245,.55);">Resultados preliminares, grupos específicos</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 20px; font-weight: 700; letter-spacing: -.02em;">06 · Glossário + Selo de Fonte</div>
+        <div style="font-size: 13px; line-height: 1.5; color: rgba(238,244,245,.6);">Alto · 0:14, 4 s · e a faixa de fonte permanente no rodapé. Os dois convivem sem tocar o rosto.</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="height: 1px; background: linear-gradient(90deg, rgba(111,227,210,.5), rgba(238,244,245,.08));"></div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 36px;">
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 12px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: #6fe3d2;">Paleta</div>
+      <div style="display: flex; gap: 8px; padding-bottom: 6px;">
+        <span style="width: 34px; height: 34px; background: #07100f; border: 1px solid rgba(238,244,245,.3);"></span>
+        <span style="width: 34px; height: 34px; background: #10262b;"></span>
+        <span style="width: 34px; height: 34px; background: #6fe3d2;"></span>
+        <span style="width: 34px; height: 34px; background: #ffb84d;"></span>
+        <span style="width: 34px; height: 34px; background: #eef4f5;"></span>
+      </div>
+      <div style="font-size: 14px; line-height: 1.55; color: rgba(238,244,245,.62);">Azul-petróleo #10262B, ciano #6FE3D2, âmbar #FFB84D (um destaque por cena), branco suave #EEF4F5.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 12px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: #6fe3d2;">Vidro e alpha</div>
+      <div style="font-size: 14px; line-height: 1.55; color: rgba(238,244,245,.62);">O desfoque lê os pixels do vídeo, então este efeito precisa ser montado <b>no editor</b> (camada de ajuste com blur mascarada pela cartela) — um PNG com alpha entrega só a cartela translúcida a 62%, sem o borrão. Se o editor não fizer blur mascarado, exporte MOV ProRes 4444 com o insert já composto sobre o vídeo.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 12px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: #6fe3d2;">Movimento</div>
+      <div style="font-size: 14px; line-height: 1.55; color: rgba(238,244,245,.62);">Entradas com desfoque de 10 px que resolve em foco, máscaras de subida no número e réguas que crescem da esquerda. Curva única: cubic-bezier(.2,.8,.2,1), 0,45–0,7 s.</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;bgMode&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;vídeo&quot;,&quot;xadrez&quot;,&quot;vazado&quot;],&quot;default&quot;:&quot;vídeo&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Prévia&quot;},&quot;showSafeArea&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Prévia&quot;}}">
+class Component extends DCLogic {
+  state = { live: true, bg: null, safe: null };
+
+  replay = () => {
+    this.setState({ live: false });
+    setTimeout(() => this.setState({ live: true }), 80);
+  };
+
+  renderVals() {
+    const bg = this.state.bg ?? this.props.bgMode ?? 'vídeo';
+    const safe = this.state.safe ?? this.props.showSafeArea ?? false;
+    const order = ['vídeo', 'xadrez', 'vazado'];
+    const stageBg = bg === 'xadrez'
+      ? 'repeating-conic-gradient(#2a2f31 0% 25%, #1b1f21 0% 50%) 0 0/56px 56px'
+      : bg === 'vídeo'
+        ? 'linear-gradient(200deg, #6b7b80 0%, #46545a 38%, #232d31 72%, #151d20 100%)'
+        : 'transparent';
+    return {
+      live: this.state.live,
+      safe,
+      stageBg,
+      replay: this.replay,
+      bgLabel: 'Fundo: ' + bg,
+      safeLabel: safe ? 'Margem segura: on' : 'Margem segura: off',
+      cycleBg: () => this.setState({ bg: order[(order.indexOf(bg) + 1) % order.length] }),
+      toggleSafe: () => this.setState({ safe: !safe })
+    };
+  }
+}
+</script>
+</body>
+</html>

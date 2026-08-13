@@ -1,6 +1,6 @@
 {
   "contractVersion": "2.0.0",
-  "durationPresets": [10, 15, 30, 45, 60],
+  "durationPresets": [10, 15, 30, 45, 60, 90, 120, 180],
   "durationStatuses": ["ideal", "warning", "blocking"],
   "medicalReviewStatuses": ["not_required", "recommended", "required", "approved"],
   "titleAlignmentStatuses": ["aligned", "possible_mismatch", "unknown"],
@@ -12,7 +12,6 @@
     "ai_schema_invalid",
     "technical_error",
     "medical_review_required",
-    "script_not_ready",
     "unsaved",
     "not_confirmed"
   ],

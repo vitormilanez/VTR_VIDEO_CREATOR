@@ -1,6 +1,7 @@
 import { assessScriptDuration, type DurationPreset } from "./script-editor";
+import { MEDICAL_DEFAULT_SAFE_CTA } from "./medical-identity";
 
-export const DEFAULT_OUTRO = "Me siga para mais dicas, e obrigado.";
+export const DEFAULT_OUTRO = MEDICAL_DEFAULT_SAFE_CTA;
 const LEGACY_CAPTURE_OUTRO = "Veja o contexto no perfil.";
 
 const PLACEHOLDER_PATTERNS: Array<{ regex: RegExp; message: string }> = [

@@ -19,9 +19,15 @@ def test_lifespan_reconciles_and_resumes_each_worker_once() -> None:
         ) as reconcile,
         patch.object(server, "resume_interrupted_cut_projects") as resume_cuts,
         patch.object(server, "resume_interrupted_post_production_jobs") as resume_post,
+        patch.object(
+            server,
+            "reconcile_interrupted_local_video_kit_jobs",
+            return_value=0,
+        ) as reconcile_local,
     ):
         asyncio.run(run_lifespan())
 
     reconcile.assert_called_once_with()
     resume_cuts.assert_called_once_with()
     resume_post.assert_called_once_with()
+    reconcile_local.assert_called_once_with()

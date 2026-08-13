@@ -43,6 +43,17 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function sharedAvatarGroupId(
+  looks: AvatarSetLook[],
+  avatars: HeyGenCatalog["avatars"],
+): string | null {
+  const groupIds = looks.map(
+    (look) => avatars.find((avatar) => avatar.id === look.avatarId)?.groupId || "",
+  );
+  if (groupIds.some((groupId) => !groupId) || new Set(groupIds).size !== 1) return null;
+  return groupIds[0] || null;
+}
+
 export function AvatarPicker({
   value,
   avatars,
@@ -217,6 +228,12 @@ export function AvatarSetSelector({
     }
     if (new Set(draftLooks.map((look) => look.role)).size !== draftLooks.length) {
       setPackError("Cada posição precisa ter um papel diferente.");
+      return;
+    }
+    if (!sharedAvatarGroupId(draftLooks, avatars)) {
+      setPackError(
+        "As posições precisam pertencer à mesma identidade HeyGen. Escolha os looks em pé/sentado do mesmo grupo.",
+      );
       return;
     }
     setSavingPack(true);
@@ -520,6 +537,12 @@ export function AvatarSetEditorDialog({
       setError("Cada posição precisa ter um role diferente.");
       return;
     }
+    if (!sharedAvatarGroupId(looks, avatars)) {
+      setError(
+        "As posições precisam pertencer à mesma identidade HeyGen. Escolha os looks em pé/sentado do mesmo grupo.",
+      );
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -542,8 +565,8 @@ export function AvatarSetEditorDialog({
         <DialogHeader>
           <DialogTitle>{initial ? "Editar Avatar Set" : "Criar Avatar Set"}</DialogTitle>
           <DialogDescription>
-            Cadastre looks reais da mesma pessoa para alternar entre duas posições com cortes entre
-            cenas.
+            Cadastre looks reais da mesma identidade HeyGen — por exemplo, em pé e sentado na mesa —
+            para alternar somente entre duas posições com cortes entre cenas.
           </DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={submit}>
@@ -576,7 +599,8 @@ export function AvatarSetEditorDialog({
               <div>
                 <Label className="text-xs">Looks e posições</Label>
                 <p className="text-[11px] text-muted-foreground">
-                  Use pelo menos dois looks diferentes.
+                  Use dois looks diferentes da mesma identidade HeyGen. Roupa, cenário e voz devem
+                  permanecer consistentes.
                 </p>
               </div>
               <Button

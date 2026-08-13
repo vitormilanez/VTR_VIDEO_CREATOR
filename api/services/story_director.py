@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from api.services.medical_identity import MEDICAL_EDITORIAL_PROMPT
 from api.services.story_contract import (
     STORY_CONTRACT_SCHEMA,
     STORY_CONTRACT_VERSION,
@@ -98,7 +99,8 @@ def build_story_prompt(
         "Inclua no heygenPrompt as restrições relevantes da Character Bible, Visual Bible e "
         "Historical Setting, além dos anacronismos e mudanças proibidas. "
         "A soma de durationSeconds deve ser a duração solicitada e o custo de cada provider "
-        "HeyGen é 1 job; local_compositor é 0. Não inclua texto fora do JSON."
+        "HeyGen é 1 job; local_compositor é 0. Não inclua texto fora do JSON.\n\n"
+        + MEDICAL_EDITORIAL_PROMPT
     )
     system = [
         {

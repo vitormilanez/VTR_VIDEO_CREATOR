@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { formatPublicationCaption } from "@/lib/medical-identity";
 import { prioridadeLabel, riskLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
 import {
@@ -23,11 +24,15 @@ import {
   fetchPackPhotoAssets,
   generatePack,
   refreshPackAvatar,
+  updatePackCoverNote,
   updatePackCarouselPhoto,
+  updatePackPresentation,
   type GeneratedPack,
+  type PackFamily,
   type PackLayout,
   type PackPhotoAsset,
   type PackSlide,
+  type PackTheme,
 } from "@/lib/api/local";
 import {
   CalendarPlus,
@@ -39,6 +44,7 @@ import {
   Layers3,
   Loader2,
   MessageSquareText,
+  Palette,
   PanelsTopLeft,
   RefreshCw,
   Video,
@@ -85,6 +91,60 @@ const layoutLabels: Record<PackLayout, string> = {
   cta_photo: "CTA com foto",
 };
 
+const familyOptions: Array<{
+  id: PackFamily;
+  label: string;
+  description: string;
+  whenToUse: string;
+}> = [
+  {
+    id: "editorial",
+    label: "Editorial",
+    description: "Foto ampla, autoridade e mais respiro.",
+    whenToUse: "Opinião médica e posicionamento.",
+  },
+  {
+    id: "didatico",
+    label: "Didático",
+    description: "Grade clara, relações e passos numerados.",
+    whenToUse: "Explicações e conteúdo científico.",
+  },
+  {
+    id: "storytelling",
+    label: "Storytelling",
+    description: "Foto presente, texto curto e ritmo narrativo.",
+    whenToUse: "Histórias, tensão e transformação.",
+  },
+];
+
+const themeOptions: Array<{
+  id: PackTheme;
+  label: string;
+  description: string;
+  swatches: [string, string, string];
+}> = [
+  {
+    id: "modernist-red",
+    label: "Modernist",
+    description: "Vermelho, contraste gráfico e tipografia Archivo.",
+    swatches: ["#c8392b", "#171717", "#f4efe6"],
+  },
+  {
+    id: "ocean-deep",
+    label: "Ocean Deep",
+    description: "Azul profundo, teal e linguagem clínica.",
+    swatches: ["#0c2340", "#2d8a9e", "#f2f5f6"],
+  },
+];
+
+function familyOf(pack: Pack): PackFamily {
+  return pack.family ?? "didatico";
+}
+
+function themeOf(pack: Pack): PackTheme {
+  return pack.themeId ?? "ocean-deep";
+}
+
 const photoLayouts = new Set<PackLayout>([
   "hero_photo",
   "photo_split",
@@ -123,16 +183,15 @@ function detailLines(slide: PackSlide): string[] {
     if (line) lines.push(line);
   }
   if (fields.caption && fields.caption !== bodyOf(slide)) lines.push(fields.caption);
+  if (fields.coverNote) lines.push(`Mensagem na capa: ${fields.coverNote}`);
   if (fields.cta) lines.push(fields.cta);
   if (fields.disclaimer) lines.push(fields.disclaimer);
+  if (layoutOf(slide) === "cta_photo" && fields.footer) lines.push(fields.footer);
   return lines;
 }
 
 function captionOf(pack: Pack): string {
-  const tags = (pack.hashtags ?? []).map((tag) => (tag.startsWith("#") ? tag : `#${tag}`));
-  const suffix = tags.join(" ");
-  if (!suffix || pack.caption.includes(tags[0] ?? "\u0000")) return pack.caption;
-  return `${pack.caption.trim()}\n\n${suffix}`;
+  return formatPublicationCaption(pack.caption, pack.hashtags ?? []);
 }
 
 function formatCarousel(slides: Pack["carousel"]): string {
@@ -164,6 +223,10 @@ function PacksPage() {
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingPhotoIndex, setSavingPhotoIndex] = useState<number | null>(null);
+  const [coverNoteDraft, setCoverNoteDraft] = useState("");
+  const [savingCoverNote, setSavingCoverNote] = useState(false);
+  const [savingPresentation, setSavingPresentation] = useState(false);
+  const [presentationStatus, setPresentationStatus] = useState("");
   const [outdatedAvatar, setOutdatedAvatar] = useState(false);
   const [outdatedPackSchema, setOutdatedPackSchema] = useState(false);
 
@@ -172,6 +235,12 @@ function PacksPage() {
   const scheduledPost = script ? posts.find((post) => post.scriptId === script.id) : undefined;
   const packIsLegacy =
     pack !== null && (pack.carousel.length !== REQUIRED_CAROUSEL_SLIDES || outdatedPackSchema);
+  const savedCoverNote = pack?.carousel[0]?.fields?.coverNote ?? "";
+  const coverNoteDirty = coverNoteDraft.trim().replace(/\s+/g, " ") !== savedCoverNote;
+
+  useEffect(() => {
+    setCoverNoteDraft(savedCoverNote);
+  }, [savedCoverNote]);
 
   useEffect(() => {
     if (!script) {
@@ -230,7 +299,10 @@ function PacksPage() {
     setGenerating(true);
     const notice = toast.loading("Criando carrossel com texto direto e design editorial...");
     try {
-      const response = await generatePack(script);
+      const response = await generatePack(
+        script,
+        pack ? { family: familyOf(pack), themeId: themeOf(pack) } : undefined,
+      );
       setPack(response.pack);
       setOutdatedAvatar(false);
       setOutdatedPackSchema(false);
@@ -241,6 +313,28 @@ function PacksPage() {
       });
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function choosePresentation(next: { family: PackFamily; themeId: PackTheme }) {
+    if (!script || !pack || savingPresentation) return;
+    if (familyOf(pack) === next.family && themeOf(pack) === next.themeId) return;
+
+    const previousPack = pack;
+    setSavingPresentation(true);
+    setPresentationStatus("Salvando preferência visual…");
+    setPack({ ...pack, ...next });
+    try {
+      const response = await updatePackPresentation(script.id, next);
+      setPack(response.pack);
+      setPresentationStatus("Estilo salvo sem usar tokens do Claude.");
+      toast.success("Estilo do Pack atualizado sem regenerar o texto.");
+    } catch (error) {
+      setPack(previousPack);
+      setPresentationStatus("");
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel salvar o estilo.");
+    } finally {
+      setSavingPresentation(false);
     }
   }
 
@@ -346,6 +440,31 @@ function PacksPage() {
       });
     } finally {
       setSavingPhotoIndex(null);
+    }
+  }
+
+  async function saveCoverNote() {
+    if (!script || !pack || savingCoverNote || !coverNoteDirty) return;
+    setSavingCoverNote(true);
+    const notice = toast.loading("Salvando a mensagem da capa...");
+    try {
+      const response = await updatePackCoverNote(script.id, coverNoteDraft);
+      const saved = response.pack.carousel[0]?.fields?.coverNote ?? "";
+      setPack(response.pack);
+      setCoverNoteDraft(saved);
+      toast.success(
+        saved
+          ? "Mensagem da capa salva. A fonte se ajusta automaticamente no PNG."
+          : "Caixa de texto removida da capa.",
+        { id: notice },
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Nao foi possivel salvar a mensagem da capa.",
+        { id: notice },
+      );
+    } finally {
+      setSavingCoverNote(false);
     }
   }
 
@@ -547,6 +666,135 @@ function PacksPage() {
                 </Card>
               </section>
 
+              <section className="rounded-xl border bg-card p-4 shadow-sm">
+                <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h2 className="flex items-center gap-2 text-sm font-semibold">
+                      <Palette className="h-4 w-4 text-status-info" /> Estilo do Pack
+                    </h2>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Escolha a composição e o tema visual. A troca é local e preserva o texto.
+                    </p>
+                  </div>
+                  <StatusBadge label="Sem tokens do Claude" tone="success" />
+                </div>
+
+                <div className="grid gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,1fr)]">
+                  <fieldset>
+                    <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                      Composição
+                    </legend>
+                    <div className="grid gap-2 md:grid-cols-3">
+                      {familyOptions.map((option) => {
+                        const selected = familyOf(pack) === option.id;
+                        return (
+                          <label
+                            key={option.id}
+                            className={`cursor-pointer rounded-lg border p-3 transition-colors duration-200 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${
+                              selected
+                                ? "border-primary bg-primary/5"
+                                : "bg-background hover:border-primary/40 hover:bg-muted/40"
+                            } ${savingPresentation ? "cursor-wait opacity-70" : ""}`}
+                          >
+                            <input
+                              className="sr-only"
+                              type="radio"
+                              name="pack-family"
+                              value={option.id}
+                              checked={selected}
+                              disabled={savingPresentation}
+                              onChange={() =>
+                                void choosePresentation({
+                                  family: option.id,
+                                  themeId: themeOf(pack),
+                                })
+                              }
+                            />
+                            <span className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-semibold">{option.label}</span>
+                              {selected ? (
+                                <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success" />
+                              ) : null}
+                            </span>
+                            <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+                              {option.description}
+                            </span>
+                            <span className="mt-2 block text-[11px] font-medium text-foreground/75">
+                              {option.whenToUse}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </fieldset>
+
+                  <fieldset>
+                    <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                      Tema
+                    </legend>
+                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+                      {themeOptions.map((option) => {
+                        const selected = themeOf(pack) === option.id;
+                        return (
+                          <label
+                            key={option.id}
+                            className={`cursor-pointer rounded-lg border p-3 transition-colors duration-200 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${
+                              selected
+                                ? "border-primary bg-primary/5"
+                                : "bg-background hover:border-primary/40 hover:bg-muted/40"
+                            } ${savingPresentation ? "cursor-wait opacity-70" : ""}`}
+                          >
+                            <input
+                              className="sr-only"
+                              type="radio"
+                              name="pack-theme"
+                              value={option.id}
+                              checked={selected}
+                              disabled={savingPresentation}
+                              onChange={() =>
+                                void choosePresentation({
+                                  family: familyOf(pack),
+                                  themeId: option.id,
+                                })
+                              }
+                            />
+                            <span className="flex items-center gap-3">
+                              <span
+                                className="flex shrink-0 overflow-hidden rounded border"
+                                aria-hidden="true"
+                              >
+                                {option.swatches.map((color) => (
+                                  <span
+                                    key={color}
+                                    className="h-8 w-4"
+                                    style={{ backgroundColor: color }}
+                                  />
+                                ))}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="flex items-center justify-between gap-2 text-sm font-semibold">
+                                  {option.label}
+                                  {selected ? (
+                                    <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success" />
+                                  ) : null}
+                                </span>
+                                <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                                  {option.description}
+                                </span>
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </fieldset>
+                </div>
+
+                <p className="mt-3 min-h-4 text-xs text-muted-foreground" aria-live="polite">
+                  {presentationStatus}
+                </p>
+              </section>
+
               <Tabs defaultValue="carousel" className="space-y-3">
                 <TabsList className="grid w-full grid-cols-3 md:w-auto">
                   <TabsTrigger value="carousel">Carrossel</TabsTrigger>
@@ -608,6 +856,54 @@ function PacksPage() {
                               {savingPhotoIndex === index ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                               ) : null}
+                            </div>
+                          ) : null}
+
+                          {index === 0 ? (
+                            <div className="mb-4 rounded-lg border border-dashed border-primary/35 bg-primary/5 p-3">
+                              <label
+                                htmlFor="pack-cover-note"
+                                className="text-xs font-semibold text-foreground"
+                              >
+                                Mensagem opcional na capa
+                              </label>
+                              <p
+                                id="pack-cover-note-help"
+                                className="mt-1 text-[11px] leading-relaxed text-muted-foreground"
+                              >
+                                Ela aparece em uma caixa no Slide 1. A fonte diminui automaticamente
+                                para caber no PNG.
+                              </p>
+                              <Textarea
+                                id="pack-cover-note"
+                                className="mt-2 min-h-20 resize-y text-sm"
+                                rows={3}
+                                maxLength={180}
+                                value={coverNoteDraft}
+                                onChange={(event) => setCoverNoteDraft(event.target.value)}
+                                placeholder="Ex.: Atendimento individual, com escuta e estratégia."
+                                aria-describedby="pack-cover-note-help pack-cover-note-count"
+                              />
+                              <div className="mt-2 flex items-center justify-between gap-2">
+                                <span
+                                  id="pack-cover-note-count"
+                                  className="text-[11px] tabular-nums text-muted-foreground"
+                                >
+                                  {coverNoteDraft.length}/180
+                                </span>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={() => void saveCoverNote()}
+                                  disabled={!coverNoteDirty || savingCoverNote}
+                                >
+                                  {savingCoverNote ? (
+                                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                                  ) : null}
+                                  {savingCoverNote ? "Salvando..." : "Salvar mensagem"}
+                                </Button>
+                              </div>
                             </div>
                           ) : null}
 

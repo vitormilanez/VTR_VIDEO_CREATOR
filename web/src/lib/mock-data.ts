@@ -100,6 +100,7 @@ export interface VideoJob {
   thumbnailUrl?: string;
   duracaoSegundos?: number;
   erro?: string;
+  warnings?: string[];
   remoteSessionId?: string;
   remoteVideoId?: string;
   isPreview?: boolean;
@@ -107,8 +108,14 @@ export interface VideoJob {
   isComposed?: boolean;
   sceneId?: string;
   sceneOrder?: number;
+  regeneratedFromJobId?: string;
+  regenerationCount?: number;
   sourceSceneJobs?: string[];
   outputPath?: string;
+  exportVersion?: string;
+  exportPath?: string;
+  exportFiles?: string[];
+  exportWarning?: string;
   sceneCount?: number;
   visualCount?: number;
   productionSettings?: {

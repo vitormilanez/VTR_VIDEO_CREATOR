@@ -229,6 +229,40 @@ class VideoComposerTests(unittest.TestCase):
             duration = float(json.loads(probe.stdout)["format"]["duration"])
             self.assertLess(duration, 1.8)
 
+    def test_mocked_technical_silence_trim_keeps_hard_cut_audio_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scene_one = root / "scene-one.mp4"
+            scene_two = root / "scene-two.mp4"
+            output = root / "final.mp4"
+            self._mock_video(scene_one, "blue", frequency=440)
+            self._mock_video(scene_two, "yellow", frequency=660)
+
+            with patch.object(
+                video_composer,
+                "_technical_silence_padding",
+                side_effect=[(0.1, 0.1), (0.1, 0.1)],
+            ) as silence_detector:
+                result = compose_video(
+                    [
+                        CompositionScene("scene-1", scene_one, trim_technical_silence=True),
+                        CompositionScene("scene-2", scene_two, trim_technical_silence=True),
+                    ],
+                    output,
+                    transition_style="hard_cut",
+                )
+
+            self.assertTrue(output.is_file())
+            self.assertEqual(silence_detector.call_count, 2)
+            self.assertEqual(result["cutPolicy"], "hard_cut")
+            self.assertEqual(
+                [segment["technicalSilenceTrim"] for segment in result["segments"]],
+                [
+                    {"leadingSeconds": 0.1, "trailingSeconds": 0.1},
+                    {"leadingSeconds": 0.1, "trailingSeconds": 0.1},
+                ],
+            )
+
     def test_composes_two_scenes_with_smooth_transition_and_no_slide(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -340,15 +374,112 @@ class VideoComposerTests(unittest.TestCase):
             self.assertGreater(second_rgb[1], second_rgb[0])
             self.assertAlmostEqual(self._audio_frequency(output, 2.4), 900, delta=80)
 
+    def test_two_camera_final_output_has_no_music_and_keeps_the_verified_cut_policy(self) -> None:
+        with tempfile.TemporaryDirectory(dir=server.ROOT / "data") as temporary:
+            root = Path(temporary)
+            original_database = server.OPERATIONAL_DB
+            original_composed_videos = server.COMPOSED_VIDEO_OUTPUTS
+            original_script_exports = server.SCRIPT_EXPORTS
+            server.OPERATIONAL_DB = root / "operations.db"
+            server.COMPOSED_VIDEO_OUTPUTS = root / "composed_videos"
+            server.SCRIPT_EXPORTS = root / "Exports" / "roteiro"
+            try:
+                script_id = "script-two-camera-compose"
+                avatar_set = server._save_avatar_set(
+                    name="Dr. Teste",
+                    voice_id="voice-fixed",
+                    looks=[
+                        {"avatarId": "look-standing", "role": "standing", "label": "Em pé"},
+                        {"avatarId": "look-seated", "role": "seated", "label": "Sentado"},
+                    ],
+                )
+                server._save_production_profile(
+                    {
+                        "scriptId": script_id,
+                        "avatarId": "look-standing",
+                        "primaryAvatarId": "look-standing",
+                        "avatarSetId": avatar_set["id"],
+                        "avatarMode": "set",
+                        "voiceId": "voice-fixed",
+                        "speechMode": "natural",
+                        "generationMode": "direct",
+                        "musicTrackId": "must-be-ignored",
+                    }
+                )
+                server._save_scene_plan(
+                    script_id,
+                    [
+                        {"id": "scene-1", "text": "Abertura.", "lookRole": "standing"},
+                        {"id": "scene-2", "text": "Explicação.", "lookRole": "seated"},
+                    ],
+                )
+                for index, (scene_id, avatar_id, color) in enumerate(
+                    (
+                        ("scene-1", "look-standing", "blue"),
+                        ("scene-2", "look-seated", "yellow"),
+                    ),
+                    start=1,
+                ):
+                    path = root / f"{scene_id}.mp4"
+                    self._mock_video(path, color)
+                    server._job_store().upsert(
+                        "video",
+                        {
+                            "id": f"sv-two-camera-{index}",
+                            "scriptId": script_id,
+                            "status": "pronto",
+                            "provider": "heygen",
+                            "progresso": 100,
+                            "criadoEm": f"2026-08-11T12:00:0{index}+00:00",
+                            "atualizadoEm": f"2026-08-11T12:01:0{index}+00:00",
+                            "isScene": True,
+                            "sceneBatchId": "batch-two-camera",
+                            "sceneId": scene_id,
+                            "sceneOrder": index,
+                            "finalSpeechHash": server.hash_text("Abertura. Explicação."),
+                            "productionSettings": {"avatarId": avatar_id},
+                            "outputPath": str(path.relative_to(server.ROOT)),
+                        },
+                    )
+
+                with patch.object(
+                    server,
+                    "_find_script",
+                    return_value={"textoFalado": "Abertura. Explicação.", "outroText": ""},
+                ):
+                    result = server._compose_final_video_if_ready(
+                        script_id, raise_when_not_ready=True
+                    )
+
+                self.assertIsNotNone(result)
+                assert result is not None
+                self.assertEqual(result["transitionStyle"], "hard_cut")
+                self.assertIsNone(result["backgroundMusic"])
+                self.assertEqual(result["continuity"]["mode"], "two_camera_locked")
+                self.assertFalse(result["continuity"]["backgroundMusic"])
+                self.assertTrue(result["continuity"]["technicalSilenceTrim"])
+                self.assertEqual(result["composition"]["cutPolicy"], "hard_cut")
+                self.assertEqual(result["sourceSceneJobs"], ["sv-two-camera-1", "sv-two-camera-2"])
+                self.assertEqual(result["exportVersion"], "1.1")
+                export_directory = server.ROOT / result["exportPath"]
+                self.assertTrue((export_directory / "video-final.mp4").is_file())
+                self.assertEqual(len(list((export_directory / "tomadas").glob("*.mp4"))), 2)
+            finally:
+                server.OPERATIONAL_DB = original_database
+                server.COMPOSED_VIDEO_OUTPUTS = original_composed_videos
+                server.SCRIPT_EXPORTS = original_script_exports
+
     def test_server_composes_ready_scene_jobs_into_one_local_final_job(self) -> None:
         with tempfile.TemporaryDirectory(dir=server.ROOT / "data") as temporary:
             root = Path(temporary)
             original_database = server.OPERATIONAL_DB
             original_video_slides = server.VIDEO_SLIDE_OUTPUTS
             original_composed_videos = server.COMPOSED_VIDEO_OUTPUTS
+            original_script_exports = server.SCRIPT_EXPORTS
             server.OPERATIONAL_DB = root / "operations.db"
             server.VIDEO_SLIDE_OUTPUTS = root / "video_slides"
             server.COMPOSED_VIDEO_OUTPUTS = root / "composed_videos"
+            server.SCRIPT_EXPORTS = root / "Exports" / "roteiro"
             try:
                 script_id = "script-compose"
                 server._save_production_profile(
@@ -506,19 +637,25 @@ class VideoComposerTests(unittest.TestCase):
                 self.assertEqual(result["status"], "pronto")
                 self.assertEqual(result["sceneCount"], 3)
                 self.assertEqual(result["visualCount"], 0)
-                self.assertEqual(result["transitionStyle"], "smooth")
+                self.assertEqual(result["transitionStyle"], "hard_cut")
                 self.assertEqual(result["sourceSceneJobs"], ["sv-1", "sv-2", "sv-3"])
                 output_path = server.ROOT / result["outputPath"]
                 self.assertTrue(output_path.is_file())
-                self.assertEqual(result["composition"]["segmentCount"], 3)
-                self.assertEqual(result["composition"]["cutPolicy"], "smooth")
+                self.assertEqual(result["composition"]["segmentCount"], 4)
+                self.assertEqual(result["composition"]["cutPolicy"], "hard_cut")
                 self.assertNotIn("visualOverlay", result["composition"]["segments"][0])
                 self.assertNotIn("visualOverlay", result["composition"]["segments"][1])
                 self.assertNotIn("visualOverlay", result["composition"]["segments"][2])
+                self.assertEqual(
+                    result["composition"]["segments"][3]["kind"],
+                    "medical_end_card",
+                )
+                self.assertEqual(result["exportVersion"], "1.1")
             finally:
                 server.OPERATIONAL_DB = original_database
                 server.VIDEO_SLIDE_OUTPUTS = original_video_slides
                 server.COMPOSED_VIDEO_OUTPUTS = original_composed_videos
+                server.SCRIPT_EXPORTS = original_script_exports
 
 
 if __name__ == "__main__":

@@ -16,8 +16,10 @@ import re
 import unicodedata
 from typing import Any, Literal
 
+from api.services.medical_identity import MEDICAL_EDITORIAL_PROMPT
 
-DurationPreset = Literal[10, 15, 30, 45, 60]
+
+DurationPreset = Literal[10, 15, 30, 45, 60, 90, 120, 180]
 DurationStatus = Literal["ideal", "warning", "blocking"]
 MedicalReviewStatus = Literal["not_required", "recommended", "required", "approved"]
 TitleAlignmentStatus = Literal["aligned", "possible_mismatch", "unknown"]
@@ -242,7 +244,7 @@ EDITOR_OUTPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "operation": {"type": "string", "enum": ["medical_rewrite", "fit_duration"]},
-        "script": {"type": "string", "minLength": 1},
+        "script": {"type": "string"},
         "summaryOfChanges": {"type": "array", "items": {"type": "string"}},
         "titleAlignment": {
             "type": "object",
@@ -277,7 +279,7 @@ EDITOR_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
-MEDICAL_EDITORIAL_SYSTEM_PROMPT = """Você é editor médico de roteiros falados em português brasileiro.
+MEDICAL_EDITORIAL_SYSTEM_PROMPT = f"""Você é editor médico de roteiros falados em português brasileiro.
 Perfil editorial: médico experiente falando diretamente para a câmera, para pessoas comuns. O tom é seguro,
 didático, natural e assertivo. A autoridade vem de clareza e precisão, nunca de jargão.
 
@@ -297,7 +299,9 @@ Segurança editorial obrigatória:
 - Se a fonte não sustentar uma afirmação, retire-a ou marque revisão humana em vez de completar lacunas.
 
 A duração é uma avaliação local posterior. O limite rígido é uma margem de segurança, não uma meta para preencher.
-Retorne somente o JSON do schema solicitado."""
+Retorne somente o JSON do schema solicitado.
+
+{MEDICAL_EDITORIAL_PROMPT}"""
 
 
 def build_editor_prompt(payload: dict[str, Any]) -> tuple[str, str]:
@@ -532,7 +536,6 @@ def evaluate_generation_gate(
     technical_error: str | None,
     medical_review: MedicalReviewStatus,
     human_review_approved: bool,
-    script_status: str,
     final_saved: bool,
     final_confirmed: bool,
 ) -> GenerationGate:
@@ -550,8 +553,6 @@ def evaluate_generation_gate(
         reasons.append({"code": "technical_error", "message": "Resolva o erro técnico do editor antes de gerar."})
     if medical_review == "required" and not human_review_approved:
         reasons.append({"code": "medical_review_required", "message": "A revisão médica obrigatória ainda não foi aprovada."})
-    if script_status != "aprovado_clinicamente":
-        reasons.append({"code": "script_not_ready", "message": "Marque o roteiro como Pronto após a revisão editorial."})
     if not final_saved:
         reasons.append({"code": "unsaved", "message": "Salve a fala final antes de gerar o vídeo."})
     if not final_confirmed:

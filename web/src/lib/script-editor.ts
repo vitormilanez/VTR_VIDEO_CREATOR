@@ -1,6 +1,6 @@
 import contractData from "../../../shared/script_editor_contract.json";
 
-export type DurationPreset = 10 | 15 | 30 | 45 | 60;
+export type DurationPreset = 10 | 15 | 30 | 45 | 60 | 90 | 120 | 180;
 export type DurationStatus = "ideal" | "warning" | "blocking";
 export type MedicalReviewStatus = "not_required" | "recommended" | "required" | "approved";
 export type TitleAlignmentStatus = "aligned" | "possible_mismatch" | "unknown";
@@ -83,7 +83,6 @@ export interface GenerationGateInput {
   technicalError?: string | null;
   medicalReviewStatus: MedicalReviewStatus;
   humanReviewApproved: boolean;
-  scriptStatus: string;
   finalSaved: boolean;
   finalConfirmed: boolean;
 }
@@ -200,12 +199,6 @@ export function evaluateGenerationGate(input: GenerationGateInput): GenerationGa
     reasons.push({
       code: "medical_review_required",
       message: "A revisão médica obrigatória ainda não foi aprovada.",
-    });
-  }
-  if (input.scriptStatus !== "aprovado_clinicamente") {
-    reasons.push({
-      code: "script_not_ready",
-      message: "Marque o roteiro como Pronto após a revisão editorial.",
     });
   }
   if (!input.finalSaved) {

@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from api.services.medical_identity import MEDICAL_EDITORIAL_PROMPT
 from api.services.story_contract import StoryBrief, canonical_hash
 
 
@@ -18,7 +19,7 @@ STORY_CRITIC_SCHEMA: dict[str, Any] = json.loads(
     STORY_CRITIC_CONTRACT_PATH.read_text(encoding="utf-8")
 )
 STORY_CRITIC_CONTRACT_VERSION = "story-critic-v1"
-STORY_CRITIC_PROMPT_VERSION = "story-critic-prompt-v1"
+STORY_CRITIC_PROMPT_VERSION = "story-critic-prompt-v2-editorial-profile"
 
 
 class StrictModel(BaseModel):
@@ -290,7 +291,8 @@ def build_story_critic_prompt(
         "e adequação do provider. Use somente os códigos, shotIds e providers do schema/contexto. "
         "suggestedAction deve corrigir direção visual, ordem ou provider; nunca conteúdo clínico. "
         "Avalie todos os shots exatamente uma vez e na ordem original. Não estime preço: o backend "
-        "calcula orçamento deterministicamente. Não inclua texto fora do JSON."
+        "calcula orçamento deterministicamente. Não inclua texto fora do JSON.\n\n"
+        + MEDICAL_EDITORIAL_PROMPT
     )
     system = [
         {"type": "text", "text": rules, "cache_control": {"type": "ephemeral"}},

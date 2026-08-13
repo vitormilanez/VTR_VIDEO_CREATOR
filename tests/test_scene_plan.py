@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from api import server
 
@@ -50,7 +53,7 @@ class ScenePlanTests(unittest.TestCase):
 
         self.assertEqual([scene["avatarId"] for scene in plan["scenes"]], ["look-close", "look-front"])
         self.assertEqual([scene["order"] for scene in plan["scenes"]], [1, 2])
-        self.assertEqual(plan["transitionStyle"], "smooth")
+        self.assertEqual(plan["transitionStyle"], "hard_cut")
         self.assertEqual(server._scene_plan("script-1"), plan)
 
     def test_scene_plan_persists_transition_and_syncs_to_new_saved_speech(self) -> None:
@@ -245,6 +248,18 @@ class ScenePlanTests(unittest.TestCase):
         self.assertEqual(plan["scenes"][0]["avatarId"], "look-only")
         self.assertEqual(plan["scenes"][0]["lookRole"], "close")
 
+    def test_semantic_scene_plan_can_exist_before_avatar_selection(self) -> None:
+        plan = server._save_semantic_scene_plan(
+            "script-without-avatar",
+            [
+                {"id": "scene-1", "text": "Gancho educativo.", "lookRole": "primary"},
+                {"id": "scene-2", "text": "Explicação responsável.", "lookRole": "primary"},
+            ],
+        )
+
+        self.assertEqual([scene["avatarId"] for scene in plan["scenes"]], ["", ""])
+        self.assertEqual(server._refresh_scene_plan_avatar_bindings("script-without-avatar"), plan)
+
     def test_scene_director_requires_explicit_claude_configuration(self) -> None:
         payload = server.SceneDirectorIn(displayText="Texto educativo para dividir em cenas.")
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": ""}, clear=False), patch.object(
@@ -263,6 +278,10 @@ class ScenePlanTests(unittest.TestCase):
             "ok": True,
             "provider": "claude",
             "promptVersion": server.SCENE_DIRECTOR_PROMPT_VERSION,
+            "model": "claude-haiku-4-5",
+            "modelTier": "haiku",
+            "adjustedScript": "Cache",
+            "scriptChanges": [],
             "scenes": [{"text": "Cache", "lookRole": "primary", "reason": "hook"}],
         }
         payload = server.SceneDirectorIn(displayText="Texto educativo para dividir em cenas.")
@@ -280,6 +299,241 @@ class ScenePlanTests(unittest.TestCase):
         self.assertEqual(cache_get.call_args.args[0], "scene-plan.direct")
         self.assertEqual(cache_get.call_args.args[1]["promptVersion"], server.SCENE_DIRECTOR_PROMPT_VERSION)
         record_usage.assert_not_called()
+
+    def test_scene_director_mock_uses_sonnet_and_preserves_two_camera_script(self) -> None:
+        """Mock Claude so the model, medical prompt and returned cuts stay observable."""
+        adjusted_script = (
+            "Em cerca de 20% dos casos, esse sintoma pode aparecer sem gravidade. "
+            "O contexto e a persistência ajudam a decidir quando procurar avaliação."
+        )
+        raw_response = {
+            "adjustedScript": adjusted_script,
+            "scriptChanges": ["Simplifiquei a explicação e mantive o número de 20%."],
+            "scenes": [
+                {
+                    "text": "Em cerca de 20% dos casos, esse sintoma pode aparecer sem gravidade.",
+                    "lookRole": "standing",
+                    "reason": "abertura com dado necessário",
+                },
+                {
+                    "text": "O contexto e a persistência ajudam a decidir quando procurar avaliação.",
+                    "lookRole": "seated",
+                    "reason": "explicação e orientação final",
+                },
+            ],
+        }
+        def strict_anthropic_create(**kwargs: object) -> SimpleNamespace:
+            def assert_compatible(value: object) -> None:
+                if isinstance(value, dict):
+                    assert "minItems" not in value
+                    assert "maxItems" not in value
+                    for child in value.values():
+                        assert_compatible(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        assert_compatible(child)
+
+            schema = kwargs["output_config"]["format"]["schema"]  # type: ignore[index]
+            assert_compatible(schema)
+            return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(raw_response))])
+
+        create_message = Mock(side_effect=strict_anthropic_create)
+        fake_anthropic = SimpleNamespace(
+            Anthropic=lambda: SimpleNamespace(messages=SimpleNamespace(create=create_message)),
+            APIStatusError=RuntimeError,
+        )
+        payload = server.SceneDirectorIn(
+            displayText=adjusted_script,
+            spokenText=adjusted_script,
+            durationSeconds=30,
+            modelTier="sonnet",
+        )
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=True), patch.dict(
+            sys.modules, {"anthropic": fake_anthropic}
+        ), patch.object(
+            server, "_find_script", return_value={"id": "script-director", "titulo": "Sintoma"}
+        ), patch.object(
+            server,
+            "_production_profile",
+            return_value={"avatarMode": "set", "avatarSetId": "set-doctor"},
+        ), patch.object(
+            server,
+            "_get_avatar_set",
+            return_value={
+                "looks": [
+                    {"role": "standing", "avatarId": "look-standing"},
+                    {"role": "seated", "avatarId": "look-seated"},
+                ]
+            },
+        ), patch.object(server, "_ai_cache_get", return_value=None), patch.object(
+            server, "_ai_cache_put"
+        ), patch.object(server, "_record_anthropic_usage"):
+            response = server.direct_scene_plan("script-director", payload)
+
+        self.assertEqual(response["modelTier"], "sonnet")
+        self.assertEqual(response["model"], "claude-sonnet-4-6")
+        self.assertEqual(response["adjustedScript"], adjusted_script)
+        self.assertEqual([scene["lookRole"] for scene in response["scenes"]], ["standing", "seated"])
+        create_message.assert_called_once()
+        call = create_message.call_args.kwargs
+        self.assertEqual(call["model"], "claude-sonnet-4-6")
+        self.assertIn("médico gravando vídeos de redes sociais", call["system"])
+        self.assertIn("números", call["system"])
+
+    def test_scene_director_retries_an_available_sonnet_when_the_primary_model_is_missing(self) -> None:
+        class ModelNotFoundError(Exception):
+            status_code = 404
+            message = "model not found"
+
+        adjusted_script = "Abertura simples para o paciente. Explicação final com orientação responsável."
+        raw_response = {
+            "adjustedScript": adjusted_script,
+            "scriptChanges": ["Mantive a explicação acessível."],
+            "scenes": [
+                {
+                    "text": "Abertura simples para o paciente.",
+                    "lookRole": "standing",
+                    "reason": "abertura",
+                },
+                {
+                    "text": "Explicação final com orientação responsável.",
+                    "lookRole": "seated",
+                    "reason": "continuidade",
+                },
+            ],
+        }
+
+        def create_message(**kwargs: object) -> SimpleNamespace:
+            if kwargs["model"] == "claude-sonnet-4-6":
+                raise ModelNotFoundError()
+            return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(raw_response))])
+
+        create = Mock(side_effect=create_message)
+        list_models = Mock(
+            return_value=SimpleNamespace(
+                data=[
+                    SimpleNamespace(id="claude-haiku-4-5-20251001"),
+                    SimpleNamespace(id="claude-sonnet-4-5-20250929"),
+                ]
+            )
+        )
+        client = SimpleNamespace(
+            messages=SimpleNamespace(create=create),
+            models=SimpleNamespace(list=list_models),
+        )
+        fake_anthropic = SimpleNamespace(
+            Anthropic=lambda: client,
+            APIStatusError=ModelNotFoundError,
+        )
+        payload = server.SceneDirectorIn(
+            displayText=adjusted_script,
+            spokenText=adjusted_script,
+            durationSeconds=30,
+            modelTier="sonnet",
+        )
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=True), patch.dict(
+            sys.modules, {"anthropic": fake_anthropic}
+        ), patch.object(
+            server, "_find_script", return_value={"id": "script-director", "titulo": "Sintoma"}
+        ), patch.object(
+            server,
+            "_production_profile",
+            return_value={"avatarMode": "set", "avatarSetId": "set-doctor"},
+        ), patch.object(
+            server,
+            "_get_avatar_set",
+            return_value={
+                "looks": [
+                    {"role": "standing", "avatarId": "look-standing"},
+                    {"role": "seated", "avatarId": "look-seated"},
+                ]
+            },
+        ), patch.object(server, "_ai_cache_get", return_value=None), patch.object(
+            server, "_ai_cache_put"
+        ), patch.object(server, "_record_anthropic_usage"):
+            response = server.direct_scene_plan("script-director", payload)
+
+        self.assertEqual(response["modelTier"], "sonnet")
+        self.assertEqual(response["requestedModel"], "claude-sonnet-4-6")
+        self.assertEqual(response["model"], "claude-sonnet-4-5-20250929")
+        self.assertTrue(response["fallbackUsed"])
+        self.assertEqual(
+            [call.kwargs["model"] for call in create.call_args_list],
+            ["claude-sonnet-4-6", "claude-sonnet-4-5-20250929"],
+        )
+        list_models.assert_called_once_with(limit=100)
+
+    def test_scene_director_schema_avoids_anthropic_array_size_keywords(self) -> None:
+        def assert_compatible(value: object) -> None:
+            if isinstance(value, dict):
+                self.assertNotIn("minItems", value)
+                self.assertNotIn("maxItems", value)
+                for child in value.values():
+                    assert_compatible(child)
+            elif isinstance(value, list):
+                for child in value:
+                    assert_compatible(child)
+
+        assert_compatible(server._SCENE_DIRECTOR_SCHEMA)
+
+    def test_scene_director_rejects_intermediate_closing_phrase(self) -> None:
+        with self.assertRaises(server.HTTPException) as raised:
+            server._normalize_scene_director_response(
+                {
+                    "adjustedScript": "Em resumo, não ignore os sinais. Procure avaliação se persistir.",
+                    "scriptChanges": [],
+                    "scenes": [
+                        {
+                            "text": "Em resumo, não ignore os sinais.",
+                            "lookRole": "standing",
+                            "reason": "abertura",
+                        },
+                        {
+                            "text": "Procure avaliação se persistir.",
+                            "lookRole": "seated",
+                            "reason": "orientação",
+                        },
+                    ],
+                },
+                available_roles=["standing", "seated"],
+                duration_seconds=30,
+            )
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertIn("encerramento", str(raised.exception.detail))
+
+    def test_two_camera_continuity_requires_same_mocked_identity_and_voice(self) -> None:
+        generation = SimpleNamespace(
+            requests=(
+                SimpleNamespace(avatar_id="look-standing", voice_id="voice-fixed"),
+                SimpleNamespace(avatar_id="look-seated", voice_id="voice-fixed"),
+            )
+        )
+        continuity = server._validate_two_camera_continuity(
+            generation=generation,
+            profile={"avatarMode": "set", "voiceId": "voice-fixed"},
+            private_looks=[
+                {"id": "look-standing", "group_id": "doctor-1"},
+                {"id": "look-seated", "group_id": "doctor-1"},
+            ],
+        )
+        self.assertEqual(continuity["mode"], "two_camera_locked")
+        self.assertEqual(continuity["avatarGroupId"], "doctor-1")
+        self.assertEqual(continuity["voiceId"], "voice-fixed")
+        self.assertFalse(continuity["backgroundMusic"])
+        self.assertEqual(continuity["cutPolicy"], "hard_cut")
+
+        with self.assertRaises(server.HTTPException) as raised:
+            server._validate_two_camera_continuity(
+                generation=generation,
+                profile={"avatarMode": "set", "voiceId": "voice-fixed"},
+                private_looks=[
+                    {"id": "look-standing", "group_id": "doctor-1"},
+                    {"id": "look-seated", "group_id": "other-doctor"},
+                ],
+            )
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("mesma identidade", str(raised.exception.detail))
 
     def test_visual_director_requires_saved_scene_plan(self) -> None:
         payload = server.VisualDirectorIn(displayText="Texto educativo para apoiar visualmente.")

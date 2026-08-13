@@ -8,12 +8,16 @@ export function WeeklyArchiveSwitch({
   onChange,
   currentCount,
   archiveCount,
+  currentLabel = "Atuais",
+  archiveLabel = "Arquivo",
   className,
 }: {
   value: WeeklyView;
   onChange: (value: WeeklyView) => void;
   currentCount: number;
   archiveCount: number;
+  currentLabel?: string;
+  archiveLabel?: string;
   className?: string;
 }) {
   return (
@@ -50,13 +54,13 @@ export function WeeklyArchiveSwitch({
       >
         <ArchiveButton
           active={value === "current"}
-          label="Atuais"
+          label={currentLabel}
           count={currentCount}
           onClick={() => onChange("current")}
         />
         <ArchiveButton
           active={value === "archive"}
-          label="Arquivo"
+          label={archiveLabel}
           count={archiveCount}
           onClick={() => onChange("archive")}
         />

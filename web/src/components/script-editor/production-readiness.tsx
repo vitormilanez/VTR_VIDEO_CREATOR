@@ -160,7 +160,6 @@ export function ProductionReadinessCard({
   voiceReady,
   speechReady,
   speechIssue,
-  approvalReady,
   saved,
 }: {
   catalogLoading: boolean;
@@ -169,11 +168,10 @@ export function ProductionReadinessCard({
   voiceReady: boolean;
   speechReady: boolean;
   speechIssue?: string;
-  approvalReady: boolean;
   saved: boolean;
 }) {
   const blockingReady =
-    !catalogLoading && avatarReady && voiceReady && speechReady && approvalReady;
+    !catalogLoading && avatarReady && voiceReady && speechReady && saved;
   const checks = [
     {
       label: "Avatar",
@@ -194,16 +192,10 @@ export function ProductionReadinessCard({
       detail: speechIssue || "Sem alertas de duração ou encerramento",
     },
     {
-      label: "Revisão",
-      ready: approvalReady,
-      pending: false,
-      detail: approvalReady ? "Roteiro marcado como Pronto" : 'Altere o status para "Pronto"',
-    },
-    {
-      label: "Sheets",
+      label: "Roteiro",
       ready: saved,
       pending: false,
-      detail: saved ? "Roteiro sincronizado" : "Será salvo automaticamente ao enviar",
+      detail: saved ? "Alterações salvas" : "Será salvo automaticamente ao enviar",
     },
   ];
 

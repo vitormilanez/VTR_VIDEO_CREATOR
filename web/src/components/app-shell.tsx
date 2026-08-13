@@ -15,6 +15,7 @@ import {
   Scissors,
   Newspaper,
   Layers3,
+  Clapperboard,
 } from "lucide-react";
 import {
   Sidebar,
@@ -56,8 +57,9 @@ const navGroups: Array<{ label: string | null; items: NavItem[] }> = [
   {
     label: "Producao",
     items: [
-      { title: "Producao de videos", url: "/producao", icon: Film },
-      { title: "Kit gráfico local", url: "/kit-local", icon: Layers3 },
+      { title: "Cinematic", url: "/cinematic", icon: Clapperboard },
+      { title: "Produção de vídeos", url: "/producao", icon: Film },
+      { title: "Editor de vídeo", url: "/kit-local", icon: Layers3 },
       { title: "Cortes", url: "/cortes", icon: Scissors },
       { title: "Avatares", url: "/avatares", icon: ScanFace },
       { title: "Pack de conteudo", url: "/packs", icon: PanelsTopLeft },

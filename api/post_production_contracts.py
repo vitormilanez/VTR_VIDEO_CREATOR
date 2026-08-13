@@ -13,6 +13,11 @@ class InteractionType(str, Enum):
     kinetic_text = "kinetic_text"
     progressive_list = "progressive_list"
     supporting_visual = "supporting_visual"
+    definition_card = "definition_card"
+    number_card = "number_card"
+    comparison_card = "comparison_card"
+    quote_card = "quote_card"
+    evidence_card = "evidence_card"
     cta_card = "cta_card"
 
 
@@ -20,6 +25,19 @@ class ReviewStatus(str, Enum):
     pending = "pending"
     approved = "approved"
     rejected = "rejected"
+
+
+OverlayPosition = Literal[
+    "top_left",
+    "top_center",
+    "top_right",
+    "center_left",
+    "center",
+    "center_right",
+    "bottom_left",
+    "bottom_center",
+    "bottom_right",
+]
 
 
 class TranscriptWord(BaseModel):
@@ -69,12 +87,20 @@ class VisualPlan(BaseModel):
     modelVersion: str
     transcriptVersion: str
     videoFingerprint: str
+    contentType: str = "general"
+    summary: str = ""
+    strategy: str = ""
+    noVisualReason: str = ""
     events: list[VisualPlanEvent]
 
 
 class VisualTimelineEvent(VisualPlanEvent):
     startMs: int = Field(ge=0)
     endMs: int = Field(ge=0)
+    timingSource: Literal["transcript", "manual"] = "transcript"
+    screenPosition: OverlayPosition = "top_right"
+    backgroundColor: str = Field(default="#073e4b", pattern=r"^#[0-9a-fA-F]{6}$")
+    backgroundOpacity: float = Field(default=0.9, ge=0.15, le=1)
     spokenText: str
     reviewStatus: ReviewStatus = ReviewStatus.pending
     enabled: bool = True
@@ -105,11 +131,15 @@ class PreflightReport(BaseModel):
 class PostProductionJob(BaseModel):
     id: str
     kind: Literal["post_production"] = "post_production"
-    videoJobId: str
+    videoJobId: str | None = None
+    uploadId: str | None = None
     status: Literal[
-        "queued", "transcribing", "planning", "preflight", "rendering_preview",
+        "queued", "transcribing", "planning", "preflight", "generating_pack", "rendering_preview",
         "preview_ready", "failed", "cancelled", "stale", "needs_review",
     ]
     progresso: int = Field(ge=0, le=100)
+    captionsStatus: Literal["ready", "failed"] | None = None
+    captionsPath: str | None = None
+    captionCueCount: int = Field(default=0, ge=0)
     criadoEm: str
     atualizadoEm: str

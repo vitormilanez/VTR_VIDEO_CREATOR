@@ -13,6 +13,11 @@ from unittest.mock import MagicMock, patch
 
 from api import cut_service, server
 from api.job_store import JobStore
+from api.services.medical_identity import (
+    MEDICAL_DEFAULT_SAFE_CTA,
+    MEDICAL_PUBLICATION_NOTICE,
+    has_prohibited_editorial_cta,
+)
 
 
 SCRIPT_HEADERS = server.SCRIPT_HEADERS.copy()
@@ -371,9 +376,18 @@ class StableIdTests(unittest.TestCase):
                 server.OPERATIONAL_DB = original_database
                 server.VIDEO_JOBS = original_jobs
 
-    def test_heygen_rejects_script_before_review_is_complete(self) -> None:
-        payload = server.VideoCreateIn(scriptId="s-em-revisao")
-        job = {"id": "v-bloqueado", "productionSettings": {}}
+    def test_heygen_accepts_a_valid_script_regardless_of_legacy_status(self) -> None:
+        payload = server.VideoCreateIn(
+            scriptId="s-em-revisao",
+            avatarId="avatar-1",
+            voiceId="voice-1",
+            narrationText="Texto em revisão.",
+            displayText="Texto em revisão.",
+            spokenText="Texto em revisão.",
+            outroText="",
+        )
+        job = {"id": "v-sem-status", "scriptId": "s-em-revisao", "productionSettings": {}}
+        store = MagicMock()
         with patch.object(server, "_heygen_cli", return_value="heygen"), patch.object(
             server,
             "_find_script",
@@ -382,12 +396,22 @@ class StableIdTests(unittest.TestCase):
                 "status": "em_revisao",
                 "textoFalado": "Texto em revisão.",
             },
-        ), patch.object(server, "_heygen_wallet") as wallet:
-            with self.assertRaises(server.HTTPException) as raised:
-                server._create_video_job(payload, job)
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertIn("marcado como Pronto", raised.exception.detail)
-        wallet.assert_not_called()
+        ), patch.object(
+            server,
+            "_private_avatar_library",
+            return_value=([], [{"id": "avatar-1", "status": "completed"}], False),
+        ), patch.object(server, "_save_production_profile"), patch.object(
+            server, "_job_store", return_value=store
+        ), patch.object(server, "_heygen_wallet", return_value=(None, None)), patch.object(
+            server,
+            "_run_heygen_json",
+            return_value={"data": {"video_id": "direct-video-legacy-status", "status": "pending"}},
+        ) as run:
+            result = server._create_video_job(payload, job)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["job"]["remoteVideoId"], "direct-video-legacy-status")
+        run.assert_called_once()
 
     def test_refresh_direct_video_uses_video_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -464,7 +488,7 @@ class StableIdTests(unittest.TestCase):
         self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, prompt)
 
     def test_video_prompt_respects_custom_outro(self) -> None:
-        custom_outro = "Continue acompanhando para entender os próximos estudos."
+        custom_outro = "Guarde este ponto para consultar com calma."
         prompt = server._video_prompt(
             {"hook": "Texto original"},
             narration_text=f"Texto falado revisado. {custom_outro}",
@@ -475,7 +499,7 @@ class StableIdTests(unittest.TestCase):
         self.assertNotIn(server.MANDATORY_VIDEO_OUTRO, prompt)
 
     def test_script_generation_fallback_preserves_tone_and_custom_outro(self) -> None:
-        custom_outro = "Salve para rever este estudo com calma."
+        custom_outro = "Guarde este estudo para uma revisão cuidadosa."
         payload = server.GenerateScriptIn(
             idea=server.IdeaForScriptIn(
                 titulo="O que este estudo realmente encontrou",
@@ -839,7 +863,9 @@ class StableIdTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=server.ROOT / "data") as temporary:
             root = Path(temporary)
             original_outputs = server.PRODUCED_VIDEO_OUTPUTS
+            original_exports = server.SCRIPT_EXPORTS
             server.PRODUCED_VIDEO_OUTPUTS = root / "content" / "videos" / "produzidos"
+            server.SCRIPT_EXPORTS = root / "Exports" / "roteiro"
             response = MagicMock()
             response.raise_for_status.return_value = None
             response.iter_content.return_value = [b"video-", b"content"]
@@ -859,12 +885,17 @@ class StableIdTests(unittest.TestCase):
                     archived = server._archive_completed_video(job)
             finally:
                 server.PRODUCED_VIDEO_OUTPUTS = original_outputs
+                server.SCRIPT_EXPORTS = original_exports
 
             output = server.ROOT / archived["outputPath"]
             self.assertEqual(output.read_bytes(), b"video-content")
             self.assertIn("content/videos/produzidos", archived["outputPath"])
             self.assertEqual(archived["remoteVideoUrl"], job["remoteVideoUrl"])
             self.assertEqual(archived["videoUrl"], "/api/videos/v-ready/file")
+            self.assertEqual(archived["exportVersion"], "1.1")
+            export_directory = server.ROOT / archived["exportPath"]
+            self.assertEqual((export_directory / "video-final.mp4").read_bytes(), b"video-content")
+            self.assertTrue((export_directory / "metadados-da-geracao.json").is_file())
             get.assert_called_once_with(
                 "https://files2.heygen.ai/video/v-ready.mp4",
                 stream=True,
@@ -1249,6 +1280,44 @@ class StableIdTests(unittest.TestCase):
         )
         self.assertEqual(clips[0]["start"], 0)
         self.assertIn("Vou explicar", clips[0]["caption"])
+        self.assertIn("CRM-SP 182.364", clips[0]["caption"])
+
+    def test_cached_cut_caption_receives_required_identification(self) -> None:
+        transcript = {
+            "duration": 20,
+            "segments": [{"start": 0, "end": 20, "text": "Texto completo para um corte."}],
+        }
+        cached = {
+            "clips": [
+                {
+                    "title": "Corte",
+                    "start": 0,
+                    "end": 20,
+                    "score": 90,
+                    "hook": "Texto",
+                    "summary": "Texto",
+                    "cta": "Quer mais dicas? Siga e acompanhe.",
+                    "caption": "Legenda antiga sem identificação.\n\nQuer mais dicas? Siga e acompanhe.",
+                    "cover": "CORTE",
+                    "hashtags": "#saude",
+                    "reason": "Completo.",
+                }
+            ]
+        }
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
+            clips, mode = cut_service._suggest_clips(
+                transcript,
+                count=1,
+                min_duration=10,
+                max_duration=30,
+                cache_get=lambda *_args: cached,
+            )
+
+        self.assertEqual(mode, "anthropic-cache")
+        self.assertIn(MEDICAL_PUBLICATION_NOTICE, clips[0]["caption"])
+        self.assertFalse(has_prohibited_editorial_cta(clips[0]["caption"]))
+        self.assertEqual(clips[0]["cta"], MEDICAL_DEFAULT_SAFE_CTA)
 
     def test_context_safe_bounds_never_start_or_end_mid_idea(self) -> None:
         segments = [
@@ -1436,6 +1505,8 @@ class StableIdTests(unittest.TestCase):
         self.assertIn(approved_script, prompt)
         self.assertIn("VOICE DELIVERY", prompt)
         self.assertIn("upbeat, lively and optimistic", prompt)
+        self.assertIn("concept and theme to convey", prompt)
+        self.assertIn("Preserve the script's central thesis", prompt)
         self.assertIn("CINEMATIC DIRECTION", prompt)
         self.assertIn("do not read aloud", prompt)
         self.assertIn("Gui andando pela cidade", prompt)
@@ -1557,7 +1628,7 @@ class StableIdTests(unittest.TestCase):
         self.assertGreater(upbeat["voice_settings"]["speed"], neutral["voice_settings"]["speed"])
         self.assertNotIn("emotion", upbeat["voice_settings"])
 
-    def test_spoken_text_compliance_blocks_before_heygen_submission(self) -> None:
+    def test_spoken_text_compliance_is_reported_as_warning(self) -> None:
         safe_display = "Este conteúdo é educativo e reforça que decisões de saúde precisam de avaliação individual com profissional qualificado em cada situação."
         unsafe_spoken_texts = [
             "Tome 10 mg todos os dias para começar.",
@@ -1565,28 +1636,10 @@ class StableIdTests(unittest.TestCase):
             "Este tratamento entrega resultado garantido rapidamente.",
         ]
         for unsafe_spoken in unsafe_spoken_texts:
-            payload = server.VideoCreateIn(
-                scriptId="s-safe",
-                avatarId="avatar-1",
-                voiceId="voice-1",
-                durationSeconds=10,
-                narrationText=safe_display,
-                displayText=safe_display,
-                spokenText=unsafe_spoken,
-                outroText="",
-            )
-            with (
-                patch.object(server, "_find_script", return_value={"id": "s-safe", "status": "aprovado_clinicamente"}),
-                patch.object(server, "_run_heygen_json") as heygen_call,
-                patch.object(server, "_private_avatar_library") as avatar_library,
-            ):
-                with self.assertRaises(server.HTTPException) as raised:
-                    server._create_video_job(payload, {"id": "v-safe", "productionSettings": {}})
-            self.assertEqual(raised.exception.status_code, 422)
-            heygen_call.assert_not_called()
-            avatar_library.assert_not_called()
+            warnings = server._production_compliance_warnings(safe_display, unsafe_spoken)
+            self.assertTrue(warnings)
 
-    def test_preview_uses_direct_mode_and_validates_spoken_text_before_submission(self) -> None:
+    def test_preview_uses_direct_mode_and_keeps_compliance_as_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             original_database = server.OPERATIONAL_DB
             original_jobs = server.VIDEO_JOBS
@@ -1602,10 +1655,9 @@ class StableIdTests(unittest.TestCase):
                     displayText=safe_display,
                     spokenText="Tome 10 mg agora para garantir resultado.",
                 )
-                with patch.object(server, "_run_heygen_json") as heygen_call:
-                    with self.assertRaises(server.HTTPException):
-                        server.create_video_preview(unsafe)
-                heygen_call.assert_not_called()
+                self.assertTrue(
+                    server._production_compliance_warnings(unsafe.spokenText or "")
+                )
 
                 safe = unsafe.model_copy(update={"spokenText": safe_display})
                 with (

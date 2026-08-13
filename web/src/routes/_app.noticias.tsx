@@ -34,6 +34,7 @@ import {
   generateAndPersistScript,
 } from "@/lib/script-generation";
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
+import type { DurationPreset } from "@/lib/script-editor";
 import { evaluateIdeaQuality } from "@/lib/idea-quality";
 import { splitWeekly, type WeeklyView } from "@/lib/weekly-archive";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -314,7 +315,7 @@ function SocialNewsPage() {
   const [scriptPending, setScriptPending] = useState<SocialScriptPending | null>(null);
   const [captureChoices, setCaptureChoices] = useState<Script[]>([]);
   const [editorialTone, setEditorialTone] = useState<EditorialTone>("neutro");
-  const [scriptDuration, setScriptDuration] = useState<10 | 15 | 30 | 45 | 60>(45);
+  const [scriptDuration, setScriptDuration] = useState<DurationPreset>(45);
   const [scriptOutro, setScriptOutro] = useState(DEFAULT_OUTRO);
 
   const socialWeekly = splitWeekly(trends, () => SOCIAL_SNAPSHOT_AT);
