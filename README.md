@@ -39,6 +39,43 @@ cp .env.example .env
 
 Configure no `.env` as chaves necessarias para o fluxo que pretende usar. Para Google Sheets, veja `docs/setup-google-sheets-api.md`.
 
+## Fundação PostgreSQL multi-tenant
+
+A primeira etapa da migração para PostgreSQL já está disponível de forma opt-in.
+Ela inclui modelos SQLAlchemy, migrations Alembic e isolamento por organização
+com Row Level Security (RLS). O fluxo operacional continua usando Google Sheets
+até que os repositórios e o importador legado sejam conectados em uma etapa
+posterior.
+
+Instale também as dependências da API:
+
+```bash
+.venv/bin/python -m pip install -r api/requirements.txt
+```
+
+Configure uma instância PostgreSQL vazia no `.env`:
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://usuario:senha@localhost:5432/ai_video_creator
+```
+
+Aplique e inspecione a versão do schema:
+
+```bash
+.venv/bin/alembic upgrade head
+.venv/bin/alembic current
+```
+
+Para validar schema, upgrade/downgrade e isolamento entre dois clientes em um
+PostgreSQL local temporário:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_database_foundation.py
+```
+
+O desenho da migração, as fases de cutover e o modelo de domínio estão em
+`docs/plano-migracao-sheets-postgres-multitenant.md`.
+
 ## Comandos de operacao
 
 Buscar tendencias:

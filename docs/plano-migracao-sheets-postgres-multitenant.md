@@ -1,8 +1,13 @@
 # Plano de migração: Google Sheets para PostgreSQL multi-tenant
 
-Status: proposto  
+Status: em execução
 Data: 2026-08-13  
 Branch: `codex/migrate-sheets-to-multitenant-db`
+
+Progresso em 2026-08-14: a fundação SQLAlchemy/Alembic, o schema de 39 tabelas,
+as chaves tenant-aware, o `TenantContext` e as policies RLS estão implementados
+e testados contra PostgreSQL real. Auth/JWKS, onboarding da organização atual,
+repositórios, importadores e cutover permanecem como etapas seguintes.
 
 ## Decisão recomendada
 
@@ -267,4 +272,3 @@ Se dados de pacientes entrarem no escopo no futuro, será necessária uma revis�
 5. migração do SQLite, configurações e identidades/avatar sets;
 6. storage privado e migração de assets;
 7. jobs duráveis, shadow-read, cutover e remoção do legado.
-
