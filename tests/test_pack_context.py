@@ -6,7 +6,13 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from api import server
-from api.services.pack_context import build_pack_context, identity_key, pack_identity
+from api.services.pack_context import (
+    PACK_CONTEXT_VERSION,
+    PACK_EDUCATIONAL_FLOW_VERSION,
+    build_pack_context,
+    identity_key,
+    pack_identity,
+)
 from tests.test_pack_design import sample_pack
 
 
@@ -40,7 +46,7 @@ class PackContextTests(unittest.TestCase):
             design_system={"version": "pack-v1"},
             compliance_rules=[{"titulo": "regra"}],
         )
-        self.assertEqual(context["version"], "pack-context-v2")
+        self.assertEqual(context["version"], PACK_CONTEXT_VERSION)
         self.assertEqual(context["idea"]["ideaId"], "idea-1")
         self.assertEqual(context["performance"]["displayText"], "Fala")
         self.assertEqual(context["designSystem"]["version"], "pack-v1")
@@ -75,6 +81,13 @@ class PackContextTests(unittest.TestCase):
         self.assertEqual(context["idea"]["angulo"], "Explicar o resultado sem culpar a mae.")
         self.assertEqual(context["idea"]["linkOrigem"], "https://example.test/estudo")
         self.assertEqual(len(context["narrativeBrief"]["slidePlan"]), 7)
+        self.assertEqual(
+            context["narrativeBrief"]["educationalFlowVersion"],
+            PACK_EDUCATIONAL_FLOW_VERSION,
+        )
+        self.assertEqual(context["narrativeBrief"]["tone"], "educativo, acolhedor e sem julgamento")
+        self.assertEqual(context["narrativeBrief"]["slidePlan"][1]["stage"], "contexto")
+        self.assertNotIn("tensao", context["narrativeBrief"]["slidePlan"][1]["purpose"])
         self.assertEqual(context["narrativeBrief"]["slidePlan"][3]["sourceText"], script_text := "Genes e ambiente interagem ao longo da vida.")
         self.assertEqual(script_text, context["script"]["explicacaoSimples"])
 
@@ -186,6 +199,9 @@ class PackContextTests(unittest.TestCase):
         self.assertEqual(server.validate_pack_contract(response["pack"]), [])
         self.assertLessEqual(len(response["pack"]["carousel"][1]["fields"]["body"]), 110)
         self.assertLessEqual(len(response["pack"]["carousel"][5]["fields"]["quote"]), 90)
+        self.assertEqual(response["pack"]["educationalFlowVersion"], PACK_EDUCATIONAL_FLOW_VERSION)
+        request = client.messages.create.call_args_list[0].kwargs
+        self.assertIn("TOM EDUCATIVO", request["system"][0]["text"])
 
     def test_pack_endpoint_marks_identity_stale_without_calling_claude(self) -> None:
         with patch.object(server, "_find_script", return_value={"id": "script-1"}), patch.object(
@@ -246,6 +262,7 @@ class PackContextTests(unittest.TestCase):
         cache_payload = cache_get.call_args.args[1]
         self.assertEqual(cache_payload["context"]["idea"]["ideaId"], "idea-1")
         self.assertEqual(cache_payload["identityKey"], "identity-key")
+        self.assertEqual(cache_payload["educationalFlowVersion"], PACK_EDUCATIONAL_FLOW_VERSION)
         self.assertEqual(cache_payload["slideCount"], server.PACK_SLIDE_COUNT)
         self.assertNotIn("family", cache_payload["request"])
         self.assertNotIn("themeId", cache_payload["request"])
@@ -267,6 +284,7 @@ class PackContextTests(unittest.TestCase):
             response = server.get_pack("script-1")
         self.assertFalse(response["outdatedPackSchema"])
         self.assertFalse(response["outdatedAvatar"])
+        self.assertTrue(response["outdatedEducationalFlow"])
         self.assertEqual(len(response["pack"]["carousel"]), server.PACK_SLIDE_COUNT)
         self.assertEqual(response["requiredSlideCount"], server.PACK_SLIDE_COUNT)
 
@@ -295,6 +313,7 @@ class PackContextTests(unittest.TestCase):
         self.assertEqual(response["pack"]["schemaVersion"], server.PACK_SCHEMA_VERSION)
         self.assertEqual(response["pack"]["family"], "didatico")
         self.assertEqual(response["pack"]["themeId"], "ocean-deep")
+        self.assertTrue(response["outdatedEducationalFlow"])
         save_pack.assert_called_once()
 
     def test_pack_presentation_is_saved_without_calling_claude(self) -> None:
@@ -316,6 +335,23 @@ class PackContextTests(unittest.TestCase):
         self.assertEqual(response["pack"]["designPlan"]["themeId"], "modernist-red")
         save_pack.assert_called_once()
         record_usage.assert_not_called()
+
+    def test_new_pack_templates_are_accepted_by_the_api_models(self) -> None:
+        generated = server.PackIn(
+            scriptId="script-1",
+            titulo="Pack",
+            family="manifesto",
+            themeId="soft-sage",
+        )
+        presentation = server.PackPresentationIn(
+            family="clinico",
+            themeId="soft-rose",
+        )
+
+        self.assertEqual(generated.family, "manifesto")
+        self.assertEqual(generated.themeId, "soft-sage")
+        self.assertEqual(presentation.family, "clinico")
+        self.assertEqual(presentation.themeId, "soft-rose")
 
 
 if __name__ == "__main__":

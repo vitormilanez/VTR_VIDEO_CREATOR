@@ -105,9 +105,13 @@ export interface VideoJob {
   remoteVideoId?: string;
   isPreview?: boolean;
   isScene?: boolean;
+  isPodcastScene?: boolean;
+  isPodcast?: boolean;
   isComposed?: boolean;
   sceneId?: string;
   sceneOrder?: number;
+  speakerId?: "a" | "b";
+  speakerName?: string;
   regeneratedFromJobId?: string;
   regenerationCount?: number;
   sourceSceneJobs?: string[];

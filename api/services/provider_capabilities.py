@@ -135,6 +135,7 @@ def build_heygen_capabilities(
             "supportsBrandKitId": "brand_kit_id" in agent_properties,
             "supportsChatMode": "chat" in _enum_values_for_property(video_agent_schema, "mode"),
             "supportsAttachments": "files" in agent_properties,
+            "supportsIncognitoMode": "incognito_mode" in agent_properties,
             "orientations": _enum_values_for_property(video_agent_schema, "orientation"),
             "modes": _enum_values_for_property(video_agent_schema, "mode"),
         },
@@ -173,6 +174,8 @@ def validate_video_agent_options(
     style_id: str | None,
     brand_kit_id: str | None,
     mode: str,
+    files: list[dict[str, str]] | None = None,
+    incognito_mode: bool = False,
 ) -> None:
     agent = capabilities.get("videoAgent") or {}
     if not agent.get("supported"):
@@ -181,6 +184,10 @@ def validate_video_agent_options(
         raise ValueError("O CLI instalado não suporta styleId no Video Agent.")
     if brand_kit_id and not agent.get("supportsBrandKitId"):
         raise ValueError("O CLI instalado não suporta brandKitId no Video Agent.")
+    if files and not agent.get("supportsAttachments"):
+        raise ValueError("O CLI instalado não suporta anexos no Video Agent.")
+    if incognito_mode and not agent.get("supportsIncognitoMode"):
+        raise ValueError("O CLI instalado não suporta modo privado no Video Agent.")
     if mode not in set(agent.get("modes") or []):
         raise ValueError(f"O modo '{mode}' não é suportado pelo Video Agent instalado.")
 
@@ -195,12 +202,16 @@ def video_agent_create_args(
     style_id: str | None = None,
     brand_kit_id: str | None = None,
     mode: str = "generate",
+    files: list[dict[str, str]] | None = None,
+    incognito_mode: bool = False,
 ) -> list[str]:
     validate_video_agent_options(
         capabilities,
         style_id=style_id,
         brand_kit_id=brand_kit_id,
         mode=mode,
+        files=files,
+        incognito_mode=incognito_mode,
     )
     orientations = set((capabilities.get("videoAgent") or {}).get("orientations") or [])
     if orientation not in orientations:
@@ -223,4 +234,8 @@ def video_agent_create_args(
         args.extend(["--style-id", style_id])
     if brand_kit_id:
         args.extend(["--brand-kit-id", brand_kit_id])
+    if files:
+        args.extend(["--data", json.dumps({"files": files}, separators=(",", ":"))])
+    if incognito_mode:
+        args.append("--incognito-mode")
     return args

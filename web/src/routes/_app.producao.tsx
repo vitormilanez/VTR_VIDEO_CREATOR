@@ -118,14 +118,18 @@ export function ProducaoPage() {
               {filtered.map((j) => {
                 const s = scripts.find((x) => x.id === j.scriptId);
                 const jobLabel = j.isComposed
-                  ? "Vídeo final composto"
-                  : j.isScene
-                    ? `Cena ${j.sceneOrder ?? j.sceneId ?? ""}`.trim()
-                    : j.isPreview
-                      ? "Prévia"
-                      : (jobsByScript.get(j.scriptId)?.length || 0) > 1
-                        ? `Versão ${versions.get(j.id)}`
-                        : "";
+                  ? j.isPodcast
+                    ? "Podcast final composto"
+                    : "Vídeo final composto"
+                  : j.isPodcastScene
+                    ? `${j.speakerName || "Podcast"} · fala ${j.sceneOrder ?? ""}`.trim()
+                    : j.isScene
+                      ? `Cena ${j.sceneOrder ?? j.sceneId ?? ""}`.trim()
+                      : j.isPreview
+                        ? "Prévia"
+                        : (jobsByScript.get(j.scriptId)?.length || 0) > 1
+                          ? `Versão ${versions.get(j.id)}`
+                          : "";
                 return (
                   <TableRow key={j.id}>
                     <TableCell className="font-medium">

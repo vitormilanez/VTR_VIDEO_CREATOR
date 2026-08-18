@@ -23,11 +23,12 @@ from api.services.medical_identity import (
 
 PACK_SCHEMA_VERSION = "institute-carousel-v2"
 PACK_SLIDE_COUNT = 7
+EDUCATIONAL_FLOW_VERSION = "educational-flow-v1"
 
 # A apresentação é uma preferência local do Pack. Ela nunca participa do
 # prompt/cache de conteúdo e pode mudar sem chamar o Claude.
-PACK_FAMILIES = ("editorial", "didatico", "storytelling")
-PACK_THEMES = ("modernist-red", "ocean-deep")
+PACK_FAMILIES = ("editorial", "didatico", "storytelling", "manifesto", "clinico")
+PACK_THEMES = ("modernist-red", "ocean-deep", "soft-sage", "soft-rose")
 DEFAULT_PACK_FAMILY = "didatico"
 DEFAULT_PACK_THEME = "modernist-red"
 LEGACY_PACK_THEME = "ocean-deep"
@@ -73,6 +74,45 @@ LEGACY_LAYOUT_MAP = {
 PHOTO_LAYOUTS = {"hero_photo", "photo_split", "doctor_quote", "photo_overlay", "cta_photo"}
 FULL_BLEED_PHOTO_LAYOUTS = {"hero_photo", "photo_overlay"}
 DARK_LAYOUTS = {"hero_photo", "big_statement", "three_points", "photo_overlay", "cta_photo"}
+
+# Todos os Packs novos seguem esta sequência. Ela é usada no prompt, nos
+# metadados de qualidade e em uma validação leve antes de salvar a resposta do
+# Claude. O objetivo é ensinar em progressão, não colecionar frases de efeito.
+EDUCATIONAL_SLIDE_STEPS = (
+    ("Tema e objetivo", "Apresenta o assunto e o que a pessoa vai entender."),
+    ("Contexto", "Organiza uma dúvida comum sem julgamento."),
+    ("Conceito-chave", "Define o ponto central em linguagem simples."),
+    ("Como funciona", "Explica o mecanismo ou contexto em etapas."),
+    ("O que a fonte mostra", "Traduz dado, evidência ou implicação."),
+    ("Cuidados e limites", "Mostra a ressalva necessária com clareza."),
+    ("Resumo e próximo passo", "Retoma o aprendizado e orienta com segurança."),
+)
+EDUCATIONAL_EXPLANATORY_LAYOUTS = {
+    "explainer",
+    "three_points",
+    "myth_fact",
+    "number_stat",
+    "do_dont",
+    "doctor_quote",
+}
+_EDUCATIONAL_TONE_PATTERNS = (
+    (
+        re.compile(r"\bvoc[eê]\s+confunde\b", re.I),
+        "substitua o tom acusatorio por uma comparacao ou explicacao neutra",
+    ),
+    (
+        re.compile(r"\bvoc[eê]\s+(?:esta|está|ta)\s+fazendo\s+(?:tudo\s+)?errado\b", re.I),
+        "retire o julgamento direto sobre quem le",
+    ),
+    (
+        re.compile(r"\bningu[eé]m\s+(?:te\s+)?contou\b", re.I),
+        "troque a frase de efeito por uma explicacao objetiva",
+    ),
+    (
+        re.compile(r"\baquele\s+(?:produto|rem[eé]dio|medicamento|caneta)\s+que\s+(?:achei|vi)\s+por\s+a[ií]\b", re.I),
+        "nomeie a duvida de forma objetiva em vez de usar uma referencia vaga",
+    ),
+)
 
 # Biblioteca canônica de fotos do Pack. Os IDs permanecem estáveis para que
 # carrosséis já salvos continuem apontando para a imagem escolhida.
@@ -536,6 +576,49 @@ def pack_slides(pack: dict[str, Any]) -> list[Any]:
         if isinstance(candidate, list):
             return candidate
     return []
+
+
+def educational_flow_issues(pack: dict[str, Any]) -> list[str]:
+    """Aponta quando a resposta foge da trilha educativa do carrossel.
+
+    A verificacao é propositalmente pequena: ela não tenta reescrever medicina
+    de forma determinística, mas impede que a resposta volte ao padrão de
+    confronto, frases vagas e explicação tardia visto em versões antigas.
+    """
+    raw_slides = pack_slides(pack)
+    if len(raw_slides) != PACK_SLIDE_COUNT:
+        return []
+    slides = [
+        normalize_slide(slide, index)
+        for index, slide in enumerate(raw_slides)
+        if isinstance(slide, dict)
+    ]
+    if len(slides) != PACK_SLIDE_COUNT:
+        return []
+
+    issues: list[str] = []
+    layouts = [str(slide.get("layoutId") or "") for slide in slides]
+    if "explainer" not in layouts[2:4]:
+        issues.append("slides 3 ou 4: inclua um explainer para explicar o conceito antes dos dados")
+    explanation_count = sum(
+        layout in EDUCATIONAL_EXPLANATORY_LAYOUTS for layout in layouts[2:6]
+    )
+    if explanation_count < 2:
+        issues.append("slides 3 a 6: inclua pelo menos dois layouts de explicacao educativa")
+
+    for index, slide in enumerate(slides, start=1):
+        fields = slide.get("fields") if isinstance(slide.get("fields"), dict) else {}
+        values: list[str] = []
+        for value in fields.values():
+            if isinstance(value, dict):
+                values.extend(_text(part) for part in value.values())
+            else:
+                values.append(_text(value))
+        slide_copy = " ".join(value for value in values if value)
+        for pattern, guidance in _EDUCATIONAL_TONE_PATTERNS:
+            if pattern.search(slide_copy):
+                issues.append(f"slide {index}: {guidance}")
+    return list(dict.fromkeys(issues))
 
 
 def _repair_layout_semantics(slide: dict[str, Any]) -> None:

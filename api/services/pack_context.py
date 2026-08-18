@@ -5,8 +5,11 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from api.pack_design import EDUCATIONAL_FLOW_VERSION
 
-PACK_CONTEXT_VERSION = "pack-context-v2"
+
+PACK_CONTEXT_VERSION = "pack-context-v3"
+PACK_EDUCATIONAL_FLOW_VERSION = EDUCATIONAL_FLOW_VERSION
 
 
 def _first_text(*values: Any) -> str:
@@ -33,21 +36,73 @@ def _narrative_brief(
     turn = _first_text(script.get("virada"), explanation)
     care = _first_text(script.get("cuidadosMedicos"), idea.get("observacaoCompliance"))
     cta = _first_text(script.get("cta"), idea.get("cta"), "Converse com um profissional.")
+    learning_goal = _first_text(title, explanation, hook, "o tema")
     return {
         "centralTopic": title,
+        "educationalFlowVersion": PACK_EDUCATIONAL_FLOW_VERSION,
+        "learningGoal": f"Explicar {learning_goal} em linguagem simples, do conceito aos cuidados.",
+        "tone": "educativo, acolhedor e sem julgamento",
+        "plainLanguageRules": [
+            "Comece pelo que a pessoa vai entender, não por uma provocação.",
+            "Defina termos técnicos quando eles aparecerem.",
+            "Prefira comparações claras, exemplos concretos e frases curtas.",
+            "Transforme dúvidas comuns em explicações, sem culpar ou confrontar quem lê.",
+        ],
         "sourcePriority": [
             "approvedScript",
             "linkedIdea",
             "medicalCompliance",
         ],
         "slidePlan": [
-            {"slide": 1, "purpose": "gancho e promessa editorial", "sourceText": hook},
-            {"slide": 2, "purpose": "tensao ou problema", "sourceText": tension},
-            {"slide": 3, "purpose": "ponte para a explicacao", "sourceText": explanation},
-            {"slide": 4, "purpose": "contexto explicado em linguagem simples", "sourceText": explanation},
-            {"slide": 5, "purpose": "evidencia, mecanismo ou virada", "sourceText": turn},
-            {"slide": 6, "purpose": "aplicacao pratica e cuidado", "sourceText": care or turn},
-            {"slide": 7, "purpose": "CTA e disclaimer", "sourceText": cta},
+            {
+                "slide": 1,
+                "stage": "tema e objetivo",
+                "purpose": "apresentar o assunto e o que a pessoa vai entender",
+                "writingDirection": "abertura acolhedora; use o tema sem criar urgência ou confronto",
+                "sourceText": title or hook or explanation,
+            },
+            {
+                "slide": 2,
+                "stage": "contexto",
+                "purpose": "situar uma dúvida comum ou uma distinção importante",
+                "writingDirection": "converta a tensão em pergunta ou comparação neutra, sem acusar quem lê",
+                "sourceText": tension or explanation,
+            },
+            {
+                "slide": 3,
+                "stage": "conceito-chave",
+                "purpose": "definir o conceito central em linguagem cotidiana",
+                "writingDirection": "explique siglas, nomes e termos técnicos antes de avançar",
+                "sourceText": explanation,
+            },
+            {
+                "slide": 4,
+                "stage": "como funciona",
+                "purpose": "explicar o mecanismo ou contexto em passos simples",
+                "writingDirection": "organize a explicação em duas ou três ideias que se conectam",
+                "sourceText": explanation,
+            },
+            {
+                "slide": 5,
+                "stage": "o que a fonte mostra",
+                "purpose": "apresentar evidência, dado ou implicação com contexto",
+                "writingDirection": "se usar dado, diga o que ele significa; sem número isolado ou conclusão além da fonte",
+                "sourceText": turn or explanation,
+            },
+            {
+                "slide": 6,
+                "stage": "cuidados e limites",
+                "purpose": "explicar o que ainda exige cautela ou avaliação individual",
+                "writingDirection": "feche a explicação com limite claro, sem medo ou julgamento",
+                "sourceText": care or turn or explanation,
+            },
+            {
+                "slide": 7,
+                "stage": "resumo e próximo passo",
+                "purpose": "retomar o aprendizado e indicar um próximo passo educativo seguro",
+                "writingDirection": "resuma sem prescrever e use apenas CTA educativo neutro",
+                "sourceText": cta,
+            },
         ],
     }
 

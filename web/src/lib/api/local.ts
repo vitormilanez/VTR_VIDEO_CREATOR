@@ -368,8 +368,8 @@ export async function saveCalendarPost(post: CalendarPost): Promise<CalendarPost
   return response.post;
 }
 
-export type PackFamily = "editorial" | "didatico" | "storytelling";
-export type PackTheme = "modernist-red" | "ocean-deep";
+export type PackFamily = "editorial" | "didatico" | "storytelling" | "manifesto" | "clinico";
+export type PackTheme = "modernist-red" | "ocean-deep" | "soft-sage" | "soft-rose";
 
 export interface GeneratedPack {
   schemaVersion?: "institute-carousel-v1" | string;
@@ -397,6 +397,7 @@ export interface GeneratedPack {
   sourcePrimaryAvatarId?: string | null;
   sourceIdentityKey?: string | null;
   packContextVersion?: string | null;
+  educationalFlowVersion?: string | null;
   avatarAsset?: {
     avatarId: string;
     avatarName: string;
@@ -500,6 +501,7 @@ export interface HeyGenProviderCapabilities {
     supportsBrandKitId: boolean;
     supportsChatMode: boolean;
     supportsAttachments: boolean;
+    supportsIncognitoMode: boolean;
     orientations: string[];
     modes: string[];
   };
@@ -787,7 +789,77 @@ export interface ProductionProfile {
   musicTrackId?: string | null;
   musicVolume?: number;
   cinematicPrompt?: string;
+  styleId?: string | null;
+  brandKitId?: string | null;
+  videoAgentMode?: "generate" | "chat";
+  videoAgentVisualMode?: "standard" | "seedance";
+  videoAgentInstructions?: string;
+  videoAgentAttachments?: VideoAgentAttachment[];
+  videoAgentIncognitoMode?: boolean;
   updatedAt?: string;
+}
+
+export type PodcastSpeakerId = "a" | "b";
+
+export interface PodcastParticipant {
+  id: PodcastSpeakerId;
+  name: string;
+  avatarId: string;
+  voiceId: string;
+}
+
+export interface PodcastTurn {
+  id: string;
+  order: number;
+  speakerId: PodcastSpeakerId;
+  text: string;
+}
+
+export interface PodcastPlan {
+  scriptId: string;
+  title: string;
+  orientation: "portrait" | "landscape";
+  captions: boolean;
+  transitionStyle: "hard_cut";
+  musicTrackId?: string | null;
+  musicVolume?: number;
+  participants: [PodcastParticipant, PodcastParticipant];
+  turns: PodcastTurn[];
+  updatedAt: string;
+}
+
+export interface PodcastDialogueResult {
+  provider: "claude";
+  model: string;
+  promptVersion: string;
+  title: string;
+  turns: Array<Pick<PodcastTurn, "speakerId" | "text">>;
+  turnCount: number;
+  wordCount: number;
+}
+
+export interface PodcastGenerationRequest {
+  turnId: string;
+  order: number;
+  speakerId: PodcastSpeakerId;
+  speakerName: string;
+  avatarId: string;
+  voiceId: string;
+  spokenText: string;
+  speechMode: "natural" | "fiel" | "direto" | "enfatico";
+  voiceMood: VoiceMood;
+  orientation: "portrait" | "landscape";
+}
+
+export interface PodcastGenerationResult {
+  scriptId: string;
+  status: "not_submitted";
+  provider: "heygen";
+  turnCount: number;
+  estimatedCalls: number;
+  requiresExplicitConfirmation: boolean;
+  warning: string;
+  requests: PodcastGenerationRequest[];
 }
 
 export interface MusicTrack {
@@ -983,6 +1055,7 @@ export async function fetchPack(scriptId: string): Promise<{
   outdatedAvatar: boolean;
   outdatedIdentity?: boolean;
   outdatedPackSchema?: boolean;
+  outdatedEducationalFlow?: boolean;
   requiredSlideCount?: number;
 }> {
   const response = await requestJson<{
@@ -992,6 +1065,7 @@ export async function fetchPack(scriptId: string): Promise<{
     outdatedAvatar: boolean;
     outdatedIdentity?: boolean;
     outdatedPackSchema?: boolean;
+    outdatedEducationalFlow?: boolean;
     requiredSlideCount?: number;
   }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
   return {
@@ -1000,6 +1074,7 @@ export async function fetchPack(scriptId: string): Promise<{
     outdatedAvatar: response.outdatedAvatar,
     outdatedIdentity: response.outdatedIdentity,
     outdatedPackSchema: response.outdatedPackSchema,
+    outdatedEducationalFlow: response.outdatedEducationalFlow,
     requiredSlideCount: response.requiredSlideCount,
   };
 }
@@ -1154,6 +1229,88 @@ export async function saveProductionProfile(
     { method: "PUT", body: JSON.stringify(profile) },
   );
   return response.profile;
+}
+
+export async function fetchPodcastPlan(scriptId: string): Promise<PodcastPlan | null> {
+  const response = await requestJson<{ ok: boolean; podcastPlan: PodcastPlan | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/podcast-plan`,
+    { method: "GET" },
+  );
+  return response.podcastPlan;
+}
+
+export async function savePodcastPlan(
+  scriptId: string,
+  plan: Omit<PodcastPlan, "scriptId" | "updatedAt">,
+): Promise<PodcastPlan> {
+  const response = await requestJson<{ ok: boolean; podcastPlan: PodcastPlan }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/podcast-plan`,
+    { method: "PUT", body: JSON.stringify(plan) },
+  );
+  return response.podcastPlan;
+}
+
+export async function generatePodcastDialogue(
+  scriptId: string,
+  input: {
+    sourceText: string;
+    hostName: string;
+    guestName: string;
+    direction?: string;
+    durationSeconds: 30 | 45 | 60 | 90 | 120 | 180;
+  },
+): Promise<PodcastDialogueResult> {
+  const response = await requestJson<{ ok: boolean } & PodcastDialogueResult>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/podcast-dialogue/generate`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return response;
+}
+
+export async function fetchPodcastGenerationPlan(
+  scriptId: string,
+  options?: {
+    speechMode?: PodcastGenerationRequest["speechMode"];
+    voiceMood?: VoiceMood;
+    orientation?: PodcastGenerationRequest["orientation"];
+  },
+): Promise<PodcastGenerationResult> {
+  const query = new URLSearchParams({
+    speechMode: options?.speechMode || "natural",
+    voiceMood: options?.voiceMood || "confident",
+    orientation: options?.orientation || "portrait",
+  });
+  const response = await requestJson<{ ok: boolean; generation: PodcastGenerationResult }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/podcast-generation/plan?${query.toString()}`,
+    { method: "GET" },
+  );
+  return response.generation;
+}
+
+export async function submitPodcastGeneration(
+  scriptId: string,
+  input: {
+    orientation: "portrait" | "landscape";
+    durationSeconds: DurationPreset;
+    speechMode: PodcastGenerationRequest["speechMode"];
+    voiceMood: VoiceMood;
+    captions: boolean;
+    forceNewVersion?: boolean;
+    idempotencyKey?: string;
+    expectedScriptRevision?: number;
+    expectedFinalSpeechHash?: string;
+    contractVersion?: string;
+  },
+): Promise<{ generation: PodcastGenerationResult; jobs: VideoJob[] }> {
+  const response = await requestJson<{
+    ok: boolean;
+    generation: PodcastGenerationResult;
+    jobs: VideoJob[];
+  }>(`/api/scripts/${encodeURIComponent(scriptId)}/podcast-generation/submit`, {
+    method: "POST",
+    body: JSON.stringify({ confirmed: true, ...input }),
+  });
+  return { generation: response.generation, jobs: response.jobs };
 }
 
 export async function fetchHeyGenProviderCapabilities(): Promise<HeyGenProviderCapabilities> {
@@ -1718,6 +1875,17 @@ export interface HeyGenStyle {
   preview_video_url?: string | null;
 }
 
+export interface HeyGenBrandKit {
+  brand_kit_id: string;
+  name: string;
+}
+
+export interface VideoAgentAttachment {
+  assetId: string;
+  name: string;
+  mimeType: string;
+}
+
 export interface AvatarMediaPayload {
   name: string;
   mimeType: string;
@@ -1752,11 +1920,36 @@ export async function fetchHeyGenAvatars(): Promise<{
   return requestJson("/api/heygen/avatars", { method: "GET" });
 }
 
-export async function fetchHeyGenStyles(tag = "cinematic"): Promise<{
+export async function fetchHeyGenStyles(tag = "all"): Promise<{
   styles: HeyGenStyle[];
   tag: string;
 }> {
   return requestJson(`/api/heygen/styles?tag=${encodeURIComponent(tag)}`, { method: "GET" });
+}
+
+export async function fetchHeyGenBrandKits(): Promise<HeyGenBrandKit[]> {
+  const response = await requestJson<{ brandKits: HeyGenBrandKit[] }>("/api/heygen/brand-kits", {
+    method: "GET",
+  });
+  return response.brandKits;
+}
+
+export async function uploadHeyGenAsset(file: File): Promise<VideoAgentAttachment> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Não foi possível ler ${file.name}.`));
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.readAsDataURL(file);
+  });
+  const response = await postJson<{ ok: boolean; attachment: VideoAgentAttachment }>(
+    "/api/heygen/assets",
+    {
+      name: file.name,
+      mimeType: file.type || "text/plain",
+      data: dataUrl.slice(dataUrl.indexOf(",") + 1),
+    },
+  );
+  return response.attachment;
 }
 
 export async function createHeyGenAvatar(payload: CreateAvatarPayload): Promise<AvatarJob> {
@@ -1814,6 +2007,10 @@ export async function createHeyGenVideo(
     styleId?: string;
     brandKitId?: string;
     videoAgentMode?: "generate" | "chat";
+    videoAgentVisualMode?: "standard" | "seedance";
+    videoAgentInstructions?: string;
+    videoAgentAttachments?: VideoAgentAttachment[];
+    videoAgentIncognitoMode?: boolean;
     forceNewVersion?: boolean;
     narrationText?: string;
     displayText?: string;
@@ -2369,8 +2566,6 @@ export async function uploadLocalVideoKitSource(file: File): Promise<{
   uploadId: string;
   filename: string;
   size: number;
-  analysisJob?: PostProductionJob;
-  analysisError?: string;
 }> {
   const response = await fetch(`${BASE}/api/local-video-kit/uploads`, {
     method: "POST",
@@ -2387,8 +2582,6 @@ export async function uploadLocalVideoKitSource(file: File): Promise<{
     uploadId: string;
     filename: string;
     size: number;
-    analysisJob?: PostProductionJob;
-    analysisError?: string;
   };
 }
 

@@ -67,38 +67,53 @@ vi.mock("@/lib/api/local", async (importOriginal) => {
     composeFinalVideo: vi.fn(),
     deleteAvatarSet: vi.fn(),
     fetchAvatarSets: vi.fn(),
+    fetchHeyGenBrandKits: vi.fn(),
     fetchHeyGenCatalog: vi.fn(),
+    fetchHeyGenProviderCapabilities: vi.fn(),
+    fetchHeyGenStyles: vi.fn(),
     fetchMusicTracks: vi.fn(),
+    fetchPodcastPlan: vi.fn(),
     fetchProductionProfile: vi.fn(),
     fetchSceneGenerationPlan: vi.fn(),
     fetchScenePlan: vi.fn(),
     fetchScriptEditorState: vi.fn(),
     fetchVideoSlideRender: vi.fn(),
     fetchVisualPlan: vi.fn(),
+    generatePodcastDialogue: vi.fn(),
     generateSceneDirection: vi.fn(),
     generateVisualDirection: vi.fn(),
     renderVideoSlides: vi.fn(),
     runScriptEditorAssist: vi.fn(),
     saveAvatarSet: vi.fn(),
     saveProductionProfile: vi.fn(),
+    savePodcastPlan: vi.fn(),
     saveScenePlan: vi.fn(),
     saveScript: vi.fn(),
     saveScriptEditorState: vi.fn(),
     saveVisualPlan: vi.fn(),
     submitSceneGeneration: vi.fn(),
+    submitPodcastGeneration: vi.fn(),
+    uploadHeyGenAsset: vi.fn(),
   };
 });
 
 import {
   fetchAvatarSets,
+  fetchHeyGenBrandKits,
   fetchHeyGenCatalog,
+  fetchHeyGenProviderCapabilities,
+  fetchHeyGenStyles,
   fetchMusicTracks,
+  fetchPodcastPlan,
   fetchProductionProfile,
   fetchScenePlan,
   fetchScriptEditorState,
   fetchVideoSlideRender,
   fetchVisualPlan,
+  generatePodcastDialogue,
   runScriptEditorAssist,
+  savePodcastPlan,
+  saveProductionProfile,
   saveScript,
   saveScriptEditorState,
 } from "@/lib/api/local";
@@ -242,7 +257,33 @@ beforeEach(() => {
     defaultAvatarId: null,
   });
   vi.mocked(fetchAvatarSets).mockResolvedValue([]);
+  vi.mocked(fetchHeyGenBrandKits).mockResolvedValue([]);
+  vi.mocked(fetchHeyGenStyles).mockResolvedValue({ styles: [], tag: "all" });
+  vi.mocked(fetchHeyGenProviderCapabilities).mockResolvedValue({
+    provider: "heygen",
+    cliVersion: "0.5.0",
+    capabilitiesVersion: "test-capabilities",
+    checkedAt: "2026-08-16T00:00:00Z",
+    videoAgent: {
+      supported: true,
+      supportsStyleId: true,
+      supportsBrandKitId: true,
+      supportsChatMode: true,
+      supportsAttachments: true,
+      supportsIncognitoMode: true,
+      orientations: ["portrait", "landscape"],
+      modes: ["generate", "chat"],
+    },
+    directVideo: {
+      supported: true,
+      supportedTypes: ["avatar"],
+      supportedEngines: ["avatar_iv", "avatar_v"],
+      supportedResolutions: ["720p", "1080p"],
+      supportedAspectRatios: ["9:16", "16:9"],
+    },
+  });
   vi.mocked(fetchMusicTracks).mockResolvedValue([]);
+  vi.mocked(fetchPodcastPlan).mockResolvedValue(null);
   vi.mocked(fetchScenePlan).mockResolvedValue(null);
   vi.mocked(fetchVisualPlan).mockResolvedValue(null);
   vi.mocked(fetchVideoSlideRender).mockResolvedValue(null);
@@ -257,6 +298,16 @@ beforeEach(() => {
     contractVersion: "2.0.0",
   }));
   vi.mocked(saveScript).mockImplementation(async (script) => script);
+  vi.mocked(savePodcastPlan).mockImplementation(async (scriptId, plan) => ({
+    scriptId,
+    ...plan,
+    updatedAt: "2026-08-17T00:00:00.000Z",
+  }));
+  vi.mocked(saveProductionProfile).mockImplementation(async (scriptId, profile) => ({
+    scriptId,
+    ...profile,
+    updatedAt: "2026-08-17T00:00:00.000Z",
+  }));
 });
 
 afterEach(() => {
@@ -268,6 +319,169 @@ describe("script editor React interactions", () => {
   it("starts clean with Save disabled", async () => {
     await renderEditor();
     expect(within(getEditor()).getByRole("button", { name: "Salvar" })).toBeDisabled();
+  });
+
+  it("exposes the supported Video Agent controls and Seedance direction", async () => {
+    vi.mocked(fetchHeyGenStyles).mockResolvedValue({
+      tag: "all",
+      styles: [
+        {
+          style_id: "style-portrait",
+          name: "Editorial vertical",
+          aspect_ratio: "9:16",
+          tags: ["cinematic"],
+        },
+      ],
+    });
+    vi.mocked(fetchHeyGenBrandKits).mockResolvedValue([
+      { brand_kit_id: "brand-health", name: "Saúde Consciente" },
+    ]);
+    await renderEditor();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: /HeyGen Video Agent/ }));
+
+    expect(await screen.findByText("Controles do Video Agent")).toBeInTheDocument();
+    const seedance = screen.getByRole("button", { name: /Seedance/ });
+    await user.click(seedance);
+    await user.click(screen.getByRole("button", { name: /Revisão com Agent/ }));
+    await user.type(
+      screen.getByLabelText("Instruções para edição"),
+      "Use gráficos médicos discretos.",
+    );
+
+    expect(seedance).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Revisão com Agent/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByText(/cerca de 68 créditos/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Estilo visual do Video Agent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Brand System do Video Agent")).toBeInTheDocument();
+  });
+
+  it("edits and saves a two-avatar podcast as an ordered dialogue", async () => {
+    vi.mocked(fetchHeyGenCatalog).mockResolvedValue({
+      avatars: [
+        {
+          id: "avatar-host",
+          name: "Host",
+          orientation: "portrait",
+          defaultVoiceId: "voice-host",
+        },
+        {
+          id: "avatar-doctor",
+          name: "Doutor",
+          orientation: "portrait",
+          defaultVoiceId: "voice-doctor",
+        },
+      ],
+      voices: [
+        { id: "voice-host", name: "Voz Host", gender: "male" },
+        { id: "voice-doctor", name: "Voz Doutor", gender: "male" },
+      ],
+      defaultAvatarId: "avatar-host",
+      defaultVoiceId: "voice-host",
+    });
+    await renderEditor();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("tab", { name: /Podcast com 2 avatares/ }));
+    expect(await screen.findByText("Linha do tempo da conversa")).toBeInTheDocument();
+
+    const question = "Doutor, por onde começamos a entender esse tema?";
+    await user.type(screen.getByLabelText("Fala 1 de Apresentador"), question);
+    await user.click(screen.getByRole("button", { name: "Salvar podcast" }));
+
+    await waitFor(() =>
+      expect(saveScript).toHaveBeenCalledWith(
+        expect.objectContaining({
+          textoFalado: `${question}\n\n${baseScript.textoFalado}`,
+        }),
+      ),
+    );
+    expect(savePodcastPlan).toHaveBeenCalledWith(
+      "script-test",
+      expect.objectContaining({
+        participants: [
+          expect.objectContaining({ avatarId: "avatar-host", voiceId: "voice-host" }),
+          expect.objectContaining({ avatarId: "avatar-doctor", voiceId: "voice-doctor" }),
+        ],
+        turns: [
+          expect.objectContaining({ speakerId: "a", text: question }),
+          expect.objectContaining({ speakerId: "b", text: baseScript.textoFalado }),
+        ],
+      }),
+    );
+  });
+
+  it("imports a HOST/GUEST script into the podcast draft without saving it", async () => {
+    await renderEditor();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("tab", { name: /Podcast com 2 avatares/ }));
+    await user.click(screen.getByRole("button", { name: "Colar roteiro HOST/GUEST" }));
+    await user.type(
+      screen.getByLabelText("Roteiro no formato HOST/GUEST"),
+      "HOST: Doutor, por que tanta animação?\n\nGUEST: Porque o estudo trouxe um resultado promissor.\n\nHOST: Isso já está aprovado?\n\nGUEST: Não. Ainda precisamos de mais dados.",
+    );
+    await user.click(screen.getByRole("button", { name: "Importar e substituir rascunho" }));
+
+    expect(screen.getByLabelText("Fala 1 de Apresentador")).toHaveValue(
+      "Doutor, por que tanta animação?",
+    );
+    expect(screen.getByLabelText("Fala 2 de Especialista")).toHaveValue(
+      "Porque o estudo trouxe um resultado promissor.",
+    );
+    expect(screen.getByLabelText("Fala 3 de Apresentador")).toHaveValue("Isso já está aprovado?");
+    expect(savePodcastPlan).not.toHaveBeenCalled();
+    expect(screen.getByText(/4 falas importadas para o rascunho/)).toBeInTheDocument();
+  });
+
+  it("asks Claude for an educational conversation and keeps the result as a draft", async () => {
+    vi.mocked(generatePodcastDialogue).mockResolvedValue({
+      provider: "claude",
+      model: "claude-haiku-4-5",
+      promptVersion: "test-prompt",
+      title: "Conversa educativa",
+      turnCount: 6,
+      wordCount: 45,
+      turns: [
+        { speakerId: "a", text: "O que precisamos entender primeiro?" },
+        { speakerId: "b", text: "Que o resultado ainda precisa de contexto." },
+        { speakerId: "a", text: "Isso já permite uma conclusão?" },
+        { speakerId: "b", text: "Não. O estudo ainda está em andamento." },
+        { speakerId: "a", text: "Qual é o cuidado prático?" },
+        { speakerId: "b", text: "Usar opções aprovadas e acompanhamento médico." },
+      ],
+    });
+    await renderEditor();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("tab", { name: /Podcast com 2 avatares/ }));
+    await user.type(
+      screen.getByLabelText("Orientação opcional"),
+      "Priorize resultados e limitações.",
+    );
+    await user.click(screen.getByRole("button", { name: "Gerar conversa" }));
+
+    await waitFor(() =>
+      expect(generatePodcastDialogue).toHaveBeenCalledWith("script-test", {
+        sourceText: baseScript.textoFalado,
+        hostName: "Apresentador",
+        guestName: "Especialista",
+        direction: "Priorize resultados e limitações.",
+        durationSeconds: 45,
+      }),
+    );
+    expect(await screen.findByLabelText("Fala 1 de Apresentador")).toHaveValue(
+      "O que precisamos entender primeiro?",
+    );
+    expect(screen.getByLabelText("Fala 2 de Especialista")).toHaveValue(
+      "Que o resultado ainda precisa de contexto.",
+    );
+    expect(savePodcastPlan).not.toHaveBeenCalled();
+    expect(screen.getByText(/6 falas do Claude aplicadas ao rascunho/)).toBeInTheDocument();
   });
 
   it("keeps source context and legacy script status out of the writing workspace", async () => {

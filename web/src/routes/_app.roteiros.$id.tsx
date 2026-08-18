@@ -28,6 +28,7 @@ import {
   ProductionReadinessCard,
 } from "@/components/script-editor/production-readiness";
 import { ScenePlanEditor } from "@/components/script-editor/scene-plan-editor";
+import { PodcastEditor } from "@/components/script-editor/podcast-editor";
 import { StoryModeEditor } from "@/components/script-editor/story-mode-editor";
 import {
   DEFAULT_OUTRO,
@@ -43,7 +44,10 @@ import {
   composeFinalVideo,
   deleteAvatarSet,
   fetchAvatarSets,
+  fetchHeyGenBrandKits,
   fetchHeyGenCatalog,
+  fetchHeyGenProviderCapabilities,
+  fetchHeyGenStyles,
   fetchMusicTracks,
   fetchProductionProfile,
   fetchScriptEditorState,
@@ -55,16 +59,21 @@ import {
   saveScriptEditorState,
   saveScript,
   submitSceneGeneration,
+  uploadHeyGenAsset,
   type AvatarSet,
   type AvatarSetLook,
   type AvatarSetRole,
   type HeyGenCatalog,
+  type HeyGenBrandKit,
+  type HeyGenProviderCapabilities,
+  type HeyGenStyle,
   type MusicTrack,
   type GenerationMode,
   type ScenePlan,
   type SceneTransitionStyle,
   type SceneGenerationResult,
   type VoiceMood,
+  type VideoAgentAttachment,
 } from "@/lib/api/local";
 import {
   SCRIPT_EDITOR_CONTRACT_VERSION,
@@ -96,6 +105,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Accordion,
   AccordionContent,
@@ -107,15 +117,21 @@ import {
   Captions,
   CheckCircle2,
   Clapperboard,
+  FileText,
   Film,
   History,
   Loader2,
+  MessagesSquare,
+  EyeOff,
+  Paperclip,
+  Palette,
   RotateCcw,
   Save,
   ShieldCheck,
   Sparkles,
   TriangleAlert,
   Volume2,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -208,6 +224,7 @@ function RoteiroDetalhe() {
   const initialOutro = initialCaptureDuration === 10 ? "" : script?.outroText || DEFAULT_OUTRO;
 
   const [draft, setDraft] = useState<Script | undefined>(script);
+  const [workspaceTab, setWorkspaceTab] = useState<"script" | "podcast">("script");
   const [sending, setSending] = useState(false);
   const [mixingMusic, setMixingMusic] = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -247,6 +264,22 @@ function RoteiroDetalhe() {
   const [musicTrackId, setMusicTrackId] = useState<string | null>(null);
   const [musicVolume, setMusicVolume] = useState(0.12);
   const [cinematicPrompt, setCinematicPrompt] = useState("");
+  const [agentCapabilities, setAgentCapabilities] = useState<HeyGenProviderCapabilities | null>(
+    null,
+  );
+  const [agentStyles, setAgentStyles] = useState<HeyGenStyle[]>([]);
+  const [brandKits, setBrandKits] = useState<HeyGenBrandKit[]>([]);
+  const [agentOptionsLoading, setAgentOptionsLoading] = useState(false);
+  const [styleId, setStyleId] = useState("");
+  const [brandKitId, setBrandKitId] = useState("");
+  const [videoAgentMode, setVideoAgentMode] = useState<"generate" | "chat">("generate");
+  const [videoAgentVisualMode, setVideoAgentVisualMode] = useState<"standard" | "seedance">(
+    "standard",
+  );
+  const [videoAgentInstructions, setVideoAgentInstructions] = useState("");
+  const [videoAgentAttachments, setVideoAgentAttachments] = useState<VideoAgentAttachment[]>([]);
+  const [videoAgentIncognitoMode, setVideoAgentIncognitoMode] = useState(false);
+  const [uploadingAgentAttachment, setUploadingAgentAttachment] = useState(false);
   const [ctaMode, setCtaMode] = useState<"auto" | "manual" | "none" | "visual">("auto");
   const [captions, setCaptions] = useState(true);
   const [optimizePronunciation, setOptimizePronunciation] = useState(true);
@@ -426,6 +459,13 @@ function RoteiroDetalhe() {
     setMusicTrackId(null);
     setMusicVolume(0.12);
     setCinematicPrompt("");
+    setStyleId("");
+    setBrandKitId("");
+    setVideoAgentMode("generate");
+    setVideoAgentVisualMode("standard");
+    setVideoAgentInstructions("");
+    setVideoAgentAttachments([]);
+    setVideoAgentIncognitoMode(false);
     lastSavedProfileKey.current = "";
     fetchProductionProfile(id)
       .then((profile) => {
@@ -442,6 +482,13 @@ function RoteiroDetalhe() {
           setMusicTrackId(profile.musicTrackId || null);
           setMusicVolume(profile.musicVolume || 0.12);
           setCinematicPrompt(profile.cinematicPrompt || "");
+          setStyleId(profile.styleId || "");
+          setBrandKitId(profile.brandKitId || "");
+          setVideoAgentMode(profile.videoAgentMode || "generate");
+          setVideoAgentVisualMode(profile.videoAgentVisualMode || "standard");
+          setVideoAgentInstructions(profile.videoAgentInstructions || "");
+          setVideoAgentAttachments(profile.videoAgentAttachments || []);
+          setVideoAgentIncognitoMode(profile.videoAgentIncognitoMode || false);
           lastSavedProfileKey.current = [
             profile.avatarId,
             profile.voiceId,
@@ -454,6 +501,13 @@ function RoteiroDetalhe() {
             profile.musicTrackId || "",
             profile.musicVolume || 0.12,
             profile.cinematicPrompt || "",
+            profile.styleId || "",
+            profile.brandKitId || "",
+            profile.videoAgentMode || "generate",
+            profile.videoAgentVisualMode || "standard",
+            profile.videoAgentInstructions || "",
+            JSON.stringify(profile.videoAgentAttachments || []),
+            String(profile.videoAgentIncognitoMode || false),
           ].join("|");
         }
       })
@@ -515,6 +569,33 @@ function RoteiroDetalhe() {
     const defaults = readStudioDefaults();
     if (defaults?.orientation) setOrientation(defaults.orientation);
     if (typeof defaults?.captions === "boolean") setCaptions(defaults.captions);
+  }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAgentOptionsLoading(true);
+    Promise.all([fetchHeyGenProviderCapabilities(), fetchHeyGenStyles(), fetchHeyGenBrandKits()])
+      .then(([capabilities, styleResponse, kits]) => {
+        if (cancelled) return;
+        setAgentCapabilities(capabilities);
+        setAgentStyles(styleResponse.styles);
+        setBrandKits(kits);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : "Não foi possível carregar as opções do Video Agent.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAgentOptionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
 
   useEffect(() => {
@@ -620,7 +701,8 @@ function RoteiroDetalhe() {
   );
   const scenePlanUsesExactlyTwoLooks =
     avatarMode !== "set" || !scenePlan || scenePlanLookIds.size === 2;
-  const longFormRequiresTwoCameras = durationSeconds > 60 && avatarMode !== "set";
+  const longFormRequiresTwoCameras =
+    durationSeconds > 60 && generationMode === "direct" && avatarMode !== "set";
   const productionModeReady =
     avatarMode === "set" ? Boolean(sceneGenerationPlan) : heygenAgentMode || Boolean(avatarId);
   const selectedAvatarReady = avatarMode === "set" ? avatarSetReady : Boolean(avatarId);
@@ -654,6 +736,47 @@ function RoteiroDetalhe() {
     productionModeReady &&
     scenePlanUsesExactlyTwoLooks &&
     !longFormRequiresTwoCameras;
+  const compatibleAgentStyles = useMemo(
+    () =>
+      agentStyles.filter(
+        (style) => style.aspect_ratio === (orientation === "portrait" ? "9:16" : "16:9"),
+      ),
+    [agentStyles, orientation],
+  );
+  const estimatedAgentCredits = Math.ceil(
+    (durationSeconds / 60) * (videoAgentVisualMode === "seedance" ? 90 : 30),
+  );
+
+  useEffect(() => {
+    if (styleId && !compatibleAgentStyles.some((style) => style.style_id === styleId)) {
+      setStyleId("");
+    }
+  }, [compatibleAgentStyles, styleId]);
+
+  async function addAgentAttachments(files: FileList | null) {
+    if (!files?.length) return;
+    const remaining = 20 - videoAgentAttachments.length;
+    if (remaining <= 0) {
+      toast.error("O Video Agent aceita no máximo 20 anexos.");
+      return;
+    }
+    const selected = Array.from(files).slice(0, remaining);
+    const oversized = selected.find((file) => file.size > 32 * 1024 * 1024);
+    if (oversized) {
+      toast.error(`${oversized.name} ultrapassa o limite de 32 MB.`);
+      return;
+    }
+    setUploadingAgentAttachment(true);
+    try {
+      const uploaded = await Promise.all(selected.map((file) => uploadHeyGenAsset(file)));
+      setVideoAgentAttachments((current) => [...current, ...uploaded].slice(0, 20));
+      toast.success(`${uploaded.length} anexo(s) enviado(s) para a HeyGen.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível enviar o anexo.");
+    } finally {
+      setUploadingAgentAttachment(false);
+    }
+  }
 
   function chooseAvatar(nextAvatarId: string) {
     setAvatarMode("single");
@@ -710,6 +833,13 @@ function RoteiroDetalhe() {
       avatarMode === "set" ? "" : musicTrackId || "",
       musicVolume,
       cinematicPrompt,
+      styleId,
+      brandKitId,
+      videoAgentMode,
+      videoAgentVisualMode,
+      videoAgentInstructions,
+      JSON.stringify(videoAgentAttachments),
+      String(videoAgentIncognitoMode),
     ].join("|");
     if (key === lastSavedProfileKey.current) return;
     const timeout = window.setTimeout(() => {
@@ -725,6 +855,13 @@ function RoteiroDetalhe() {
         musicTrackId: avatarMode === "set" ? null : musicTrackId,
         musicVolume,
         cinematicPrompt,
+        styleId: styleId || null,
+        brandKitId: brandKitId || null,
+        videoAgentMode,
+        videoAgentVisualMode,
+        videoAgentInstructions,
+        videoAgentAttachments,
+        videoAgentIncognitoMode,
       })
         .then((profile) => {
           lastSavedProfileKey.current = [
@@ -739,6 +876,13 @@ function RoteiroDetalhe() {
             profile.musicTrackId || "",
             profile.musicVolume || 0.12,
             profile.cinematicPrompt || "",
+            profile.styleId || "",
+            profile.brandKitId || "",
+            profile.videoAgentMode || "generate",
+            profile.videoAgentVisualMode || "standard",
+            profile.videoAgentInstructions || "",
+            JSON.stringify(profile.videoAgentAttachments || []),
+            String(profile.videoAgentIncognitoMode || false),
           ].join("|");
         })
         .catch(() => toast.error("Nao consegui salvar o perfil de producao."));
@@ -750,6 +894,7 @@ function RoteiroDetalhe() {
     avatarSetId,
     avatarSetReady,
     cinematicPrompt,
+    brandKitId,
     generationMode,
     id,
     musicTrackId,
@@ -757,6 +902,12 @@ function RoteiroDetalhe() {
     primaryAvatarId,
     profileLoaded,
     speechMode,
+    styleId,
+    videoAgentAttachments,
+    videoAgentIncognitoMode,
+    videoAgentInstructions,
+    videoAgentMode,
+    videoAgentVisualMode,
     voiceId,
     voiceMood,
   ]);
@@ -1141,6 +1292,15 @@ function RoteiroDetalhe() {
         ctaMode,
         captions,
         optimizePronunciation,
+        styleId: generationMode === "video_agent" ? styleId || undefined : undefined,
+        brandKitId: generationMode === "video_agent" ? brandKitId || undefined : undefined,
+        videoAgentMode: generationMode === "video_agent" ? videoAgentMode : undefined,
+        videoAgentVisualMode: generationMode === "video_agent" ? videoAgentVisualMode : undefined,
+        videoAgentInstructions:
+          generationMode === "video_agent" ? videoAgentInstructions : undefined,
+        videoAgentAttachments: generationMode === "video_agent" ? videoAgentAttachments : undefined,
+        videoAgentIncognitoMode:
+          generationMode === "video_agent" ? videoAgentIncognitoMode : undefined,
         forceNewVersion,
         narrationText: displayText,
         displayText,
@@ -1367,1108 +1527,1410 @@ function RoteiroDetalhe() {
               <ArrowLeft className="mr-1 h-4 w-4" /> Voltar
             </Link>
           </Button>
-          <WithTooltip label={dirty ? "Salvar alteracoes" : "Nenhuma alteracao pendente"}>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={!dirty || saving}
-              onClick={salvarRoteiro}
-            >
-              <Save className="mr-1 h-4 w-4" /> Salvar
-            </Button>
-          </WithTooltip>
-          {latestJob ? (
+          {workspaceTab === "script" ? (
             <>
-              <Button size="sm" asChild>
-                <Link to="/producao/$id" params={{ id: latestJob.id }}>
-                  <Film className="mr-1 h-4 w-4" /> Ver vídeo
-                </Link>
-              </Button>
-              {avatarMode !== "set" && musicTrackId ? (
+              <WithTooltip label={dirty ? "Salvar alteracoes" : "Nenhuma alteracao pendente"}>
                 <Button
                   size="sm"
                   variant="secondary"
-                  disabled={mixingMusic}
-                  onClick={() => void aplicarTrilhaNoVideoFinal()}
+                  disabled={!dirty || saving}
+                  onClick={salvarRoteiro}
                 >
-                  <Volume2 className="mr-1 h-4 w-4" />{" "}
-                  {mixingMusic ? "Mixando trilha..." : "Aplicar trilha"}
+                  <Save className="mr-1 h-4 w-4" /> Salvar
                 </Button>
-              ) : null}
-              <ConfirmAction
-                title="Refazer este vídeo?"
-                description={
-                  <div className="space-y-3">
-                    <p>{`Este roteiro já possui ${existingJobs.length} ${
-                      existingJobs.length === 1 ? "vídeo" : "vídeos"
-                    }. A nova versão consumirá créditos adicionais do HeyGen.`}</p>
-                    {hasHighCreditConsumption ? <HighCreditConsumptionNotice compact /> : null}
-                  </div>
-                }
-                confirmLabel="Refazer vídeo"
-                onConfirm={() => void enviarProducao(true)}
-                trigger={
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    title={
-                      productionBlockedReason || !canSendToProduction
-                        ? productionBlockedReason || "Revise o texto falado antes de enviar"
-                        : "Gerar outra versão deste roteiro"
-                    }
-                    disabled={
-                      saving ||
-                      sending ||
-                      Boolean(productionBlockedReason) ||
-                      !selectedAvatarReady ||
-                      !voiceId ||
-                      !canSendToProduction
-                    }
-                  >
-                    {sending ? (
-                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                    ) : (
-                      <History className="mr-1 h-4 w-4" />
-                    )}
-                    {sending ? "Enviando..." : "Refazer vídeo"}
+              </WithTooltip>
+              {latestJob ? (
+                <>
+                  <Button size="sm" asChild>
+                    <Link to="/producao/$id" params={{ id: latestJob.id }}>
+                      <Film className="mr-1 h-4 w-4" /> Ver vídeo
+                    </Link>
                   </Button>
-                }
-              />
+                  {avatarMode !== "set" && musicTrackId ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={mixingMusic}
+                      onClick={() => void aplicarTrilhaNoVideoFinal()}
+                    >
+                      <Volume2 className="mr-1 h-4 w-4" />{" "}
+                      {mixingMusic ? "Mixando trilha..." : "Aplicar trilha"}
+                    </Button>
+                  ) : null}
+                  <ConfirmAction
+                    title="Refazer este vídeo?"
+                    description={
+                      <div className="space-y-3">
+                        <p>{`Este roteiro já possui ${existingJobs.length} ${
+                          existingJobs.length === 1 ? "vídeo" : "vídeos"
+                        }. A nova versão consumirá créditos adicionais do HeyGen.`}</p>
+                        {hasHighCreditConsumption ? <HighCreditConsumptionNotice compact /> : null}
+                      </div>
+                    }
+                    confirmLabel="Refazer vídeo"
+                    onConfirm={() => void enviarProducao(true)}
+                    trigger={
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        title={
+                          productionBlockedReason || !canSendToProduction
+                            ? productionBlockedReason || "Revise o texto falado antes de enviar"
+                            : "Gerar outra versão deste roteiro"
+                        }
+                        disabled={
+                          saving ||
+                          sending ||
+                          Boolean(productionBlockedReason) ||
+                          !selectedAvatarReady ||
+                          !voiceId ||
+                          !canSendToProduction
+                        }
+                      >
+                        {sending ? (
+                          <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                        ) : (
+                          <History className="mr-1 h-4 w-4" />
+                        )}
+                        {sending ? "Enviando..." : "Refazer vídeo"}
+                      </Button>
+                    }
+                  />
+                </>
+              ) : (
+                <>
+                  <ConfirmAction
+                    title="Gerar prévia técnica de 10 segundos?"
+                    description={
+                      avatarMode === "set"
+                        ? "A prévia usa o look principal do Avatar Set para validar voz e enquadramento. O vídeo final usará as cenas e posições salvas. Este clique pode consumir créditos da conta."
+                        : "Este clique envia somente o começo naturalizado ao HeyGen e pode consumir créditos da conta."
+                    }
+                    confirmLabel="Gerar prévia"
+                    onConfirm={() => void gerarPrevia()}
+                    trigger={
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={
+                          storyMode ||
+                          saving ||
+                          previewing ||
+                          !selectedAvatarReady ||
+                          !voiceId ||
+                          !editorStateLoaded ||
+                          !paidScriptVersion.finalSpeechHash
+                        }
+                      >
+                        <Film className="mr-1 h-4 w-4" /> Gerar prévia
+                      </Button>
+                    }
+                  />
+                  <ConfirmAction
+                    title="Gerar vídeo final?"
+                    description={
+                      <div className="space-y-3">
+                        <p>
+                          Este clique envia o roteiro ao HeyGen e pode consumir créditos da conta.
+                        </p>
+                        {hasHighCreditConsumption ? <HighCreditConsumptionNotice compact /> : null}
+                      </div>
+                    }
+                    confirmLabel="Gerar vídeo final"
+                    onConfirm={() => void enviarProducao(false)}
+                    trigger={
+                      <Button
+                        size="sm"
+                        title={
+                          productionBlockedReason || !canSendToProduction
+                            ? productionBlockedReason || "Revise o texto falado antes de enviar"
+                            : "Enviar roteiro ao HeyGen"
+                        }
+                        disabled={
+                          saving ||
+                          sending ||
+                          Boolean(productionBlockedReason) ||
+                          !selectedAvatarReady ||
+                          !voiceId ||
+                          !canSendToProduction
+                        }
+                      >
+                        {sending ? (
+                          <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Film className="mr-1 h-4 w-4" />
+                        )}
+                        {sending ? "Enviando..." : "Gerar vídeo final"}
+                      </Button>
+                    }
+                  />
+                </>
+              )}
             </>
-          ) : (
-            <>
-              <ConfirmAction
-                title="Gerar prévia técnica de 10 segundos?"
-                description={
-                  avatarMode === "set"
-                    ? "A prévia usa o look principal do Avatar Set para validar voz e enquadramento. O vídeo final usará as cenas e posições salvas. Este clique pode consumir créditos da conta."
-                    : "Este clique envia somente o começo naturalizado ao HeyGen e pode consumir créditos da conta."
-                }
-                confirmLabel="Gerar prévia"
-                onConfirm={() => void gerarPrevia()}
-                trigger={
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={
-                      storyMode ||
-                      saving ||
-                      previewing ||
-                      !selectedAvatarReady ||
-                      !voiceId ||
-                      !editorStateLoaded ||
-                      !paidScriptVersion.finalSpeechHash
-                    }
-                  >
-                    <Film className="mr-1 h-4 w-4" /> Gerar prévia
-                  </Button>
-                }
-              />
-              <ConfirmAction
-                title="Gerar vídeo final?"
-                description={
-                  <div className="space-y-3">
-                    <p>Este clique envia o roteiro ao HeyGen e pode consumir créditos da conta.</p>
-                    {hasHighCreditConsumption ? <HighCreditConsumptionNotice compact /> : null}
-                  </div>
-                }
-                confirmLabel="Gerar vídeo final"
-                onConfirm={() => void enviarProducao(false)}
-                trigger={
-                  <Button
-                    size="sm"
-                    title={
-                      productionBlockedReason || !canSendToProduction
-                        ? productionBlockedReason || "Revise o texto falado antes de enviar"
-                        : "Enviar roteiro ao HeyGen"
-                    }
-                    disabled={
-                      saving ||
-                      sending ||
-                      Boolean(productionBlockedReason) ||
-                      !selectedAvatarReady ||
-                      !voiceId ||
-                      !canSendToProduction
-                    }
-                  >
-                    {sending ? (
-                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                    ) : (
-                      <Film className="mr-1 h-4 w-4" />
-                    )}
-                    {sending ? "Enviando..." : "Gerar vídeo final"}
-                  </Button>
-                }
-              />
-            </>
-          )}
+          ) : null}
         </>
       }
     >
-      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {naturalizing
-            ? activeEditorOperation === "medical_rewrite"
-              ? "Revisão com inteligência artificial em andamento."
-              : "Ajuste de duração com inteligência artificial em andamento."
-            : durationAnnouncement}
-        </div>
-        <div className="space-y-4">
-          {draft.link ? (
-            <a
-              href={draft.link}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex text-xs text-status-info underline-offset-2 hover:underline"
-            >
-              Ver fonte / artigo original
-            </a>
-          ) : null}
+      <Tabs
+        value={workspaceTab}
+        onValueChange={(value) => setWorkspaceTab(value as "script" | "podcast")}
+        className="space-y-4"
+      >
+        <TabsList className="grid h-auto w-full grid-cols-2 gap-1 rounded-xl border bg-muted/50 p-1.5 md:w-[520px]">
+          <TabsTrigger value="script" className="min-h-10 cursor-pointer gap-2">
+            <FileText className="h-4 w-4" /> Roteiro individual
+          </TabsTrigger>
+          <TabsTrigger value="podcast" className="min-h-10 cursor-pointer gap-2">
+            <MessagesSquare className="h-4 w-4" /> Podcast com 2 avatares
+          </TabsTrigger>
+        </TabsList>
 
-          <div id="roteiro-editar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
-            <SectionHeading
-              index={1}
-              title="O que será dito no vídeo"
-              description="Edite somente o título e a fala. Os dados de origem ficam preservados em segundo plano."
-            />
-            <div className="mt-4 space-y-4">
-              <Field label="Título" htmlFor="script-title">
-                <Input
-                  id="script-title"
-                  value={draft.titulo}
-                  onChange={(e) => set("titulo", e.target.value)}
+        <TabsContent value="script" className="mt-0">
+          <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+            <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {naturalizing
+                ? activeEditorOperation === "medical_rewrite"
+                  ? "Revisão com inteligência artificial em andamento."
+                  : "Ajuste de duração com inteligência artificial em andamento."
+                : durationAnnouncement}
+            </div>
+            <div className="space-y-4">
+              {draft.link ? (
+                <a
+                  href={draft.link}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex text-xs text-status-info underline-offset-2 hover:underline"
+                >
+                  Ver fonte / artigo original
+                </a>
+              ) : null}
+
+              <div
+                id="roteiro-editar"
+                className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
+              >
+                <SectionHeading
+                  index={1}
+                  title="O que será dito no vídeo"
+                  description="Edite somente o título e a fala. Os dados de origem ficam preservados em segundo plano."
                 />
-              </Field>
-              <div>
-                <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                <div className="mt-4 space-y-4">
+                  <Field label="Título" htmlFor="script-title">
+                    <Input
+                      id="script-title"
+                      value={draft.titulo}
+                      onChange={(e) => set("titulo", e.target.value)}
+                    />
+                  </Field>
                   <div>
-                    <Label htmlFor="display-text">Fala final</Label>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">
-                      Texto que o avatar deve falar. Use a grafia correta para legenda e revisão.
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        const restored = buildNarrationText(
-                          draft,
-                          durationSeconds === 10 ? "" : outroText,
-                        );
+                    <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <Label htmlFor="display-text">Fala final</Label>
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          Texto que o avatar deve falar. Use a grafia correta para legenda e
+                          revisão.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            const restored = buildNarrationText(
+                              draft,
+                              durationSeconds === 10 ? "" : outroText,
+                            );
+                            editorRevisionRef.current += 1;
+                            setNarrationText(restored);
+                            setDisplayText(restored);
+                            setSpokenText("");
+                            setEditorSchemaValid(true);
+                            setEditorTechnicalError(null);
+                          }}
+                        >
+                          <RotateCcw className="mr-1 h-4 w-4" />
+                          Restaurar
+                        </Button>
+                        {previousAiScript ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              const current = displayText;
+                              editorRevisionRef.current += 1;
+                              setDisplayText(previousAiScript);
+                              setNarrationText(previousAiScript);
+                              setSpokenText("");
+                              setPreviousAiScript(current);
+                              setEditorSchemaValid(true);
+                              setEditorTechnicalError(null);
+                            }}
+                          >
+                            <History className="mr-1 h-4 w-4" />
+                            Desfazer IA
+                          </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={naturalizing || displayText.trim().length < 20}
+                          onClick={() => void executarEditorComIa("medical_rewrite")}
+                        >
+                          {naturalizing && activeEditorOperation === "medical_rewrite" ? (
+                            <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Sparkles className="mr-1 h-4 w-4" />
+                          )}
+                          {naturalizing && activeEditorOperation === "medical_rewrite"
+                            ? "Revisando..."
+                            : "Revisar com IA"}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={naturalizing || displayText.trim().length < 20}
+                          onClick={() => void executarEditorComIa("fit_duration")}
+                        >
+                          {naturalizing && activeEditorOperation === "fit_duration" ? (
+                            <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Captions className="mr-1 h-4 w-4" />
+                          )}
+                          {naturalizing && activeEditorOperation === "fit_duration"
+                            ? "Ajustando..."
+                            : `Ajustar para ${durationSeconds}s`}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={salvarRoteiro}
+                          disabled={!dirty || saving}
+                        >
+                          <Save className="mr-1 h-4 w-4" />
+                          Salvar
+                        </Button>
+                      </div>
+                    </div>
+                    <Textarea
+                      id="display-text"
+                      rows={9}
+                      value={displayText}
+                      onChange={(event) => {
                         editorRevisionRef.current += 1;
-                        setNarrationText(restored);
-                        setDisplayText(restored);
+                        setDisplayText(event.target.value);
+                        setNarrationText(event.target.value);
+                        setSpokenText("");
+                        setEditorSchemaValid(true);
+                        setEditorTechnicalError(null);
+                        setLastEditorResult(null);
+                      }}
+                      aria-describedby={
+                        editorTechnicalError
+                          ? "script-duration-feedback script-editor-error"
+                          : "script-duration-feedback"
+                      }
+                      className="min-h-56 leading-6"
+                    />
+                    <DurationControl
+                      assessment={durationAssessment}
+                      durationSeconds={durationSeconds}
+                      onDurationChange={setProductionDuration}
+                    />
+                    {editorTechnicalError ? (
+                      <div
+                        ref={editorErrorRef}
+                        id="script-editor-error"
+                        tabIndex={-1}
+                        className="mt-2 rounded-lg border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+                        role="alert"
+                      >
+                        {editorTechnicalError} O texto anterior foi mantido; revise manualmente ou
+                        tente novamente.
+                      </div>
+                    ) : null}
+                    {staleEditorResult ? (
+                      <StaleEditorResult
+                        result={staleEditorResult}
+                        onDiscard={() => setStaleEditorResult(null)}
+                      />
+                    ) : null}
+                    <QualityIssuesCard
+                      issues={qualityIssues}
+                      hasBlockingIssues={blockingQualityIssues.length > 0}
+                      onFixOutro={() => {
+                        const corrected = normalizeNarrationOutro(displayText, outroText);
+                        editorRevisionRef.current += 1;
+                        setDisplayText(corrected);
+                        setNarrationText(corrected);
                         setSpokenText("");
                         setEditorSchemaValid(true);
                         setEditorTechnicalError(null);
                       }}
-                    >
-                      <RotateCcw className="mr-1 h-4 w-4" />
-                      Restaurar
-                    </Button>
-                    {previousAiScript ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => {
-                          const current = displayText;
-                          editorRevisionRef.current += 1;
-                          setDisplayText(previousAiScript);
-                          setNarrationText(previousAiScript);
-                          setSpokenText("");
-                          setPreviousAiScript(current);
-                          setEditorSchemaValid(true);
-                          setEditorTechnicalError(null);
+                    />
+                    {lastEditorResult ? (
+                      <TitleAlignmentCard
+                        result={lastEditorResult}
+                        selected={titleChoice}
+                        onUseSuggested={(suggested) => {
+                          if (titleChoice === "current") setTitleBeforeSuggestion(draft.titulo);
+                          set("titulo", suggested);
+                          setTitleChoice("suggested");
                         }}
-                      >
-                        <History className="mr-1 h-4 w-4" />
-                        Desfazer IA
-                      </Button>
+                        onKeepCurrent={() => {
+                          if (titleChoice === "suggested") set("titulo", titleBeforeSuggestion);
+                          setTitleChoice("current");
+                        }}
+                      />
                     ) : null}
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      disabled={naturalizing || displayText.trim().length < 20}
-                      onClick={() => void executarEditorComIa("medical_rewrite")}
-                    >
-                      {naturalizing && activeEditorOperation === "medical_rewrite" ? (
-                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                      ) : (
-                        <Sparkles className="mr-1 h-4 w-4" />
-                      )}
-                      {naturalizing && activeEditorOperation === "medical_rewrite"
-                        ? "Revisando..."
-                        : "Revisar com IA"}
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      disabled={naturalizing || displayText.trim().length < 20}
-                      onClick={() => void executarEditorComIa("fit_duration")}
-                    >
-                      {naturalizing && activeEditorOperation === "fit_duration" ? (
-                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                      ) : (
-                        <Captions className="mr-1 h-4 w-4" />
-                      )}
-                      {naturalizing && activeEditorOperation === "fit_duration"
-                        ? "Ajustando..."
-                        : `Ajustar para ${durationSeconds}s`}
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={salvarRoteiro}
-                      disabled={!dirty || saving}
-                    >
-                      <Save className="mr-1 h-4 w-4" />
-                      Salvar
-                    </Button>
+                    <MedicalReviewCard
+                      status={medicalReviewStatus}
+                      approved={humanReviewApproved}
+                      onToggle={() => setHumanReviewApproved((approved) => !approved)}
+                    />
+                    {lastEditorResult ? <QualityChecks result={lastEditorResult} /> : null}
                   </div>
                 </div>
-                <Textarea
-                  id="display-text"
-                  rows={9}
-                  value={displayText}
-                  onChange={(event) => {
-                    editorRevisionRef.current += 1;
-                    setDisplayText(event.target.value);
-                    setNarrationText(event.target.value);
-                    setSpokenText("");
-                    setEditorSchemaValid(true);
-                    setEditorTechnicalError(null);
-                    setLastEditorResult(null);
-                  }}
-                  aria-describedby={
-                    editorTechnicalError
-                      ? "script-duration-feedback script-editor-error"
-                      : "script-duration-feedback"
-                  }
-                  className="min-h-56 leading-6"
-                />
-                <DurationControl
-                  assessment={durationAssessment}
-                  durationSeconds={durationSeconds}
-                  onDurationChange={setProductionDuration}
-                />
-                {editorTechnicalError ? (
-                  <div
-                    ref={editorErrorRef}
-                    id="script-editor-error"
-                    tabIndex={-1}
-                    className="mt-2 rounded-lg border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
-                    role="alert"
-                  >
-                    {editorTechnicalError} O texto anterior foi mantido; revise manualmente ou tente
-                    novamente.
-                  </div>
-                ) : null}
-                {staleEditorResult ? (
-                  <StaleEditorResult
-                    result={staleEditorResult}
-                    onDiscard={() => setStaleEditorResult(null)}
-                  />
-                ) : null}
-                <QualityIssuesCard
-                  issues={qualityIssues}
-                  hasBlockingIssues={blockingQualityIssues.length > 0}
-                  onFixOutro={() => {
-                    const corrected = normalizeNarrationOutro(displayText, outroText);
-                    editorRevisionRef.current += 1;
-                    setDisplayText(corrected);
-                    setNarrationText(corrected);
-                    setSpokenText("");
-                    setEditorSchemaValid(true);
-                    setEditorTechnicalError(null);
-                  }}
-                />
-                {lastEditorResult ? (
-                  <TitleAlignmentCard
-                    result={lastEditorResult}
-                    selected={titleChoice}
-                    onUseSuggested={(suggested) => {
-                      if (titleChoice === "current") setTitleBeforeSuggestion(draft.titulo);
-                      set("titulo", suggested);
-                      setTitleChoice("suggested");
-                    }}
-                    onKeepCurrent={() => {
-                      if (titleChoice === "suggested") set("titulo", titleBeforeSuggestion);
-                      setTitleChoice("current");
-                    }}
-                  />
-                ) : null}
-                <MedicalReviewCard
-                  status={medicalReviewStatus}
-                  approved={humanReviewApproved}
-                  onToggle={() => setHumanReviewApproved((approved) => !approved)}
-                />
-                {lastEditorResult ? <QualityChecks result={lastEditorResult} /> : null}
               </div>
-            </div>
-          </div>
 
-          <div
-            id="roteiro-produzir"
-            className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
-          >
-            <SectionHeading
-              index={2}
-              title="Produção"
-              description="Escolha quem aparece, a duração e mantenha parâmetros técnicos recolhidos."
-            />
-            <div className="mt-4 space-y-4">
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <Label className="text-xs">Avatar</Label>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">
-                      Escolha um look único ou duas posições da mesma identidade.
-                    </p>
-                  </div>
-                  {(catalogError || (!catalogLoading && !catalog?.avatars.length)) && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => loadCatalog(true)}
-                    >
-                      <RotateCcw className="mr-1 h-3.5 w-3.5" />
-                      Atualizar
-                    </Button>
-                  )}
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <button
-                    type="button"
-                    aria-pressed={avatarMode === "single"}
-                    onClick={() => {
-                      setAvatarMode("single");
-                      setAvatarSetId(null);
-                      setPrimaryAvatarId(avatarId);
-                    }}
-                    className={cn(
-                      "rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40",
-                      avatarMode === "single" &&
-                        "border-primary bg-primary/5 ring-1 ring-primary/30",
-                    )}
-                  >
-                    <span className="block text-xs font-semibold">Look único</span>
-                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                      Uma posição contínua para o avatar.
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={avatarMode === "set"}
-                    onClick={() => {
-                      if (avatarSets[0]) chooseAvatarSet(selectedAvatarSet || avatarSets[0]);
-                      else setAvatarSetDialogOpen(true);
-                    }}
-                    className={cn(
-                      "rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40",
-                      avatarMode === "set" && "border-primary bg-primary/5 ring-1 ring-primary/30",
-                    )}
-                  >
-                    <span className="block text-xs font-semibold">Conjunto de looks</span>
-                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                      Duas posições para cortes naturais entre cenas.
-                    </span>
-                  </button>
-                </div>
-                {avatarMode === "single" ? (
-                  <AvatarPicker
-                    value={avatarId}
-                    avatars={catalog?.avatars || []}
-                    loading={catalogLoading}
-                    error={catalogError}
-                    onChange={chooseAvatar}
-                  />
-                ) : (
-                  <AvatarSetSelector
-                    sets={avatarSets}
-                    selectedId={avatarSetId}
-                    selected={selectedAvatarSet}
-                    avatars={catalog?.avatars || []}
-                    selectedLooks={selectedSetLooks}
-                    primaryAvatarId={primaryAvatarId}
-                    loading={avatarSetsLoading}
-                    onSelect={chooseAvatarSet}
-                    onSaved={handleAvatarSetSaved}
-                    onCreate={() => {
-                      setEditingAvatarSet(null);
-                      setAvatarSetDialogOpen(true);
-                    }}
-                    onEdit={(setToEdit) => {
-                      setEditingAvatarSet(setToEdit);
-                      setAvatarSetDialogOpen(true);
-                    }}
-                    onDelete={(setToDelete) => void handleDeleteAvatarSet(setToDelete)}
-                    onPrimaryChange={(nextAvatarId) => {
-                      setPrimaryAvatarId(nextAvatarId);
-                      setAvatarId(nextAvatarId);
-                    }}
-                  />
-                )}
-                <AvatarSetEditorDialog
-                  open={avatarSetDialogOpen}
-                  initial={editingAvatarSet}
-                  avatars={catalog?.avatars || []}
-                  voices={catalog?.voices || HEYGEN_CATALOG_FALLBACK_VOICES}
-                  onOpenChange={setAvatarSetDialogOpen}
-                  onSaved={handleAvatarSetSaved}
+              <div
+                id="roteiro-produzir"
+                className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
+              >
+                <SectionHeading
+                  index={2}
+                  title="Produção"
+                  description="Escolha quem aparece, a duração e mantenha parâmetros técnicos recolhidos."
                 />
-                {catalogError ? (
-                  <p className="text-[11px] leading-4 text-status-danger">
-                    HeyGen demorou para responder. Tente atualizar; se houver cache, o app usa a
-                    ultima lista salva.
-                  </p>
-                ) : null}
-              </div>
-              <div className="space-y-2">
-                <div>
-                  <Label className="text-xs">Humor da voz</Label>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    Escolha a emoção da fala. “Confiante” é o padrão para evitar uma voz triste ou
-                    melancólica.
-                  </p>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-                  {VOICE_MOOD_OPTIONS.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      aria-pressed={voiceMood === option.value}
-                      onClick={() => setVoiceMood(option.value)}
-                      className={cn(
-                        "min-h-20 rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        voiceMood === option.value &&
-                          "border-primary bg-primary/5 ring-1 ring-primary/30",
-                      )}
-                    >
-                      <span className="flex items-center justify-between gap-2 text-xs font-semibold">
-                        {option.label}
-                        {voiceMood === option.value ? (
-                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-primary" />
-                        ) : null}
-                      </span>
-                      <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-                        {option.description}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[11px] leading-4 text-muted-foreground">
-                  No Video Agent e no Cinematic, o humor vira direção de performance. Na produção
-                  guiada, o app ajusta ritmo e entonação dentro dos limites da voz clonada.
-                </p>
-              </div>
-              <div className="space-y-2">
-                <div>
-                  <Label className="text-xs">Quem monta o vídeo?</Label>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    Escolha entre produção guiada, agentes do HeyGen ou planejamento cinematográfico
-                    por shots.
-                  </p>
-                </div>
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                  <button
-                    type="button"
-                    aria-pressed={generationMode === "direct"}
-                    onClick={() => setGenerationMode("direct")}
-                    className={cn(
-                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
-                      generationMode === "direct" &&
-                        "border-primary bg-primary/5 ring-1 ring-primary/30",
-                    )}
-                  >
-                    <span className="flex items-center gap-2 text-xs font-semibold">
-                      <Film className="h-4 w-4 text-primary" /> Produção guiada pelo app
-                    </span>
-                    <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-                      Usa cenas, trocas de look e a transição escolhida aqui.
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={generationMode === "video_agent"}
-                    disabled={avatarMode === "set"}
-                    onClick={() => setGenerationMode("video_agent")}
-                    className={cn(
-                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50",
-                      generationMode === "video_agent" &&
-                        "border-primary bg-primary/5 ring-1 ring-primary/30",
-                    )}
-                  >
-                    <span className="flex items-center gap-2 text-xs font-semibold">
-                      <Sparkles className="h-4 w-4 text-primary" /> HeyGen Video Agent
-                    </span>
-                    <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-                      O HeyGen monta um job único com o avatar principal a partir do roteiro.
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={generationMode === "cinematic"}
-                    disabled={avatarMode === "set"}
-                    onClick={() => setGenerationMode("cinematic")}
-                    className={cn(
-                      "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50",
-                      generationMode === "cinematic" &&
-                        "border-primary bg-primary/5 ring-1 ring-primary/30",
-                    )}
-                  >
-                    <span className="flex items-center gap-2 text-xs font-semibold">
-                      <Film className="h-4 w-4 text-primary" /> Cinematic
-                    </span>
-                    <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-                      Um fluxo separado para câmera, encenação e acontecimentos no ambiente.
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={generationMode === "story"}
-                    disabled={avatarMode === "set"}
-                    onClick={() => setGenerationMode("story")}
-                    className={cn(
-                      "cursor-pointer rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
-                      generationMode === "story" &&
-                        "border-primary bg-primary/5 ring-1 ring-primary/30",
-                    )}
-                  >
-                    <span className="flex items-center gap-2 text-xs font-semibold">
-                      <Clapperboard className="h-4 w-4 text-primary" /> História cinematográfica
-                    </span>
-                    <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-                      Claude planeja a história e você aprova cada shot e o orçamento antes de
-                      gerar.
-                    </span>
-                  </button>
-                </div>
-                {avatarMode === "set" ? (
-                  <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-                    <span className="font-semibold text-foreground">
-                      Produção multicâmera protegida.
-                    </span>{" "}
-                    Este Avatar Set usa somente Produção guiada pelo app: uma tomada Direct Avatar
-                    por cena, sem b-roll, trilha, mistura de áudio ou job único do HeyGen.
-                  </div>
-                ) : generationMode === "video_agent" ? (
-                  <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-                    <span className="font-semibold text-foreground">Modo autônomo do HeyGen.</span>{" "}
-                    Enviamos fala aprovada, avatar principal, voz, humor, duração e formato. Ele não
-                    troca entre dois looks no mesmo job; para duas posições, use Produção guiada
-                    pelo app, que gera cenas separadas e contínuas. Nenhuma direção cinematic entra
-                    neste fluxo.
-                  </div>
-                ) : cinematicMode ? (
-                  <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-                    <span className="font-semibold text-foreground">Fluxo Cinematic separado.</span>{" "}
-                    Somente este modo recebe o briefing de câmera, encenação e ações de fundo. Ele
-                    não usa Scene Plan, slides ou a direção dos fluxos anteriores.
-                  </div>
-                ) : storyMode ? (
-                  <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-                    <span className="font-semibold text-foreground">
-                      Planejamento com controle humano.
-                    </span>{" "}
-                    A fala permanece imutável. Nenhum shot do HeyGen é reservado antes de Story
-                    Bible, storyboard, crítica e orçamento estarem aprovados.
-                  </div>
-                ) : null}
-              </div>
-              <div className="space-y-2">
-                <Label className="text-xs">Duração</Label>
-                <div className="flex flex-wrap gap-2">
-                  {([10, 15, 30, 45, 60, 90, 120, 180] as const).map((seconds) => (
-                    <button
-                      key={seconds}
-                      type="button"
-                      aria-pressed={durationSeconds === seconds}
-                      onClick={() => setProductionDuration(seconds)}
-                      className={cn(
-                        "h-9 rounded-md border px-3 text-sm font-medium transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        durationSeconds === seconds && "border-primary bg-primary/10 text-primary",
-                      )}
-                    >
-                      {seconds}s
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[11px] leading-4 text-muted-foreground">
-                  {durationSeconds <= 15
-                    ? "A duração final acompanha a fala, sem silêncio para completar o tempo."
-                    : storyMode
-                      ? "A duração orienta o Story Director e será distribuída entre os shots aprovados."
-                      : cinematicMode
-                        ? "O Cinematic organiza câmera, encenação e acontecimentos dentro deste tempo aproximado."
-                        : heygenAgentMode
-                          ? "O HeyGen Video Agent organiza um job único dentro deste tempo aproximado."
-                          : "O app distribui a fala em tomadas separadas e corta somente entre as duas câmeras."}
-                </p>
-                {durationSeconds > 60 ? (
-                  <p className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-status-info">
-                    Vídeos longos usam obrigatoriamente duas câmeras, com uma chamada HeyGen por
-                    tomada.
-                  </p>
-                ) : null}
-                {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
-              </div>
-              <Accordion type="single" collapsible>
-                <AccordionItem value="advanced-production">
-                  <AccordionTrigger>Configurações avançadas</AccordionTrigger>
-                  <AccordionContent>
-                    <div className="grid gap-3 pt-2 md:grid-cols-2">
-                      <Field label="Orientação">
-                        <Select
-                          value={orientation}
-                          onValueChange={(value) =>
-                            setOrientation(value as "portrait" | "landscape")
-                          }
+                <div className="mt-4 space-y-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <Label className="text-xs">Avatar</Label>
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          Escolha um look único ou duas posições da mesma identidade.
+                        </p>
+                      </div>
+                      {(catalogError || (!catalogLoading && !catalog?.avatars.length)) && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          onClick={() => loadCatalog(true)}
                         >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="portrait">Vertical - Reels e TikTok</SelectItem>
-                            <SelectItem value="landscape">Horizontal - YouTube</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                      <div className="space-y-1">
-                        <Label className="text-xs">Voz</Label>
-                        <div className="flex min-h-10 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
-                          {selectedVoiceName}
+                          <RotateCcw className="mr-1 h-3.5 w-3.5" />
+                          Atualizar
+                        </Button>
+                      )}
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        aria-pressed={avatarMode === "single"}
+                        onClick={() => {
+                          setAvatarMode("single");
+                          setAvatarSetId(null);
+                          setPrimaryAvatarId(avatarId);
+                        }}
+                        className={cn(
+                          "rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40",
+                          avatarMode === "single" &&
+                            "border-primary bg-primary/5 ring-1 ring-primary/30",
+                        )}
+                      >
+                        <span className="block text-xs font-semibold">Look único</span>
+                        <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                          Uma posição contínua para o avatar.
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={avatarMode === "set"}
+                        onClick={() => {
+                          if (avatarSets[0]) chooseAvatarSet(selectedAvatarSet || avatarSets[0]);
+                          else setAvatarSetDialogOpen(true);
+                        }}
+                        className={cn(
+                          "rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40",
+                          avatarMode === "set" &&
+                            "border-primary bg-primary/5 ring-1 ring-primary/30",
+                        )}
+                      >
+                        <span className="block text-xs font-semibold">Conjunto de looks</span>
+                        <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                          Duas posições para cortes naturais entre cenas.
+                        </span>
+                      </button>
+                    </div>
+                    {avatarMode === "single" ? (
+                      <AvatarPicker
+                        value={avatarId}
+                        avatars={catalog?.avatars || []}
+                        loading={catalogLoading}
+                        error={catalogError}
+                        onChange={chooseAvatar}
+                      />
+                    ) : (
+                      <AvatarSetSelector
+                        sets={avatarSets}
+                        selectedId={avatarSetId}
+                        selected={selectedAvatarSet}
+                        avatars={catalog?.avatars || []}
+                        selectedLooks={selectedSetLooks}
+                        primaryAvatarId={primaryAvatarId}
+                        loading={avatarSetsLoading}
+                        onSelect={chooseAvatarSet}
+                        onSaved={handleAvatarSetSaved}
+                        onCreate={() => {
+                          setEditingAvatarSet(null);
+                          setAvatarSetDialogOpen(true);
+                        }}
+                        onEdit={(setToEdit) => {
+                          setEditingAvatarSet(setToEdit);
+                          setAvatarSetDialogOpen(true);
+                        }}
+                        onDelete={(setToDelete) => void handleDeleteAvatarSet(setToDelete)}
+                        onPrimaryChange={(nextAvatarId) => {
+                          setPrimaryAvatarId(nextAvatarId);
+                          setAvatarId(nextAvatarId);
+                        }}
+                      />
+                    )}
+                    <AvatarSetEditorDialog
+                      open={avatarSetDialogOpen}
+                      initial={editingAvatarSet}
+                      avatars={catalog?.avatars || []}
+                      voices={catalog?.voices || HEYGEN_CATALOG_FALLBACK_VOICES}
+                      onOpenChange={setAvatarSetDialogOpen}
+                      onSaved={handleAvatarSetSaved}
+                    />
+                    {catalogError ? (
+                      <p className="text-[11px] leading-4 text-status-danger">
+                        HeyGen demorou para responder. Tente atualizar; se houver cache, o app usa a
+                        ultima lista salva.
+                      </p>
+                    ) : null}
+                  </div>
+                  {generationMode === "video_agent" ? (
+                    <div className="space-y-4 border-t pt-4">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <Label className="text-xs">Controles do Video Agent</Label>
+                          <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                            Opções oficiais da sessão e direções de criação enviadas junto ao
+                            roteiro.
+                          </p>
+                        </div>
+                        {agentOptionsLoading ? (
+                          <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Sincronizando HeyGen
+                          </span>
+                        ) : agentCapabilities ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            CLI HeyGen {agentCapabilities.cliVersion}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div className="grid gap-4 lg:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label className="text-xs">Fluxo</Label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              aria-pressed={videoAgentMode === "generate"}
+                              onClick={() => setVideoAgentMode("generate")}
+                              className={cn(
+                                "min-h-16 rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/40",
+                                videoAgentMode === "generate" &&
+                                  "border-primary bg-primary/5 ring-1 ring-primary/30",
+                              )}
+                            >
+                              <span className="block text-xs font-semibold">Autopilot</span>
+                              <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                                Pesquisa, planeja e gera em uma etapa.
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              aria-pressed={videoAgentMode === "chat"}
+                              disabled={agentCapabilities?.videoAgent.supportsChatMode === false}
+                              onClick={() => setVideoAgentMode("chat")}
+                              className={cn(
+                                "min-h-16 rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50",
+                                videoAgentMode === "chat" &&
+                                  "border-primary bg-primary/5 ring-1 ring-primary/30",
+                              )}
+                            >
+                              <span className="block text-xs font-semibold">Revisão com Agent</span>
+                              <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                                Abre uma sessão para decisões e revisões.
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label className="text-xs">Fonte dos visuais</Label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              aria-pressed={videoAgentVisualMode === "standard"}
+                              onClick={() => setVideoAgentVisualMode("standard")}
+                              className={cn(
+                                "min-h-16 rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/40",
+                                videoAgentVisualMode === "standard" &&
+                                  "border-primary bg-primary/5 ring-1 ring-primary/30",
+                              )}
+                            >
+                              <span className="block text-xs font-semibold">Standard</span>
+                              <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                                B-roll, stock, motion e anexos.
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              aria-pressed={videoAgentVisualMode === "seedance"}
+                              onClick={() => setVideoAgentVisualMode("seedance")}
+                              className={cn(
+                                "min-h-16 rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/40",
+                                videoAgentVisualMode === "seedance" &&
+                                  "border-primary bg-primary/5 ring-1 ring-primary/30",
+                              )}
+                            >
+                              <span className="flex items-center gap-1.5 text-xs font-semibold">
+                                <Sparkles className="h-3.5 w-3.5" /> Seedance
+                              </span>
+                              <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                                Visuais animados e cinematográficos.
+                              </span>
+                            </button>
+                          </div>
+                          <p className="text-[11px] leading-4 text-muted-foreground">
+                            Referência do app HeyGen: cerca de {estimatedAgentCredits} créditos para{" "}
+                            {durationSeconds}s. Na API v3 atual, Seedance é enviado como direção no
+                            prompt, pois ainda não existe um campo próprio no contrato.
+                          </p>
                         </div>
                       </div>
-                      <Field label="Modo de geração">
-                        <Select
-                          value={generationMode}
-                          onValueChange={(value) => setGenerationMode(value as GenerationMode)}
-                          disabled={avatarMode === "set"}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem
-                              value="direct"
-                              disabled={selectedAvatar?.supportsDirectAvatar === false}
-                            >
-                              Direct Avatar
-                            </SelectItem>
-                            <SelectItem value="video_agent" disabled={avatarMode === "set"}>
-                              Video Agent
-                            </SelectItem>
-                            <SelectItem value="cinematic" disabled={avatarMode === "set"}>
-                              Cinematic separado
-                            </SelectItem>
-                            <SelectItem value="story" disabled={avatarMode === "set"}>
-                              História cinematográfica
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                      <Field label="Ritmo da fala">
-                        <Select
-                          value={speechMode}
-                          onValueChange={(value) =>
-                            setSpeechMode(value as "natural" | "fiel" | "direto" | "enfatico")
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="natural">Natural - conversa fluida</SelectItem>
-                            <SelectItem value="fiel">Fiel - segue o roteiro</SelectItem>
-                            <SelectItem value="direto">Direto - curto e dinâmico</SelectItem>
-                            <SelectItem value="enfatico">Enfático - mais presença</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                      <Field label="Encerramento falado">
-                        <Select
-                          value={ctaMode}
-                          onValueChange={(value) =>
-                            setCtaMode(value as "auto" | "manual" | "none" | "visual")
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="auto">Automático com Claude</SelectItem>
-                            <SelectItem value="manual">Manual</SelectItem>
-                            <SelectItem value="none">Sem encerramento falado</SelectItem>
-                            <SelectItem value="visual">Apenas visual</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                      {avatarMode === "set" ? (
-                        <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-status-info">
-                          Duas câmeras: sem trilha. O áudio original de cada tomada será unido em
-                          corte seco.
-                        </div>
-                      ) : (
-                        <Field label="Trilha de fundo">
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <Field label="Estilo visual">
                           <Select
-                            value={musicTrackId || "none"}
-                            onValueChange={(value) =>
-                              setMusicTrackId(value === "none" ? null : value)
-                            }
+                            value={styleId || "auto"}
+                            onValueChange={(value) => setStyleId(value === "auto" ? "" : value)}
                           >
-                            <SelectTrigger>
-                              <SelectValue placeholder="Sem trilha" />
+                            <SelectTrigger aria-label="Estilo visual do Video Agent">
+                              <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="none">Sem trilha</SelectItem>
-                              {musicTracks.map((track) => (
-                                <SelectItem key={track.id} value={track.id}>
-                                  {track.name} · {track.mood}
+                              <SelectItem value="auto">Automático</SelectItem>
+                              {compatibleAgentStyles.map((style) => (
+                                <SelectItem key={style.style_id} value={style.style_id}>
+                                  {style.name}
                                 </SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
                         </Field>
-                      )}
-                    </div>
-                    {avatarMode !== "set" && selectedMusicTrack ? (
-                      <div className="mt-3 rounded-md border bg-muted/20 p-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 text-sm">
-                            <Volume2 className="h-4 w-4 text-primary" />
-                            <span className="font-medium">{selectedMusicTrack.name}</span>
-                            <span className="text-muted-foreground">
-                              {selectedMusicTrack.artist} · {selectedMusicTrack.mood}
-                            </span>
-                          </div>
-                          <span className="text-xs text-muted-foreground">
-                            A trilha entra baixa e não substitui a voz.
-                          </span>
-                        </div>
-                        <div className="mt-2 grid gap-2 md:grid-cols-[1fr_auto] md:items-center">
-                          <audio
-                            controls
-                            preload="none"
-                            className="h-9 w-full"
-                            src={selectedMusicTrack.url}
+                        <Field label="Brand System">
+                          <Select
+                            value={brandKitId || "none"}
+                            onValueChange={(value) => setBrandKitId(value === "none" ? "" : value)}
                           >
-                            Seu navegador não suporta a prévia de áudio.
-                          </audio>
-                          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                            Volume {Math.round(musicVolume * 100)}%
-                            <input
-                              type="range"
-                              min="3"
-                              max="25"
-                              value={Math.round(musicVolume * 100)}
-                              onChange={(event) => setMusicVolume(Number(event.target.value) / 100)}
-                              className="w-24 accent-primary"
-                            />
-                          </label>
-                        </div>
+                            <SelectTrigger aria-label="Brand System do Video Agent">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">Sem Brand System</SelectItem>
+                              {brandKits.map((kit) => (
+                                <SelectItem key={kit.brand_kit_id} value={kit.brand_kit_id}>
+                                  {kit.name.trim()}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </Field>
                       </div>
-                    ) : null}
-                    {avatarMode !== "set" ? (
-                      <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-                        A música só é mixada localmente no MP4 final composto; não cria chamada
-                        Claude nem HeyGen.
-                      </p>
-                    ) : null}
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <FriendlySwitch
-                        icon={<Captions className="h-4 w-4" />}
-                        label="Legendas automáticas"
-                        description="Texto em português acompanhando a fala"
-                        checked={captions}
-                        onCheckedChange={setCaptions}
-                      />
-                      <FriendlySwitch
-                        icon={<Sparkles className="h-4 w-4" />}
-                        label="Melhorar pronúncia"
-                        description="Ajusta siglas, remédios e números para a voz"
-                        checked={optimizePronunciation}
-                        onCheckedChange={setOptimizePronunciation}
-                      />
-                    </div>
-                    {ctaMode === "manual" && durationSeconds !== 10 ? (
-                      <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
-                        <Label htmlFor="outro-text" className="text-xs font-medium">
-                          Frase final do vídeo
-                        </Label>
-                        <div className="mt-2 flex gap-2">
-                          <Input
-                            id="outro-text"
-                            value={outroText}
-                            onChange={(event) => setOutroText(event.target.value)}
-                            placeholder="Ex.: Salve para rever este ponto."
-                            maxLength={180}
-                          />
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            onClick={() =>
-                              setDisplayText((current) => {
-                                editorRevisionRef.current += 1;
-                                return normalizeNarrationOutro(current, outroText);
-                              })
-                            }
-                          >
-                            Aplicar
-                          </Button>
-                        </div>
-                      </div>
-                    ) : null}
-                    <div className="mt-3">
-                      <Label htmlFor="spoken-text">Texto enviado à voz</Label>
-                      <p className="mt-0.5 text-[11px] text-muted-foreground">
-                        Ajustes fonéticos ficam somente aqui, nunca na legenda.
-                      </p>
-                      <Textarea
-                        id="spoken-text"
-                        rows={5}
-                        value={spokenText}
-                        onChange={(event) => setSpokenText(event.target.value)}
-                        className="mt-2 leading-6"
-                      />
-                    </div>
-                    {performancePlan ? (
-                      <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-                        <span className="font-medium text-foreground">Plano de performance:</span>{" "}
-                        {performancePlan.tone} · {performancePlan.pace} · {performancePlan.emotion}{" "}
-                        · speed {performancePlan.recommendedVoiceSpeed}.
-                      </div>
-                    ) : null}
-                  </AccordionContent>
-                </AccordionItem>
-              </Accordion>
-              <div className="mt-2 flex items-start gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-                <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />A fala
-                exata será validada antes do envio ao HeyGen. Dose, promessa ou instrução
-                prescritiva bloqueiam a geração paga até a correção.
-              </div>
-            </div>
-          </div>
 
-          <div
-            id="roteiro-direcao"
-            className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
-          >
-            <SectionHeading
-              index={3}
-              title="Direção"
-              description={
-                storyMode
-                  ? "Planeje a narrativa, revise cada shot e aprove o pior cenário de custo antes de gerar vídeo."
-                  : cinematicMode
-                    ? "Briefing exclusivo do Cinematic. Ele não altera Scene Plan, slides ou o Video Agent comum."
-                    : generationMode === "video_agent"
-                      ? "O Video Agent comum cria a edição sem receber nenhuma direção cinematic."
-                      : "Depois de escolher duração e avatar, deixe o Claude organizar as cenas e escolha a transição entre os looks."
-              }
-            />
-            <div className="mt-4">
-              {storyMode ? (
-                <StoryModeEditor
-                  scriptId={id}
-                  title={draft.titulo}
-                  durationSeconds={durationSeconds}
-                  orientation={orientation}
-                  characterId={avatarSetId || avatarId || null}
-                  lookId={primaryAvatarId || avatarId || null}
-                  characterDescription={
-                    selectedAvatar?.name
-                      ? `${selectedAvatar.name}, identidade visual aprovada no catálogo.`
-                      : ""
-                  }
-                  wardrobeDirection={selectedAvatarSet?.name || "Manter o look aprovado."}
-                />
-              ) : cinematicMode ? (
-                <div className="space-y-3">
-                  <div className="rounded-xl border bg-muted/20 p-4">
-                    <Label htmlFor="cinematic-prompt" className="text-sm font-semibold">
-                      Direção cinematic
-                    </Label>
-                    <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                      Escreva clima, câmera, ações de fundo e apoios visuais. O agente interpreta
-                      isso como direção visual, nunca como fala.
-                    </p>
-                    <Textarea
-                      id="cinematic-prompt"
-                      rows={5}
-                      value={cinematicPrompt}
-                      onChange={(event) => setCinematicPrompt(event.target.value)}
-                      className="mt-3 leading-6"
-                      placeholder="Ex.: Gui andando pela cidade, tom editorial sóbrio, câmera acompanhando. Ao fundo, sinais discretos de busca por solução rápida, limitação de mobilidade e dificuldade no transporte. Evitar humor, caricatura e exagero."
-                    />
-                  </div>
-                  <div className="rounded-xl border border-primary/30 bg-primary/5 p-4">
-                    <div className="flex items-start gap-2">
-                      <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                      <div>
-                        <h3 className="text-sm font-semibold">Direção exclusiva do Cinematic</h3>
-                        <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                          Ao enviar este modo, o agente recebe a fala aprovada e somente este
-                          briefing. Os fluxos de cenas, slides e Video Agent comum permanecem
-                          separados.
+                      <div className="space-y-2">
+                        <Label htmlFor="video-agent-instructions" className="text-xs">
+                          Instruções para edição
+                        </Label>
+                        <Textarea
+                          id="video-agent-instructions"
+                          value={videoAgentInstructions}
+                          onChange={(event) => setVideoAgentInstructions(event.target.value)}
+                          placeholder="Estilo visual, ritmo, tom, estrutura de cenas, mídia e motion design."
+                          maxLength={2000}
+                          className="min-h-24"
+                        />
+                        <p className="text-right text-[11px] text-muted-foreground">
+                          {videoAgentInstructions.length}/2000
                         </p>
                       </div>
+
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <Label className="text-xs">Anexos</Label>
+                            <p className="mt-0.5 text-[11px] text-muted-foreground">
+                              Imagens, vídeos, áudio, PDF ou SRT, até 32 MB por arquivo e 20 no
+                              total.
+                            </p>
+                          </div>
+                          <Button asChild type="button" variant="outline" size="sm">
+                            <label className="cursor-pointer">
+                              {uploadingAgentAttachment ? (
+                                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                              ) : (
+                                <Paperclip className="mr-1.5 h-4 w-4" />
+                              )}
+                              {uploadingAgentAttachment ? "Enviando..." : "Adicionar"}
+                              <input
+                                type="file"
+                                multiple
+                                className="sr-only"
+                                disabled={uploadingAgentAttachment}
+                                accept="image/png,image/jpeg,video/mp4,video/webm,audio/mpeg,audio/wav,application/pdf,.srt,text/plain"
+                                onChange={(event) => {
+                                  void addAgentAttachments(event.target.files);
+                                  event.currentTarget.value = "";
+                                }}
+                              />
+                            </label>
+                          </Button>
+                        </div>
+                        {videoAgentAttachments.length ? (
+                          <div className="flex flex-wrap gap-2">
+                            {videoAgentAttachments.map((attachment) => (
+                              <span
+                                key={attachment.assetId}
+                                className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1 text-xs"
+                              >
+                                <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                                <span className="max-w-56 truncate">{attachment.name}</span>
+                                <button
+                                  type="button"
+                                  aria-label={`Remover ${attachment.name}`}
+                                  onClick={() =>
+                                    setVideoAgentAttachments((current) =>
+                                      current.filter((item) => item.assetId !== attachment.assetId),
+                                    )
+                                  }
+                                  className="rounded-sm p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <FriendlySwitch
+                        icon={<EyeOff className="h-4 w-4" />}
+                        label="Sessão privada"
+                        description="Desativa a injeção e a extração de memória nesta sessão do Agent"
+                        checked={videoAgentIncognitoMode}
+                        onCheckedChange={setVideoAgentIncognitoMode}
+                      />
+
+                      <div className="flex items-start gap-2 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                        <Palette className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-info" />
+                        Duração e Seedance são direções de prompt na API atual. Orientação, estilo,
+                        Brand System, anexos, privacidade e fluxo são campos nativos do Video Agent
+                        v3.
+                      </div>
                     </div>
-                  </div>
-                </div>
-              ) : generationMode === "video_agent" ? (
-                <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4">
-                  <div className="flex items-start gap-2">
-                    <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                  ) : null}
+                  <div className="space-y-2">
                     <div>
-                      <h3 className="text-sm font-semibold">Video Agent sem Cinematic</h3>
-                      <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                        Este fluxo recebe somente fala, performance, avatar, duração e formato.
-                        Nenhum briefing cinematic, Scene Plan ou slide local é enviado.
+                      <Label className="text-xs">Humor da voz</Label>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        Escolha a emoção da fala. “Confiante” é o padrão para evitar uma voz triste
+                        ou melancólica.
                       </p>
                     </div>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                      {VOICE_MOOD_OPTIONS.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          aria-pressed={voiceMood === option.value}
+                          onClick={() => setVoiceMood(option.value)}
+                          className={cn(
+                            "min-h-20 rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            voiceMood === option.value &&
+                              "border-primary bg-primary/5 ring-1 ring-primary/30",
+                          )}
+                        >
+                          <span className="flex items-center justify-between gap-2 text-xs font-semibold">
+                            {option.label}
+                            {voiceMood === option.value ? (
+                              <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-primary" />
+                            ) : null}
+                          </span>
+                          <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                            {option.description}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[11px] leading-4 text-muted-foreground">
+                      No Video Agent e no Cinematic, o humor vira direção de performance. Na
+                      produção guiada, o app ajusta ritmo e entonação dentro dos limites da voz
+                      clonada.
+                    </p>
                   </div>
-                </div>
-              ) : (
-                <>
-                  <ScenePlanEditor
-                    scriptId={id}
-                    loading={scenePlanLoading}
-                    plan={scenePlan}
-                    fallbackText={displayText || narrationText}
-                    displayText={displayText || narrationText}
-                    spokenText={spokenText}
-                    durationSeconds={durationSeconds}
-                    performancePlan={performancePlan}
-                    availableRoles={sceneRoles}
-                    onSaved={setScenePlan}
-                    onApplyClaudePlan={applyClaudeScenePlan}
-                  />
-                  <Accordion type="single" collapsible className="mt-3">
-                    <AccordionItem value="scene-generation-details">
-                      <AccordionTrigger>Detalhes técnicos da geração por cena</AccordionTrigger>
+                  <div className="space-y-2">
+                    <div>
+                      <Label className="text-xs">Quem monta o vídeo?</Label>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        Escolha entre produção guiada, agentes do HeyGen ou planejamento
+                        cinematográfico por shots.
+                      </p>
+                    </div>
+                    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                      <button
+                        type="button"
+                        aria-pressed={generationMode === "direct"}
+                        onClick={() => setGenerationMode("direct")}
+                        className={cn(
+                          "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40",
+                          generationMode === "direct" &&
+                            "border-primary bg-primary/5 ring-1 ring-primary/30",
+                        )}
+                      >
+                        <span className="flex items-center gap-2 text-xs font-semibold">
+                          <Film className="h-4 w-4 text-primary" /> Produção guiada pelo app
+                        </span>
+                        <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                          Usa cenas, trocas de look e a transição escolhida aqui.
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={generationMode === "video_agent"}
+                        disabled={avatarMode === "set"}
+                        onClick={() => setGenerationMode("video_agent")}
+                        className={cn(
+                          "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50",
+                          generationMode === "video_agent" &&
+                            "border-primary bg-primary/5 ring-1 ring-primary/30",
+                        )}
+                      >
+                        <span className="flex items-center gap-2 text-xs font-semibold">
+                          <Sparkles className="h-4 w-4 text-primary" /> HeyGen Video Agent
+                        </span>
+                        <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                          O HeyGen monta um job único com o avatar principal a partir do roteiro.
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={generationMode === "cinematic"}
+                        disabled={avatarMode === "set"}
+                        onClick={() => setGenerationMode("cinematic")}
+                        className={cn(
+                          "rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50",
+                          generationMode === "cinematic" &&
+                            "border-primary bg-primary/5 ring-1 ring-primary/30",
+                        )}
+                      >
+                        <span className="flex items-center gap-2 text-xs font-semibold">
+                          <Film className="h-4 w-4 text-primary" /> Cinematic
+                        </span>
+                        <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                          Um fluxo separado para câmera, encenação e acontecimentos no ambiente.
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={generationMode === "story"}
+                        disabled={avatarMode === "set"}
+                        onClick={() => setGenerationMode("story")}
+                        className={cn(
+                          "cursor-pointer rounded-lg border px-3 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                          generationMode === "story" &&
+                            "border-primary bg-primary/5 ring-1 ring-primary/30",
+                        )}
+                      >
+                        <span className="flex items-center gap-2 text-xs font-semibold">
+                          <Clapperboard className="h-4 w-4 text-primary" /> História cinematográfica
+                        </span>
+                        <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                          Claude planeja a história e você aprova cada shot e o orçamento antes de
+                          gerar.
+                        </span>
+                      </button>
+                    </div>
+                    {avatarMode === "set" ? (
+                      <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                        <span className="font-semibold text-foreground">
+                          Produção multicâmera protegida.
+                        </span>{" "}
+                        Este Avatar Set usa somente Produção guiada pelo app: uma tomada Direct
+                        Avatar por cena, sem b-roll, trilha, mistura de áudio ou job único do
+                        HeyGen.
+                      </div>
+                    ) : generationMode === "video_agent" ? (
+                      <div className="rounded-lg border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                        <span className="font-semibold text-foreground">
+                          Modo autônomo do HeyGen.
+                        </span>{" "}
+                        Enviamos fala aprovada, avatar principal, voz, humor, duração e formato. Ele
+                        não troca entre dois looks no mesmo job; para duas posições, use Produção
+                        guiada pelo app, que gera cenas separadas e contínuas. Nenhuma direção
+                        cinematic entra neste fluxo.
+                      </div>
+                    ) : cinematicMode ? (
+                      <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                        <span className="font-semibold text-foreground">
+                          Fluxo Cinematic separado.
+                        </span>{" "}
+                        Somente este modo recebe o briefing de câmera, encenação e ações de fundo.
+                        Ele não usa Scene Plan, slides ou a direção dos fluxos anteriores.
+                      </div>
+                    ) : storyMode ? (
+                      <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                        <span className="font-semibold text-foreground">
+                          Planejamento com controle humano.
+                        </span>{" "}
+                        A fala permanece imutável. Nenhum shot do HeyGen é reservado antes de Story
+                        Bible, storyboard, crítica e orçamento estarem aprovados.
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs">Duração</Label>
+                    <div className="flex flex-wrap gap-2">
+                      {([10, 15, 30, 45, 60, 90, 120, 180] as const).map((seconds) => (
+                        <button
+                          key={seconds}
+                          type="button"
+                          aria-pressed={durationSeconds === seconds}
+                          onClick={() => setProductionDuration(seconds)}
+                          className={cn(
+                            "h-9 rounded-md border px-3 text-sm font-medium transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            durationSeconds === seconds &&
+                              "border-primary bg-primary/10 text-primary",
+                          )}
+                        >
+                          {seconds}s
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[11px] leading-4 text-muted-foreground">
+                      {durationSeconds <= 15
+                        ? "A duração final acompanha a fala, sem silêncio para completar o tempo."
+                        : storyMode
+                          ? "A duração orienta o Story Director e será distribuída entre os shots aprovados."
+                          : cinematicMode
+                            ? "O Cinematic organiza câmera, encenação e acontecimentos dentro deste tempo aproximado."
+                            : heygenAgentMode
+                              ? "O HeyGen Video Agent organiza um job único dentro deste tempo aproximado."
+                              : "O app distribui a fala em tomadas separadas e corta somente entre as duas câmeras."}
+                    </p>
+                    {durationSeconds > 60 && generationMode === "direct" ? (
+                      <p className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-[11px] leading-4 text-status-info">
+                        Vídeos longos usam obrigatoriamente duas câmeras, com uma chamada HeyGen por
+                        tomada.
+                      </p>
+                    ) : null}
+                    {hasHighCreditConsumption ? <HighCreditConsumptionNotice /> : null}
+                  </div>
+                  <Accordion type="single" collapsible>
+                    <AccordionItem value="advanced-production">
+                      <AccordionTrigger>Configurações avançadas</AccordionTrigger>
                       <AccordionContent>
-                        <SceneGenerationSummary
-                          plan={sceneGenerationPlan}
-                          loading={sceneGenerationPlanLoading}
-                          durationSeconds={durationSeconds}
-                          avatarMode={avatarMode}
-                        />
+                        <div className="grid gap-3 pt-2 md:grid-cols-2">
+                          <Field label="Orientação">
+                            <Select
+                              value={orientation}
+                              onValueChange={(value) =>
+                                setOrientation(value as "portrait" | "landscape")
+                              }
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="portrait">Vertical - Reels e TikTok</SelectItem>
+                                <SelectItem value="landscape">Horizontal - YouTube</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </Field>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Voz</Label>
+                            <div className="flex min-h-10 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
+                              {selectedVoiceName}
+                            </div>
+                          </div>
+                          <Field label="Modo de geração">
+                            <Select
+                              value={generationMode}
+                              onValueChange={(value) => setGenerationMode(value as GenerationMode)}
+                              disabled={avatarMode === "set"}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem
+                                  value="direct"
+                                  disabled={selectedAvatar?.supportsDirectAvatar === false}
+                                >
+                                  Direct Avatar
+                                </SelectItem>
+                                <SelectItem value="video_agent" disabled={avatarMode === "set"}>
+                                  Video Agent
+                                </SelectItem>
+                                <SelectItem value="cinematic" disabled={avatarMode === "set"}>
+                                  Cinematic separado
+                                </SelectItem>
+                                <SelectItem value="story" disabled={avatarMode === "set"}>
+                                  História cinematográfica
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </Field>
+                          <Field label="Ritmo da fala">
+                            <Select
+                              value={speechMode}
+                              onValueChange={(value) =>
+                                setSpeechMode(value as "natural" | "fiel" | "direto" | "enfatico")
+                              }
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="natural">Natural - conversa fluida</SelectItem>
+                                <SelectItem value="fiel">Fiel - segue o roteiro</SelectItem>
+                                <SelectItem value="direto">Direto - curto e dinâmico</SelectItem>
+                                <SelectItem value="enfatico">Enfático - mais presença</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </Field>
+                          <Field label="Encerramento falado">
+                            <Select
+                              value={ctaMode}
+                              onValueChange={(value) =>
+                                setCtaMode(value as "auto" | "manual" | "none" | "visual")
+                              }
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="auto">Automático com Claude</SelectItem>
+                                <SelectItem value="manual">Manual</SelectItem>
+                                <SelectItem value="none">Sem encerramento falado</SelectItem>
+                                <SelectItem value="visual">Apenas visual</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </Field>
+                          {avatarMode === "set" ? (
+                            <div className="rounded-md border border-status-info/30 bg-status-info/5 px-3 py-2 text-xs text-status-info">
+                              Duas câmeras: sem trilha. O áudio original de cada tomada será unido
+                              em corte seco.
+                            </div>
+                          ) : (
+                            <Field label="Trilha de fundo">
+                              <Select
+                                value={musicTrackId || "none"}
+                                onValueChange={(value) =>
+                                  setMusicTrackId(value === "none" ? null : value)
+                                }
+                              >
+                                <SelectTrigger>
+                                  <SelectValue placeholder="Sem trilha" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="none">Sem trilha</SelectItem>
+                                  {musicTracks.map((track) => (
+                                    <SelectItem key={track.id} value={track.id}>
+                                      {track.name} · {track.mood}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </Field>
+                          )}
+                        </div>
+                        {avatarMode !== "set" && selectedMusicTrack ? (
+                          <div className="mt-3 rounded-md border bg-muted/20 p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 text-sm">
+                                <Volume2 className="h-4 w-4 text-primary" />
+                                <span className="font-medium">{selectedMusicTrack.name}</span>
+                                <span className="text-muted-foreground">
+                                  {selectedMusicTrack.artist} · {selectedMusicTrack.mood}
+                                </span>
+                              </div>
+                              <span className="text-xs text-muted-foreground">
+                                A trilha entra baixa e não substitui a voz.
+                              </span>
+                            </div>
+                            <div className="mt-2 grid gap-2 md:grid-cols-[1fr_auto] md:items-center">
+                              <audio
+                                controls
+                                preload="none"
+                                className="h-9 w-full"
+                                src={selectedMusicTrack.url}
+                              >
+                                Seu navegador não suporta a prévia de áudio.
+                              </audio>
+                              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                                Volume {Math.round(musicVolume * 100)}%
+                                <input
+                                  type="range"
+                                  min="3"
+                                  max="25"
+                                  value={Math.round(musicVolume * 100)}
+                                  onChange={(event) =>
+                                    setMusicVolume(Number(event.target.value) / 100)
+                                  }
+                                  className="w-24 accent-primary"
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        ) : null}
+                        {avatarMode !== "set" ? (
+                          <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+                            A música só é mixada localmente no MP4 final composto; não cria chamada
+                            Claude nem HeyGen.
+                          </p>
+                        ) : null}
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          <FriendlySwitch
+                            icon={<Captions className="h-4 w-4" />}
+                            label="Legendas automáticas"
+                            description="Texto em português acompanhando a fala"
+                            checked={captions}
+                            onCheckedChange={setCaptions}
+                          />
+                          <FriendlySwitch
+                            icon={<Sparkles className="h-4 w-4" />}
+                            label="Melhorar pronúncia"
+                            description="Ajusta siglas, remédios e números para a voz"
+                            checked={optimizePronunciation}
+                            onCheckedChange={setOptimizePronunciation}
+                          />
+                        </div>
+                        {ctaMode === "manual" && durationSeconds !== 10 ? (
+                          <div className="mt-3 rounded-md border border-status-info/30 bg-status-info/5 px-3 py-3">
+                            <Label htmlFor="outro-text" className="text-xs font-medium">
+                              Frase final do vídeo
+                            </Label>
+                            <div className="mt-2 flex gap-2">
+                              <Input
+                                id="outro-text"
+                                value={outroText}
+                                onChange={(event) => setOutroText(event.target.value)}
+                                placeholder="Ex.: Salve para rever este ponto."
+                                maxLength={180}
+                              />
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                onClick={() =>
+                                  setDisplayText((current) => {
+                                    editorRevisionRef.current += 1;
+                                    return normalizeNarrationOutro(current, outroText);
+                                  })
+                                }
+                              >
+                                Aplicar
+                              </Button>
+                            </div>
+                          </div>
+                        ) : null}
+                        <div className="mt-3">
+                          <Label htmlFor="spoken-text">Texto enviado à voz</Label>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                            Ajustes fonéticos ficam somente aqui, nunca na legenda.
+                          </p>
+                          <Textarea
+                            id="spoken-text"
+                            rows={5}
+                            value={spokenText}
+                            onChange={(event) => setSpokenText(event.target.value)}
+                            className="mt-2 leading-6"
+                          />
+                        </div>
+                        {performancePlan ? (
+                          <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                            <span className="font-medium text-foreground">
+                              Plano de performance:
+                            </span>{" "}
+                            {performancePlan.tone} · {performancePlan.pace} ·{" "}
+                            {performancePlan.emotion} · speed{" "}
+                            {performancePlan.recommendedVoiceSpeed}.
+                          </div>
+                        ) : null}
                       </AccordionContent>
                     </AccordionItem>
                   </Accordion>
-                </>
-              )}
-            </div>
-          </div>
-
-          <div id="roteiro-gerar" className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm">
-            <SectionHeading
-              index={4}
-              title="Gerar"
-              description="Confirme que fala, avatar, direção e compliance estão prontos antes de gastar créditos."
-            />
-            <div className="mt-4 space-y-3">
-              {storyMode ? (
-                <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
-                  <div className="flex items-start gap-2">
-                    <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                    <div>
-                      <h3 className="text-sm font-semibold">Geração protegida por aprovação</h3>
-                      <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                        Use a etapa Direção para aprovar Story Bible, todos os shots, a crítica e o
-                        orçamento. A geração por shots será liberada somente com esses vínculos
-                        válidos.
-                      </p>
-                    </div>
+                  <div className="mt-2 flex items-start gap-2 rounded-md border border-status-success/30 bg-status-success/10 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                    <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" />A
+                    fala exata será validada antes do envio ao HeyGen. Dose, promessa ou instrução
+                    prescritiva bloqueiam a geração paga até a correção.
                   </div>
                 </div>
-              ) : (
-                <ProductionGateChecklist
-                  items={productionChecklist}
-                  blockedReason={productionBlockedReason}
-                  latestJobId={latestJob?.id}
-                  dirty={dirty}
-                  narrationWords={narrationWords}
-                  estimatedSpeechSeconds={estimatedSpeechSeconds}
-                  onOpenLatest={
-                    latestJob
-                      ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } })
-                      : undefined
+              </div>
+
+              <div
+                id="roteiro-direcao"
+                className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
+              >
+                <SectionHeading
+                  index={3}
+                  title="Direção"
+                  description={
+                    storyMode
+                      ? "Planeje a narrativa, revise cada shot e aprove o pior cenário de custo antes de gerar vídeo."
+                      : cinematicMode
+                        ? "Briefing exclusivo do Cinematic. Ele não altera Scene Plan, slides ou o Video Agent comum."
+                        : generationMode === "video_agent"
+                          ? "O Video Agent comum cria a edição sem receber nenhuma direção cinematic."
+                          : "Depois de escolher duração e avatar, deixe o Claude organizar as cenas e escolha a transição entre os looks."
                   }
-                  onSend={() => void enviarProducao(false)}
                 />
-              )}
-              {latestPreview ? (
-                <div className="rounded-lg border border-status-info/30 bg-status-info/5 p-3 text-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="font-semibold">Prévia técnica de avatar e voz</div>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Valida voz e enquadramento; não representa toda a composição final.
-                      </p>
-                    </div>
-                    <Button size="sm" variant="secondary" asChild>
-                      <Link to="/producao/$id" params={{ id: latestPreview.id }}>
-                        Abrir prévia
-                      </Link>
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
-              {captureHook && siblingCaptureScripts.length > 1 ? (
-                <Accordion type="single" collapsible>
-                  <AccordionItem value="capture-variants">
-                    <AccordionTrigger>Comparar roteiros de 10s</AccordionTrigger>
-                    <AccordionContent>
-                      <div className="grid gap-2 pt-2 sm:grid-cols-3">
-                        {siblingCaptureScripts.map((candidate, index) => (
-                          <Link
-                            key={candidate.id}
-                            to="/roteiros/$id"
-                            params={{ id: candidate.id }}
-                            className={`rounded-lg border p-3 text-sm transition-colors ${candidate.id === script.id ? "border-status-info bg-background" : "bg-background/60 hover:border-status-info/50"}`}
-                          >
-                            <div className="text-[10px] font-semibold uppercase tracking-wider text-status-info">
-                              Teste {index + 1}
-                            </div>
-                            <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
-                              {candidate.textoFalado}
-                            </p>
-                          </Link>
-                        ))}
+                <div className="mt-4">
+                  {storyMode ? (
+                    <StoryModeEditor
+                      scriptId={id}
+                      title={draft.titulo}
+                      durationSeconds={durationSeconds}
+                      orientation={orientation}
+                      characterId={avatarSetId || avatarId || null}
+                      lookId={primaryAvatarId || avatarId || null}
+                      characterDescription={
+                        selectedAvatar?.name
+                          ? `${selectedAvatar.name}, identidade visual aprovada no catálogo.`
+                          : ""
+                      }
+                      wardrobeDirection={selectedAvatarSet?.name || "Manter o look aprovado."}
+                    />
+                  ) : cinematicMode ? (
+                    <div className="space-y-3">
+                      <div className="rounded-xl border bg-muted/20 p-4">
+                        <Label htmlFor="cinematic-prompt" className="text-sm font-semibold">
+                          Direção cinematic
+                        </Label>
+                        <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                          Escreva clima, câmera, ações de fundo e apoios visuais. O agente
+                          interpreta isso como direção visual, nunca como fala.
+                        </p>
+                        <Textarea
+                          id="cinematic-prompt"
+                          rows={5}
+                          value={cinematicPrompt}
+                          onChange={(event) => setCinematicPrompt(event.target.value)}
+                          className="mt-3 leading-6"
+                          placeholder="Ex.: Gui andando pela cidade, tom editorial sóbrio, câmera acompanhando. Ao fundo, sinais discretos de busca por solução rápida, limitação de mobilidade e dificuldade no transporte. Evitar humor, caricatura e exagero."
+                        />
                       </div>
-                    </AccordionContent>
-                  </AccordionItem>
-                </Accordion>
-              ) : null}
+                      <div className="rounded-xl border border-primary/30 bg-primary/5 p-4">
+                        <div className="flex items-start gap-2">
+                          <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                          <div>
+                            <h3 className="text-sm font-semibold">
+                              Direção exclusiva do Cinematic
+                            </h3>
+                            <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                              Ao enviar este modo, o agente recebe a fala aprovada e somente este
+                              briefing. Os fluxos de cenas, slides e Video Agent comum permanecem
+                              separados.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : generationMode === "video_agent" ? (
+                    <div className="rounded-xl border border-status-info/30 bg-status-info/5 p-4">
+                      <div className="flex items-start gap-2">
+                        <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                        <div>
+                          <h3 className="text-sm font-semibold">Video Agent sem Cinematic</h3>
+                          <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                            Este fluxo recebe somente fala, performance, avatar, duração e formato.
+                            Nenhum briefing cinematic, Scene Plan ou slide local é enviado.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <ScenePlanEditor
+                        scriptId={id}
+                        loading={scenePlanLoading}
+                        plan={scenePlan}
+                        fallbackText={displayText || narrationText}
+                        displayText={displayText || narrationText}
+                        spokenText={spokenText}
+                        durationSeconds={durationSeconds}
+                        performancePlan={performancePlan}
+                        availableRoles={sceneRoles}
+                        onSaved={setScenePlan}
+                        onApplyClaudePlan={applyClaudeScenePlan}
+                      />
+                      <Accordion type="single" collapsible className="mt-3">
+                        <AccordionItem value="scene-generation-details">
+                          <AccordionTrigger>Detalhes técnicos da geração por cena</AccordionTrigger>
+                          <AccordionContent>
+                            <SceneGenerationSummary
+                              plan={sceneGenerationPlan}
+                              loading={sceneGenerationPlanLoading}
+                              durationSeconds={durationSeconds}
+                              avatarMode={avatarMode}
+                            />
+                          </AccordionContent>
+                        </AccordionItem>
+                      </Accordion>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div
+                id="roteiro-gerar"
+                className="scroll-mt-20 rounded-xl border bg-card p-4 shadow-sm"
+              >
+                <SectionHeading
+                  index={4}
+                  title="Gerar"
+                  description="Confirme que fala, avatar, direção e compliance estão prontos antes de gastar créditos."
+                />
+                <div className="mt-4 space-y-3">
+                  {storyMode ? (
+                    <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
+                      <div className="flex items-start gap-2">
+                        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                        <div>
+                          <h3 className="text-sm font-semibold">Geração protegida por aprovação</h3>
+                          <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                            Use a etapa Direção para aprovar Story Bible, todos os shots, a crítica
+                            e o orçamento. A geração por shots será liberada somente com esses
+                            vínculos válidos.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <ProductionGateChecklist
+                      items={productionChecklist}
+                      blockedReason={productionBlockedReason}
+                      latestJobId={latestJob?.id}
+                      dirty={dirty}
+                      narrationWords={narrationWords}
+                      estimatedSpeechSeconds={estimatedSpeechSeconds}
+                      onOpenLatest={
+                        latestJob
+                          ? () => navigate({ to: "/producao/$id", params: { id: latestJob.id } })
+                          : undefined
+                      }
+                      onSend={() => void enviarProducao(false)}
+                    />
+                  )}
+                  {latestPreview ? (
+                    <div className="rounded-lg border border-status-info/30 bg-status-info/5 p-3 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="font-semibold">Prévia técnica de avatar e voz</div>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Valida voz e enquadramento; não representa toda a composição final.
+                          </p>
+                        </div>
+                        <Button size="sm" variant="secondary" asChild>
+                          <Link to="/producao/$id" params={{ id: latestPreview.id }}>
+                            Abrir prévia
+                          </Link>
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {captureHook && siblingCaptureScripts.length > 1 ? (
+                    <Accordion type="single" collapsible>
+                      <AccordionItem value="capture-variants">
+                        <AccordionTrigger>Comparar roteiros de 10s</AccordionTrigger>
+                        <AccordionContent>
+                          <div className="grid gap-2 pt-2 sm:grid-cols-3">
+                            {siblingCaptureScripts.map((candidate, index) => (
+                              <Link
+                                key={candidate.id}
+                                to="/roteiros/$id"
+                                params={{ id: candidate.id }}
+                                className={`rounded-lg border p-3 text-sm transition-colors ${candidate.id === script.id ? "border-status-info bg-background" : "bg-background/60 hover:border-status-info/50"}`}
+                              >
+                                <div className="text-[10px] font-semibold uppercase tracking-wider text-status-info">
+                                  Teste {index + 1}
+                                </div>
+                                <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
+                                  {candidate.textoFalado}
+                                </p>
+                              </Link>
+                            ))}
+                          </div>
+                        </AccordionContent>
+                      </AccordionItem>
+                    </Accordion>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div id="roteiro-compliance" className="scroll-mt-20 space-y-3">
+              <ProductionReadinessCard
+                catalogLoading={catalogLoading}
+                catalogError={catalogError}
+                avatarReady={selectedAvatarReady}
+                voiceReady={Boolean(voiceId)}
+                speechReady={blockingQualityIssues.length === 0}
+                speechIssue={qualityIssues[0]}
+                saved={!dirty}
+              />
+              <CompliancePanel
+                fields={complianceFields}
+                palavrasProibidas={palavras}
+                rules={complianceRules}
+              />
             </div>
           </div>
-        </div>
+        </TabsContent>
 
-        <div id="roteiro-compliance" className="scroll-mt-20 space-y-3">
-          <ProductionReadinessCard
+        <TabsContent value="podcast" className="mt-0">
+          <PodcastEditor
+            scriptId={id}
+            scriptTitle={draft.titulo}
+            sourceText={displayText}
+            catalog={catalog}
             catalogLoading={catalogLoading}
             catalogError={catalogError}
-            avatarReady={selectedAvatarReady}
-            voiceReady={Boolean(voiceId)}
-            speechReady={blockingQualityIssues.length === 0}
-            speechIssue={qualityIssues[0]}
-            saved={!dirty}
+            musicTracks={musicTracks}
+            durationSeconds={durationSeconds}
+            onDurationChange={setProductionDuration}
+            speechMode={speechMode}
+            voiceMood={voiceMood}
+            medicalReviewStatus={medicalReviewStatus}
+            humanReviewApproved={humanReviewApproved}
+            fallbackOrientation={orientation}
+            onPersistSpeech={async (text) => (await persistCurrentScript(text)).version}
+            onSubmitted={(jobs) => {
+              jobs.forEach(addVideoJob);
+              navigate({ to: "/producao" });
+            }}
           />
-          <CompliancePanel
-            fields={complianceFields}
-            palavrasProibidas={palavras}
-            rules={complianceRules}
-          />
-        </div>
-      </div>
+        </TabsContent>
+      </Tabs>
     </AppShell>
   );
 }

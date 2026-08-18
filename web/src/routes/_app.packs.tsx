@@ -77,19 +77,50 @@ type Pack = GeneratedPack;
 const REQUIRED_CAROUSEL_SLIDES = 7;
 
 const layoutLabels: Record<PackLayout, string> = {
-  hero_photo: "Capa com foto",
-  photo_split: "Foto dividida",
-  big_statement: "Frase de impacto",
-  question: "Pergunta",
+  hero_photo: "Abertura com foto",
+  photo_split: "Explicação com foto",
+  big_statement: "Ideia-chave",
+  question: "Dúvida comum",
   myth_fact: "Mito e fato",
-  number_stat: "Numero ou dado",
-  three_points: "Tres pontos",
-  explainer: "Explicacao em etapas",
-  doctor_quote: "Citacao medica",
-  photo_overlay: "Foto com texto",
+  number_stat: "Dado explicado",
+  three_points: "Pontos para entender",
+  explainer: "Explicação simples",
+  doctor_quote: "Orientação profissional",
+  photo_overlay: "Tema com foto",
   do_dont: "Evite e prefira",
-  cta_photo: "CTA com foto",
+  cta_photo: "Resumo e próximo passo",
 };
+
+const educationalSteps = [
+  {
+    title: "Tema e objetivo",
+    description: "Apresenta o assunto e o que será explicado.",
+  },
+  {
+    title: "Contexto",
+    description: "Organiza a dúvida de forma neutra.",
+  },
+  {
+    title: "Conceito-chave",
+    description: "Define o ponto central em linguagem simples.",
+  },
+  {
+    title: "Como funciona",
+    description: "Conecta a explicação em etapas curtas.",
+  },
+  {
+    title: "O que a fonte mostra",
+    description: "Traduz o dado ou a evidência com contexto.",
+  },
+  {
+    title: "Cuidados e limites",
+    description: "Mostra a ressalva necessária com clareza.",
+  },
+  {
+    title: "Resumo e próximo passo",
+    description: "Retoma o aprendizado e orienta com segurança.",
+  },
+] as const;
 
 const familyOptions: Array<{
   id: PackFamily;
@@ -115,6 +146,18 @@ const familyOptions: Array<{
     description: "Foto presente, texto curto e ritmo narrativo.",
     whenToUse: "Histórias, tensão e transformação.",
   },
+  {
+    id: "manifesto",
+    label: "Manifesto",
+    description: "Blocos gráficos, alto contraste e fotos monocromáticas.",
+    whenToUse: "Alertas, posicionamento e quebra de mitos.",
+  },
+  {
+    id: "clinico",
+    label: "Clínico",
+    description: "Grade técnica, painéis leves e leitura precisa.",
+    whenToUse: "Dados, evidências e orientações em saúde.",
+  },
 ];
 
 const themeOptions: Array<{
@@ -135,6 +178,18 @@ const themeOptions: Array<{
     description: "Azul profundo, teal e linguagem clínica.",
     swatches: ["#0c2340", "#2d8a9e", "#f2f5f6"],
   },
+  {
+    id: "soft-sage",
+    label: "Sálvia Suave",
+    description: "Verde sálvia, creme e contraste sereno.",
+    swatches: ["#86a996", "#28443e", "#f3f4ee"],
+  },
+  {
+    id: "soft-rose",
+    label: "Rosé Suave",
+    description: "Rosé empoeirado, nude e acabamento acolhedor.",
+    swatches: ["#c78b93", "#513944", "#fbf5f2"],
+  },
 ];
 
 function familyOf(pack: Pack): PackFamily {
@@ -143,6 +198,10 @@ function familyOf(pack: Pack): PackFamily {
 
 function themeOf(pack: Pack): PackTheme {
   return pack.themeId ?? "ocean-deep";
+}
+
+function educationalStepOf(index: number) {
+  return educationalSteps[index] ?? educationalSteps[educationalSteps.length - 1];
 }
 
 const photoLayouts = new Set<PackLayout>([
@@ -229,6 +288,7 @@ function PacksPage() {
   const [presentationStatus, setPresentationStatus] = useState("");
   const [outdatedAvatar, setOutdatedAvatar] = useState(false);
   const [outdatedPackSchema, setOutdatedPackSchema] = useState(false);
+  const [outdatedEducationalFlow, setOutdatedEducationalFlow] = useState(false);
 
   const script = scripts.find((item) => item.id === selectedId);
   const videoJob = script ? jobs.find((job) => job.scriptId === script.id) : undefined;
@@ -247,6 +307,7 @@ function PacksPage() {
       setPack(null);
       setOutdatedAvatar(false);
       setOutdatedPackSchema(false);
+      setOutdatedEducationalFlow(false);
       return;
     }
     let cancelled = false;
@@ -259,6 +320,7 @@ function PacksPage() {
             Boolean((data.outdatedIdentity ?? data.outdatedAvatar) && !data.outdatedPackSchema),
           );
           setOutdatedPackSchema(data.outdatedPackSchema ?? false);
+          setOutdatedEducationalFlow(data.outdatedEducationalFlow ?? false);
         }
       })
       .catch((error) => {
@@ -306,7 +368,8 @@ function PacksPage() {
       setPack(response.pack);
       setOutdatedAvatar(false);
       setOutdatedPackSchema(false);
-      toast.success("Carrossel de 7 slides criado.", { id: notice });
+      setOutdatedEducationalFlow(false);
+      toast.success("Carrossel educativo de 7 slides criado.", { id: notice });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar o Pack.", {
         id: notice,
@@ -479,7 +542,13 @@ function PacksPage() {
             ) : (
               <Wand2 className="mr-1 h-3.5 w-3.5" />
             )}
-            {packIsLegacy ? "Gerar 7 slides agora" : pack ? "Gerar nova versao" : "Gerar Pack"}
+            {packIsLegacy
+              ? "Gerar 7 slides agora"
+              : outdatedEducationalFlow
+                ? "Gerar versao educativa"
+                : pack
+                  ? "Gerar nova versao"
+                  : "Gerar Pack"}
           </Button>
           {outdatedAvatar && pack ? (
             <Button
@@ -544,6 +613,9 @@ function PacksPage() {
                   {pack?.schemaVersion ? (
                     <StatusBadge label="Sistema Instituto" tone="success" />
                   ) : null}
+                  {outdatedEducationalFlow ? (
+                    <StatusBadge label="Trilha educativa anterior" tone="warn" />
+                  ) : null}
                 </div>
                 <h2 className="font-display text-xl font-semibold tracking-tight">
                   {script?.titulo ?? "Selecione um roteiro"}
@@ -551,7 +623,9 @@ function PacksPage() {
                 <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
                   {packIsLegacy
                     ? `Este Pack salvo ainda tem ${pack.carousel.length} slides. Gere a versao nova para adicionar o slide de contexto e liberar os PNGs.`
-                    : "7 slides com uma ideia por tela, leitura em poucos segundos e composicao visual fixa."}
+                    : outdatedEducationalFlow
+                      ? "Este Pack foi criado antes da trilha educativa atual. Gere uma nova versão para reorganizar a copy sem tom de confronto."
+                      : "7 slides em uma sequência educativa: contexto, explicação, evidência, cuidado e próximo passo."}
                 </p>
               </div>
               <Select value={selectedId} onValueChange={selectScript}>
@@ -621,6 +695,25 @@ function PacksPage() {
                   </Button>
                 </section>
               ) : null}
+              {outdatedEducationalFlow && !packIsLegacy ? (
+                <section className="flex flex-col gap-3 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-950 shadow-sm md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="font-semibold">Este Pack usa a organização anterior.</div>
+                    <p className="mt-1">
+                      Gere uma nova versão para aplicar a trilha educativa completa em todos os
+                      slides: tema, contexto, explicação, evidência, cuidados e resumo.
+                    </p>
+                  </div>
+                  <Button size="sm" onClick={generateVisualPack} disabled={generating}>
+                    {generating ? (
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Wand2 className="mr-1 h-3.5 w-3.5" />
+                    )}
+                    Gerar versão educativa
+                  </Button>
+                </section>
+              ) : null}
               <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <Card>
                   <CardHeader className="pb-2">
@@ -684,7 +777,7 @@ function PacksPage() {
                     <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                       Composição
                     </legend>
-                    <div className="grid gap-2 md:grid-cols-3">
+                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
                       {familyOptions.map((option) => {
                         const selected = familyOf(pack) === option.id;
                         return (
@@ -803,9 +896,34 @@ function PacksPage() {
                 </TabsList>
 
                 <TabsContent value="carousel">
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  <section
+                    className="mb-3 rounded-xl border bg-card p-3"
+                    aria-label="Trilha educativa do carrossel"
+                  >
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <h3 className="text-sm font-semibold">Trilha educativa</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Cada slide prepara a leitura do próximo.
+                      </p>
+                    </div>
+                    <ol className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-7">
+                      {educationalSteps.map((step, index) => (
+                        <li
+                          key={step.title}
+                          className="rounded-lg border bg-background px-2.5 py-2"
+                        >
+                          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-status-info">
+                            {String(index + 1).padStart(2, "0")}
+                          </span>
+                          <p className="mt-0.5 text-xs font-medium leading-snug">{step.title}</p>
+                        </li>
+                      ))}
+                    </ol>
+                  </section>
+                  <div className="grid items-start gap-3 md:grid-cols-2 xl:grid-cols-3">
                     {pack.carousel.map((slide, index) => {
                       const layout = layoutOf(slide);
+                      const educationalStep = educationalStepOf(index);
                       const hasPhoto = photoLayouts.has(layout);
                       const details = detailLines(slide);
                       const selectedPhoto = photoAssets.find(
@@ -814,12 +932,17 @@ function PacksPage() {
                       return (
                         <div
                           key={`${layout}-${headlineOf(slide)}-${index}`}
-                          className="flex min-h-[260px] flex-col rounded-lg border bg-card p-4 shadow-sm"
+                          className="flex min-h-[260px] self-start flex-col rounded-lg border bg-card p-4 shadow-sm"
                         >
                           <div className="mb-3 flex items-center justify-between gap-2">
-                            <span className="text-xs font-semibold uppercase text-muted-foreground">
-                              Slide {index + 1}
-                            </span>
+                            <div>
+                              <span className="text-xs font-semibold uppercase text-muted-foreground">
+                                Slide {index + 1}
+                              </span>
+                              <p className="mt-0.5 text-[11px] font-medium text-status-info">
+                                {educationalStep.title}
+                              </p>
+                            </div>
                             <span className="rounded-md bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">
                               {layoutLabels[layout]}
                             </span>
@@ -994,11 +1117,11 @@ function PacksPage() {
                           ? pack.checklist
                           : [
                               "7 slides em sequencia narrativa",
-                              "1 slide explicativo com contexto da IA",
-                              "Uma ideia principal por tela",
+                              "Conceito explicado antes de dados e cuidados",
+                              "Uma ideia principal por tela, sem jargao ou confronto",
                               "No maximo 3 slides com foto",
-                              "Texto curto e sem jargao",
-                              "Capa forte e CTA no slide final",
+                              "Texto curto, didático e fácil de entender",
+                              "Resumo e próximo passo no slide final",
                               "Legenda pronta para publicar",
                             ]
                         ).map((item) => (

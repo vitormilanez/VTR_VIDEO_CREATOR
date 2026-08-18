@@ -27,6 +27,7 @@ VIDEO_AGENT_SCHEMA = {
         "style_id": {"type": "string"},
         "brand_kit_id": {"type": "string"},
         "files": {"type": "array"},
+        "incognito_mode": {"type": "boolean"},
     },
     "required": ["prompt"],
 }
@@ -77,6 +78,7 @@ def test_registry_is_derived_from_cli_schemas() -> None:
         "supportsBrandKitId": True,
         "supportsChatMode": True,
         "supportsAttachments": True,
+        "supportsIncognitoMode": True,
         "orientations": ["landscape", "portrait"],
         "modes": ["chat", "generate"],
     }
@@ -117,12 +119,18 @@ def test_transport_sends_confirmed_style_brand_and_chat_fields() -> None:
         style_id="style-1",
         brand_kit_id="brand-1",
         mode="chat",
+        files=[{"type": "asset_id", "asset_id": "asset-1"}],
+        incognito_mode=True,
     )
 
     assert args[0:2] == ["video-agent", "create"]
     assert args[args.index("--style-id") + 1] == "style-1"
     assert args[args.index("--brand-kit-id") + 1] == "brand-1"
     assert args[args.index("--mode") + 1] == "chat"
+    assert json.loads(args[args.index("--data") + 1]) == {
+        "files": [{"type": "asset_id", "asset_id": "asset-1"}]
+    }
+    assert "--incognito-mode" in args
 
 
 def test_transport_rejects_unconfirmed_fields() -> None:
@@ -138,6 +146,22 @@ def test_transport_rejects_unconfirmed_fields() -> None:
             orientation="portrait",
             style_id="unknown-style",
         )
+
+
+def test_agent_prompt_carries_duration_seedance_and_editing_instructions() -> None:
+    prompt, input_mode = server._compose_video_agent_prompt(
+        "Explique o tema aprovado sem criar novas alegações.",
+        None,
+        90,
+        "confident",
+        visual_mode="seedance",
+        agent_instructions="Use cortes rápidos e gráficos médicos discretos.",
+    )
+
+    assert "around 90 seconds" in prompt
+    assert "AI-generated cinematic animated visuals" in prompt
+    assert "Use cortes rápidos e gráficos médicos discretos." in prompt
+    assert input_mode == "approved_text_plus_voice_direction"
 
 
 def test_server_persists_registry_and_reuses_same_cli_version() -> None:

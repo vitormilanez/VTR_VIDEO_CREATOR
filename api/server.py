@@ -60,6 +60,7 @@ from api.pack_design import (
     PACK_SLIDE_COUNT,
     PACK_THEMES,
     PHOTO_LIBRARY,
+    educational_flow_issues,
     empty_fields,
     normalize_slide,
     pack_slides,
@@ -148,6 +149,16 @@ from api.services.video_generation import (
     normalize_caption_srt,
 )
 from api.services.scene_generation import build_scene_generation_result
+from api.services.podcast_generation import (
+    build_podcast_generation_result,
+    podcast_spoken_text,
+)
+from api.services.podcast_dialogue import (
+    PODCAST_DIALOGUE_PROMPT_VERSION,
+    PODCAST_DIALOGUE_SCHEMA,
+    build_podcast_dialogue_prompt,
+    normalize_podcast_dialogue,
+)
 from api.services.script_exports import archive_script_generation
 from api.services.video_composer import CompositionScene, TimedVideoOverlay, compose_video
 from api.services.post_production import (
@@ -178,7 +189,11 @@ from api.services.medical_identity import (
     safe_editorial_cta,
     strip_prohibited_editorial_ctas,
 )
-from api.services.pack_context import PACK_CONTEXT_VERSION, build_pack_context
+from api.services.pack_context import (
+    PACK_CONTEXT_VERSION,
+    PACK_EDUCATIONAL_FLOW_VERSION,
+    build_pack_context,
+)
 from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
@@ -397,6 +412,13 @@ def _ai_db() -> sqlite3.Connection:
             music_volume REAL NOT NULL DEFAULT 0.12,
             cinematic_prompt TEXT NOT NULL DEFAULT '',
             voice_mood TEXT NOT NULL DEFAULT 'confident',
+            video_agent_style_id TEXT,
+            video_agent_brand_kit_id TEXT,
+            video_agent_mode TEXT NOT NULL DEFAULT 'generate',
+            video_agent_visual_mode TEXT NOT NULL DEFAULT 'standard',
+            video_agent_instructions TEXT NOT NULL DEFAULT '',
+            video_agent_attachments_json TEXT NOT NULL DEFAULT '[]',
+            video_agent_incognito_mode INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS avatar_sets (
@@ -407,6 +429,11 @@ def _ai_db() -> sqlite3.Connection:
             updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS scene_plans (
+            script_id TEXT PRIMARY KEY,
+            plan_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS podcast_plans (
             script_id TEXT PRIMARY KEY,
             plan_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -549,6 +576,13 @@ def _ai_db() -> sqlite3.Connection:
         ("music_volume", "REAL NOT NULL DEFAULT 0.12"),
         ("cinematic_prompt", "TEXT NOT NULL DEFAULT ''"),
         ("voice_mood", "TEXT NOT NULL DEFAULT 'confident'"),
+        ("video_agent_style_id", "TEXT"),
+        ("video_agent_brand_kit_id", "TEXT"),
+        ("video_agent_mode", "TEXT NOT NULL DEFAULT 'generate'"),
+        ("video_agent_visual_mode", "TEXT NOT NULL DEFAULT 'standard'"),
+        ("video_agent_instructions", "TEXT NOT NULL DEFAULT ''"),
+        ("video_agent_attachments_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("video_agent_incognito_mode", "INTEGER NOT NULL DEFAULT 0"),
     ):
         try:
             conn.execute(f"ALTER TABLE production_profiles ADD COLUMN {column} {definition}")
@@ -897,7 +931,10 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
             """
             SELECT script_id, avatar_id, voice_id, speech_mode, generation_mode,
                    avatar_mode, avatar_set_id, primary_avatar_id, position_count,
-                   music_track_id, music_volume, cinematic_prompt, voice_mood, updated_at
+                   music_track_id, music_volume, cinematic_prompt, voice_mood,
+                   video_agent_style_id, video_agent_brand_kit_id, video_agent_mode,
+                   video_agent_visual_mode, video_agent_instructions,
+                   video_agent_attachments_json, video_agent_incognito_mode, updated_at
             FROM production_profiles
             WHERE script_id = ?
             """,
@@ -907,6 +944,12 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
         conn.close()
     if not row:
         return None
+    try:
+        video_agent_attachments = json.loads(str(row["video_agent_attachments_json"] or "[]"))
+    except json.JSONDecodeError:
+        video_agent_attachments = []
+    if not isinstance(video_agent_attachments, list):
+        video_agent_attachments = []
     return {
         "scriptId": row["script_id"],
         "avatarId": row["avatar_id"],
@@ -921,6 +964,13 @@ def _production_profile(script_id: str) -> dict[str, Any] | None:
         "musicVolume": float(row["music_volume"] or 0.12),
         "cinematicPrompt": str(row["cinematic_prompt"] or ""),
         "voiceMood": _clean_voice_mood(row["voice_mood"]),
+        "styleId": str(row["video_agent_style_id"] or "") or None,
+        "brandKitId": str(row["video_agent_brand_kit_id"] or "") or None,
+        "videoAgentMode": str(row["video_agent_mode"] or "generate"),
+        "videoAgentVisualMode": str(row["video_agent_visual_mode"] or "standard"),
+        "videoAgentInstructions": str(row["video_agent_instructions"] or ""),
+        "videoAgentAttachments": video_agent_attachments,
+        "videoAgentIncognitoMode": bool(row["video_agent_incognito_mode"]),
         "updatedAt": row["updated_at"],
     }
 
@@ -1051,6 +1101,21 @@ def _clean_voice_mood(value: Any) -> str:
     return mood if mood in VOICE_MOOD_PRESETS else "confident"
 
 
+def _clean_video_agent_attachments(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    attachments: list[dict[str, str]] = []
+    for item in value[:20]:
+        if not isinstance(item, dict):
+            continue
+        asset_id = str(item.get("assetId") or "").strip()
+        name = str(item.get("name") or "Arquivo HeyGen").strip()[:255]
+        mime_type = str(item.get("mimeType") or "application/octet-stream").strip()[:120]
+        if asset_id:
+            attachments.append({"assetId": asset_id[:200], "name": name, "mimeType": mime_type})
+    return attachments
+
+
 def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
     avatar_mode = str(profile.get("avatarMode") or "single")
     if avatar_mode not in {"single", "set"}:
@@ -1096,6 +1161,15 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="O volume da trilha deve estar entre 3% e 25%.")
     cinematic_prompt = _clean_cinematic_prompt(profile.get("cinematicPrompt"))
     voice_mood = _clean_voice_mood(profile.get("voiceMood"))
+    video_agent_mode = str(profile.get("videoAgentMode") or "generate")
+    if video_agent_mode not in {"generate", "chat"}:
+        raise HTTPException(status_code=422, detail="videoAgentMode inválido.")
+    video_agent_visual_mode = str(profile.get("videoAgentVisualMode") or "standard")
+    if video_agent_visual_mode not in {"standard", "seedance"}:
+        raise HTTPException(status_code=422, detail="videoAgentVisualMode inválido.")
+    video_agent_attachments = _clean_video_agent_attachments(
+        profile.get("videoAgentAttachments")
+    )
     saved = {
         "scriptId": str(profile["scriptId"]),
         "avatarId": primary_avatar_id,
@@ -1110,6 +1184,15 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "musicVolume": music_volume,
         "cinematicPrompt": cinematic_prompt,
         "voiceMood": voice_mood,
+        "styleId": str(profile.get("styleId") or "").strip() or None,
+        "brandKitId": str(profile.get("brandKitId") or "").strip() or None,
+        "videoAgentMode": video_agent_mode,
+        "videoAgentVisualMode": video_agent_visual_mode,
+        "videoAgentInstructions": _clean_cinematic_prompt(
+            profile.get("videoAgentInstructions")
+        ),
+        "videoAgentAttachments": video_agent_attachments,
+        "videoAgentIncognitoMode": bool(profile.get("videoAgentIncognitoMode")),
         "updatedAt": _now(),
     }
     conn = _ai_db()
@@ -1119,8 +1202,11 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO production_profiles(
                 script_id, avatar_id, voice_id, speech_mode, generation_mode,
                 avatar_mode, avatar_set_id, primary_avatar_id, position_count,
-                music_track_id, music_volume, cinematic_prompt, voice_mood, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                music_track_id, music_volume, cinematic_prompt, voice_mood,
+                video_agent_style_id, video_agent_brand_kit_id, video_agent_mode,
+                video_agent_visual_mode, video_agent_instructions,
+                video_agent_attachments_json, video_agent_incognito_mode, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(script_id) DO UPDATE SET
                 avatar_id = excluded.avatar_id,
                 voice_id = excluded.voice_id,
@@ -1134,6 +1220,13 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 music_volume = excluded.music_volume,
                 cinematic_prompt = excluded.cinematic_prompt,
                 voice_mood = excluded.voice_mood,
+                video_agent_style_id = excluded.video_agent_style_id,
+                video_agent_brand_kit_id = excluded.video_agent_brand_kit_id,
+                video_agent_mode = excluded.video_agent_mode,
+                video_agent_visual_mode = excluded.video_agent_visual_mode,
+                video_agent_instructions = excluded.video_agent_instructions,
+                video_agent_attachments_json = excluded.video_agent_attachments_json,
+                video_agent_incognito_mode = excluded.video_agent_incognito_mode,
                 updated_at = excluded.updated_at
             """,
             (
@@ -1150,6 +1243,13 @@ def _save_production_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 saved["musicVolume"],
                 saved["cinematicPrompt"],
                 saved["voiceMood"],
+                saved["styleId"],
+                saved["brandKitId"],
+                saved["videoAgentMode"],
+                saved["videoAgentVisualMode"],
+                saved["videoAgentInstructions"],
+                json.dumps(saved["videoAgentAttachments"], ensure_ascii=False),
+                int(saved["videoAgentIncognitoMode"]),
                 saved["updatedAt"],
             ),
         )
@@ -1231,6 +1331,86 @@ def _save_scene_plan(
         conn.execute(
             """
             INSERT INTO scene_plans(script_id, plan_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(script_id) DO UPDATE SET
+                plan_json = excluded.plan_json,
+                updated_at = excluded.updated_at
+            """,
+            (script_id, json.dumps(plan, ensure_ascii=False), plan["updatedAt"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return plan
+
+
+def _podcast_plan(script_id: str) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT plan_json FROM podcast_plans WHERE script_id = ?",
+            (script_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    try:
+        value = json.loads(str(row["plan_json"]))
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _save_podcast_plan(script_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    participants = [
+        {
+            "id": str(participant.get("id") or "").strip(),
+            "name": re.sub(r"\s+", " ", str(participant.get("name") or "")).strip(),
+            "avatarId": str(participant.get("avatarId") or "").strip(),
+            "voiceId": str(participant.get("voiceId") or "").strip(),
+        }
+        for participant in payload.get("participants") or []
+        if isinstance(participant, dict)
+    ]
+    turns = [
+        {
+            "id": str(turn.get("id") or f"turn-{index}").strip(),
+            "order": index,
+            "speakerId": str(turn.get("speakerId") or "").strip(),
+            "text": re.sub(r"\s+", " ", str(turn.get("text") or "")).strip(),
+        }
+        for index, turn in enumerate(payload.get("turns") or [], start=1)
+        if isinstance(turn, dict)
+    ]
+    plan = {
+        "scriptId": script_id,
+        "title": re.sub(r"\s+", " ", str(payload.get("title") or "Podcast")).strip()
+        or "Podcast",
+        "orientation": str(payload.get("orientation") or "portrait"),
+        "captions": bool(payload.get("captions", True)),
+        "transitionStyle": "hard_cut",
+        "musicTrackId": str(payload.get("musicTrackId") or "").strip() or None,
+        "musicVolume": min(0.25, max(0.03, float(payload.get("musicVolume") or 0.08))),
+        "participants": participants,
+        "turns": turns,
+        "updatedAt": _now(),
+    }
+    try:
+        build_podcast_generation_result(
+            script_id=script_id,
+            podcast_plan=plan,
+            orientation=plan["orientation"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if plan["musicTrackId"] and not _music_track(plan["musicTrackId"]):
+        raise HTTPException(status_code=422, detail="A trilha selecionada não está disponível.")
+    conn = _ai_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO podcast_plans(script_id, plan_json, updated_at)
             VALUES (?, ?, ?)
             ON CONFLICT(script_id) DO UPDATE SET
                 plan_json = excluded.plan_json,
@@ -2086,7 +2266,13 @@ def _scene_jobs_ready(
     *,
     expected_final_speech_hash: str = "",
 ) -> list[dict[str, Any]] | None:
-    jobs = [job for job in _load_video_jobs() if job.get("scriptId") == script_id and job.get("isScene")]
+    jobs = [
+        job
+        for job in _load_video_jobs()
+        if job.get("scriptId") == script_id
+        and job.get("isScene")
+        and not job.get("isPodcastScene")
+    ]
     scenes = list(scene_plan.get("scenes") or [])
     expected_avatar_by_scene = {
         str(scene.get("id") or ""): str(scene.get("avatarId") or "")
@@ -2124,6 +2310,77 @@ def _scene_jobs_ready(
             newest = max(
                 str(job.get("atualizadoEm") or job.get("criadoEm") or "")
                 for job in ordered
+            )
+            complete_batches.append((newest, ordered))
+    if not complete_batches:
+        return None
+    complete_batches.sort(key=lambda item: item[0], reverse=True)
+    return complete_batches[0][1]
+
+
+def _podcast_jobs_ready(
+    script_id: str,
+    podcast_plan: dict[str, Any],
+    *,
+    expected_final_speech_hash: str = "",
+) -> list[dict[str, Any]] | None:
+    jobs = [
+        job
+        for job in _load_video_jobs()
+        if job.get("scriptId") == script_id and job.get("isPodcastScene")
+    ]
+    turns = list(podcast_plan.get("turns") or [])
+    participants = {
+        str(participant.get("id") or ""): participant
+        for participant in podcast_plan.get("participants") or []
+        if isinstance(participant, dict)
+    }
+    expected_by_turn: dict[str, tuple[str, str, str]] = {}
+    for turn in turns:
+        speaker_id = str(turn.get("speakerId") or "")
+        participant = participants.get(speaker_id) or {}
+        expected_by_turn[str(turn.get("id") or "")] = (
+            speaker_id,
+            str(participant.get("avatarId") or ""),
+            str(participant.get("voiceId") or ""),
+        )
+
+    ready_by_batch: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for job in jobs:
+        if job.get("status") != "pronto":
+            continue
+        if expected_final_speech_hash and str(job.get("finalSpeechHash") or "") != expected_final_speech_hash:
+            continue
+        turn_id = str(job.get("sceneId") or "")
+        expected = expected_by_turn.get(turn_id)
+        if not expected:
+            continue
+        settings = job.get("productionSettings") or {}
+        actual = (
+            str(job.get("speakerId") or settings.get("speakerId") or ""),
+            str(settings.get("avatarId") or ""),
+            str(settings.get("voiceId") or ""),
+        )
+        if actual != expected:
+            continue
+        batch_id = _scene_job_batch_id(job) or "__legacy__"
+        ready_by_batch.setdefault(batch_id, {}).setdefault(turn_id, []).append(job)
+
+    complete_batches: list[tuple[str, list[dict[str, Any]]]] = []
+    for _batch_id, ready_by_turn in ready_by_batch.items():
+        ordered: list[dict[str, Any]] = []
+        for turn in turns:
+            candidates = sorted(
+                ready_by_turn.get(str(turn.get("id") or ""), []),
+                key=lambda item: str(item.get("atualizadoEm") or item.get("criadoEm") or ""),
+                reverse=True,
+            )
+            if not candidates:
+                break
+            ordered.append(candidates[0])
+        if len(ordered) == len(turns):
+            newest = max(
+                str(job.get("atualizadoEm") or job.get("criadoEm") or "") for job in ordered
             )
             complete_batches.append((newest, ordered))
     if not complete_batches:
@@ -2199,6 +2456,47 @@ def _validate_two_camera_continuity(
         "voiceMood": next(iter(voice_moods)),
         "backgroundMusic": False,
         "audioPolicy": "hard_cut_no_voice_mix",
+        "cutPolicy": "hard_cut",
+    }
+
+
+def _validate_podcast_cast(
+    *,
+    generation: Any,
+    private_looks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requests = list(getattr(generation, "requests", ()) or ())
+    avatar_ids = {str(request.avatar_id) for request in requests}
+    voice_ids = {str(request.voice_id) for request in requests}
+    speaker_ids = {str(request.speaker_id) for request in requests}
+    if len(avatar_ids) != 2 or len(voice_ids) != 2 or speaker_ids != {"a", "b"}:
+        raise HTTPException(
+            status_code=422,
+            detail="O podcast precisa manter dois avatares e duas vozes, uma combinação por participante.",
+        )
+    look_by_id = {
+        str(look.get("id") or ""): look
+        for look in private_looks
+        if isinstance(look, dict) and look.get("id")
+    }
+    selected_looks = [look_by_id.get(avatar_id) for avatar_id in avatar_ids]
+    if any(look is None for look in selected_looks):
+        raise HTTPException(status_code=400, detail="Um dos avatares do podcast não está disponível na HeyGen.")
+    resolved_group_ids = [
+        str((look or {}).get("group_id") or "").strip() for look in selected_looks
+    ]
+    if all(resolved_group_ids) and len(set(resolved_group_ids)) == 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Escolha duas identidades diferentes; dois looks da mesma pessoa pertencem ao modo multicâmera.",
+        )
+    return {
+        "mode": "two_host_dialogue",
+        "avatarIds": sorted(avatar_ids),
+        "voiceIds": sorted(voice_ids),
+        "speakerIds": sorted(speaker_ids),
+        "backgroundMusic": False,
+        "audioPolicy": "one_voice_per_clip",
         "cutPolicy": "hard_cut",
     }
 
@@ -2417,6 +2715,172 @@ def _compose_final_video_if_ready(script_id: str, *, raise_when_not_ready: bool 
         raise HTTPException(status_code=503, detail=f"Não foi possível compor o vídeo final: {exc}") from exc
     _archive_script_export(job, script=script)
     _job_store().upsert("video", job, idempotency_key=f"compose-final:{composition_key}")
+    return job
+
+
+def _compose_podcast_video_if_ready(
+    script_id: str,
+    *,
+    raise_when_not_ready: bool = False,
+) -> dict[str, Any] | None:
+    script = _find_script(script_id)
+    plan = _podcast_plan(script_id)
+    if not plan or not plan.get("turns"):
+        if raise_when_not_ready:
+            raise HTTPException(status_code=409, detail="Salve o podcast antes de compor o vídeo final.")
+        return None
+    editor_state = _script_editor_state(script_id, script)
+    scene_jobs = _podcast_jobs_ready(
+        script_id,
+        plan,
+        expected_final_speech_hash=str(editor_state.get("finalSpeechHash") or ""),
+    )
+    if scene_jobs is None:
+        if raise_when_not_ready:
+            raise HTTPException(
+                status_code=409,
+                detail="Todas as falas precisam estar prontas antes da montagem do podcast.",
+            )
+        return None
+
+    music_track_id = str(plan.get("musicTrackId") or "").strip() or None
+    music_track = _music_track(music_track_id)
+    music_volume = float(plan.get("musicVolume") or 0.08)
+    music_path = _music_track_path(music_track_id) if music_track else None
+    source_ids = [str(job["id"]) for job in scene_jobs]
+    composition_key = hashlib.sha256(
+        json.dumps(
+            {
+                "scriptId": script_id,
+                "mode": "podcast",
+                "sources": source_ids,
+                "transitionStyle": "hard_cut",
+                "musicTrackId": music_track_id,
+                "musicVolume": music_volume if music_track_id else None,
+                "medicalEndCardVersion": MEDICAL_EDITORIAL_PROFILE_VERSION,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    job_id = f"pc-{composition_key}"
+    idempotency_key = f"compose-podcast:{composition_key}"
+    existing = _job_store().get("video", job_id)
+    if existing and existing.get("status") == "pronto" and _local_output_path(existing.get("outputPath")):
+        _archive_script_export(existing, script=script)
+        _job_store().upsert("video", existing, idempotency_key=idempotency_key)
+        return existing
+
+    output_root = _composed_video_output_dir(script_id)
+    output_path = output_root / f"{job_id}.mp4"
+    now = _now()
+    job = existing or {
+        "id": job_id,
+        "scriptId": script_id,
+        "provider": "local",
+        "progresso": 0,
+        "criadoEm": now,
+        "isComposed": True,
+        "isPodcast": True,
+    }
+    job.update(
+        {
+            "status": "processando",
+            "progresso": 40,
+            "atualizadoEm": now,
+            "outputPath": str(output_path.relative_to(ROOT)),
+            "videoUrl": f"/api/videos/{quote(job_id, safe='')}/file",
+            "sourceSceneJobs": source_ids,
+            "sceneCount": len(plan["turns"]),
+            "visualCount": 0,
+            "transitionStyle": "hard_cut",
+            "podcastTitle": str(plan.get("title") or "Podcast"),
+            "isComposed": True,
+            "isPodcast": True,
+            "submissionState": "local_composing",
+        }
+    )
+    _job_store().upsert("video", job, idempotency_key=idempotency_key)
+
+    try:
+        source_root = output_root / "sources" / job_id
+        composition_scenes: list[CompositionScene] = []
+        total_duration = 0.0
+        for index, (turn, scene_job) in enumerate(
+            zip(plan["turns"], scene_jobs, strict=True),
+            start=1,
+        ):
+            turn_id = str(turn["id"])
+            scene_path = _copy_or_download_video(
+                scene_job,
+                source_root / f"{index:02d}-{turn_id}.mp4",
+            )
+            duration = _probe_video_duration(scene_path)
+            total_duration += duration
+            composition_scenes.append(
+                CompositionScene(
+                    scene_id=turn_id,
+                    video_path=scene_path,
+                    slide_path=None,
+                    slide_mode="during",
+                    visual_start_seconds=0,
+                    slide_duration_seconds=0,
+                    visual_animation="fade",
+                    trim_technical_silence=True,
+                )
+            )
+        end_card = render_medical_end_card(
+            output_root / f"{job_id}-medical-end-card.png",
+            project_root=ROOT,
+        )
+        manifest = compose_video(
+            composition_scenes,
+            output_path,
+            background_music_path=music_path,
+            background_music_volume=music_volume,
+            transition_style="hard_cut",
+            end_card_path=end_card,
+            end_card_duration_seconds=MEDICAL_MINIMUM_END_CARD_SECONDS,
+        )
+        final_duration = _probe_video_duration(output_path)
+        job.update(
+            {
+                "status": "pronto",
+                "progresso": 100,
+                "submissionState": "completed",
+                "atualizadoEm": _now(),
+                "duracaoSegundos": round(final_duration or total_duration, 2),
+                "composition": manifest,
+                "continuity": {
+                    "mode": "two_host_dialogue",
+                    "cutPolicy": "hard_cut",
+                    "backgroundMusic": bool(music_track),
+                    "technicalSilenceTrim": True,
+                    "audioPolicy": "one_voice_per_clip",
+                },
+                "backgroundMusic": (
+                    _music_track_response(music_track) | {"volume": music_volume}
+                    if music_track
+                    else None
+                ),
+            }
+        )
+    except Exception as exc:
+        job.update(
+            {
+                "status": "erro",
+                "progresso": 0,
+                "erro": str(exc.detail) if isinstance(exc, HTTPException) else str(exc),
+                "submissionState": "local_failed",
+                "atualizadoEm": _now(),
+            }
+        )
+        _job_store().upsert("video", job, idempotency_key=idempotency_key)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=503, detail=f"Não foi possível montar o podcast: {exc}") from exc
+    _archive_script_export(job, script=script)
+    _job_store().upsert("video", job, idempotency_key=idempotency_key)
     return job
 
 
@@ -3661,7 +4125,7 @@ def heygen_avatars() -> dict:
 
 
 @app.get("/api/heygen/styles")
-def heygen_styles(tag: str = "cinematic") -> dict:
+def heygen_styles(tag: str = "all") -> dict:
     """Retorna estilos visuais oficiais disponiveis no Video Agent."""
     allowed_tags = {
         "cinematic",
@@ -3671,15 +4135,30 @@ def heygen_styles(tag: str = "cinematic") -> dict:
         "handmade",
         "print",
     }
-    selected_tag = tag if tag in allowed_tags else "cinematic"
+    selected_tag = tag if tag in allowed_tags else "all"
     command = _heygen_cli()
+    args = ["video-agent", "styles", "list", "--limit", "100"]
+    if selected_tag != "all":
+        args.extend(["--tag", selected_tag])
     response = _run_heygen_json(
         command,
-        ["video-agent", "styles", "list", "--tag", selected_tag, "--limit", "30"],
+        args,
         timeout=45,
     )
     styles = _find_value(response, "data")
     return {"styles": styles if isinstance(styles, list) else [], "tag": selected_tag}
+
+
+@app.get("/api/heygen/brand-kits")
+def heygen_brand_kits() -> dict:
+    """Lista Brand Systems disponíveis para o Video Agent sem consumir créditos."""
+    response = _run_heygen_json(
+        _heygen_cli(),
+        ["brand", "kits", "list", "--limit", "100"],
+        timeout=45,
+    )
+    brand_kits = _find_value(response, "data")
+    return {"brandKits": brand_kits if isinstance(brand_kits, list) else []}
 
 
 @app.get("/api/providers/heygen/capabilities")
@@ -3692,6 +4171,10 @@ class AvatarMediaIn(BaseModel):
     name: str
     mimeType: str
     data: str
+
+
+class HeyGenAssetUploadIn(AvatarMediaIn):
+    pass
 
 
 class AvatarCreateIn(BaseModel):
@@ -3797,6 +4280,36 @@ def _direct_upload_avatar_asset(
     )
     completed_asset_id = _find_value(completed, "asset_id") or asset_id
     return {"type": "asset_id", "asset_id": str(completed_asset_id)}
+
+
+@app.post("/api/heygen/assets")
+def upload_heygen_asset(payload: HeyGenAssetUploadIn) -> dict:
+    """Envia uma referência ao storage da HeyGen para uso no Video Agent."""
+    allowed_mime_types = {
+        "image/png",
+        "image/jpeg",
+        "video/mp4",
+        "video/webm",
+        "audio/mpeg",
+        "audio/wav",
+        "application/pdf",
+        "application/x-subrip",
+        "text/plain",
+    }
+    content = _decode_avatar_media(
+        payload,
+        allowed_mime_types=allowed_mime_types,
+        max_bytes=32 * 1024 * 1024,
+    )
+    asset = _direct_upload_avatar_asset(_heygen_cli(), payload, content)
+    return {
+        "ok": True,
+        "attachment": {
+            "assetId": asset["asset_id"],
+            "name": payload.name,
+            "mimeType": payload.mimeType,
+        },
+    }
 
 
 def _avatar_file_payload(
@@ -4233,6 +4746,12 @@ class StoryComposeIn(BaseModel):
     confirmed: Literal[True]
 
 
+class VideoAgentAttachmentIn(BaseModel):
+    assetId: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=255)
+    mimeType: str = Field(min_length=1, max_length=120)
+
+
 class VideoCreateIn(BaseModel):
     scriptId: str
     avatarId: str | None = Field(default=None, max_length=160)
@@ -4248,6 +4767,10 @@ class VideoCreateIn(BaseModel):
     styleId: str | None = None
     brandKitId: str | None = Field(default=None, max_length=160)
     videoAgentMode: Literal["generate", "chat"] = "generate"
+    videoAgentVisualMode: Literal["standard", "seedance"] = "standard"
+    videoAgentInstructions: str = Field(default="", max_length=2000)
+    videoAgentAttachments: list[VideoAgentAttachmentIn] = Field(default_factory=list, max_length=20)
+    videoAgentIncognitoMode: bool = False
     forceNewVersion: bool = False
     narrationText: str | None = Field(default=None, max_length=6000)
     displayText: str | None = Field(default=None, max_length=6000)
@@ -4338,6 +4861,13 @@ class ProductionProfileIn(BaseModel):
     musicTrackId: str | None = Field(default=None, max_length=80)
     musicVolume: float = Field(default=0.12, ge=0.03, le=0.25)
     cinematicPrompt: str = Field(default="", max_length=2000)
+    styleId: str | None = Field(default=None, max_length=160)
+    brandKitId: str | None = Field(default=None, max_length=160)
+    videoAgentMode: Literal["generate", "chat"] = "generate"
+    videoAgentVisualMode: Literal["standard", "seedance"] = "standard"
+    videoAgentInstructions: str = Field(default="", max_length=2000)
+    videoAgentAttachments: list[VideoAgentAttachmentIn] = Field(default_factory=list, max_length=20)
+    videoAgentIncognitoMode: bool = False
 
 
 class ScriptEditorStateIn(BaseModel):
@@ -4376,6 +4906,53 @@ class ScenePlanSceneIn(BaseModel):
 class ScenePlanIn(BaseModel):
     scenes: list[ScenePlanSceneIn] = Field(min_length=1, max_length=30)
     transitionStyle: Literal["smooth", "hard_cut", "dip_to_black"] = "hard_cut"
+
+
+class PodcastParticipantIn(BaseModel):
+    id: Literal["a", "b"]
+    name: str = Field(min_length=1, max_length=80)
+    avatarId: str = Field(min_length=1, max_length=160)
+    voiceId: str = Field(min_length=1, max_length=160)
+
+
+class PodcastTurnIn(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    order: int = Field(ge=1, le=30)
+    speakerId: Literal["a", "b"]
+    text: str = Field(min_length=1, max_length=1200)
+
+
+class PodcastPlanIn(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    captions: bool = True
+    transitionStyle: Literal["hard_cut"] = "hard_cut"
+    musicTrackId: str | None = Field(default=None, max_length=80)
+    musicVolume: float = Field(default=0.08, ge=0.03, le=0.25)
+    participants: list[PodcastParticipantIn] = Field(min_length=2, max_length=2)
+    turns: list[PodcastTurnIn] = Field(min_length=2, max_length=30)
+
+
+class PodcastDialogueGenerateIn(BaseModel):
+    sourceText: str = Field(min_length=20, max_length=12000)
+    hostName: str = Field(default="Apresentador", min_length=1, max_length=80)
+    guestName: str = Field(default="Especialista", min_length=1, max_length=80)
+    direction: str = Field(default="", max_length=800)
+    durationSeconds: Literal[30, 45, 60, 90, 120, 180] = 60
+
+
+class PodcastVideoConfirmIn(BaseModel):
+    confirmed: Literal[True]
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    durationSeconds: Literal[10, 15, 30, 45, 60, 90, 120, 180] = 60
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural"
+    voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident"
+    captions: bool = True
+    forceNewVersion: bool = False
+    idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
+    expectedScriptRevision: int | None = Field(default=None, ge=0)
+    expectedFinalSpeechHash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    contractVersion: str | None = Field(default=None, min_length=1, max_length=40)
 
 
 class SceneDirectorIn(BaseModel):
@@ -6825,6 +7402,15 @@ def save_script_production_profile(script_id: str, payload: ProductionProfileIn)
             "musicTrackId": payload.musicTrackId,
             "musicVolume": payload.musicVolume,
             "cinematicPrompt": payload.cinematicPrompt,
+            "styleId": payload.styleId,
+            "brandKitId": payload.brandKitId,
+            "videoAgentMode": payload.videoAgentMode,
+            "videoAgentVisualMode": payload.videoAgentVisualMode,
+            "videoAgentInstructions": payload.videoAgentInstructions,
+            "videoAgentAttachments": [
+                attachment.model_dump() for attachment in payload.videoAgentAttachments
+            ],
+            "videoAgentIncognitoMode": payload.videoAgentIncognitoMode,
         }
     )
     return {"ok": True, "profile": profile}
@@ -6871,6 +7457,375 @@ def delete_avatar_set(avatar_set_id: str) -> dict:
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Avatar Set não encontrado.")
     return {"ok": True, "deleted": avatar_set_id}
+
+
+@app.get("/api/scripts/{script_id}/podcast-plan")
+def get_script_podcast_plan(script_id: str) -> dict:
+    _find_script(script_id)
+    return {"ok": True, "podcastPlan": _podcast_plan(script_id)}
+
+
+@app.put("/api/scripts/{script_id}/podcast-plan")
+def save_script_podcast_plan(script_id: str, payload: PodcastPlanIn) -> dict:
+    _find_script(script_id)
+    saved = _save_podcast_plan(script_id, payload.model_dump())
+    return {"ok": True, "podcastPlan": saved}
+
+
+@app.post("/api/scripts/{script_id}/podcast-dialogue/generate")
+def generate_podcast_dialogue(script_id: str, payload: PodcastDialogueGenerateIn) -> dict:
+    """Propõe um diálogo com Claude sem salvar o podcast nem chamar a HeyGen."""
+
+    script = _find_script(script_id)
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="Claude não está configurado. Nenhuma conversa foi salva.",
+        )
+
+    source_text = re.sub(r"\s+", " ", payload.sourceText).strip()
+    source = {
+        "titulo": str(script.get("titulo") or "").strip(),
+        "hook": str(script.get("hook") or "").strip(),
+        "explicacao": str(script.get("explicacaoSimples") or "").strip(),
+        "virada": str(script.get("virada") or "").strip(),
+        "cuidadosMedicos": str(script.get("cuidadosMedicos") or "").strip(),
+        "falaBase": source_text,
+    }
+    model = os.getenv(
+        "ANTHROPIC_PODCAST_MODEL",
+        os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+    )
+    cache_payload = {
+        "promptVersion": PODCAST_DIALOGUE_PROMPT_VERSION,
+        "model": model,
+        "scriptId": script_id,
+        "source": source,
+        **payload.model_dump(),
+        "sourceText": source_text,
+    }
+    cached = _ai_cache_get("podcast-dialogue.generate", cache_payload)
+    if cached:
+        return cached
+
+    system_prompt, user_prompt = build_podcast_dialogue_prompt(
+        source=source,
+        host_name=payload.hostName.strip(),
+        guest_name=payload.guestName.strip(),
+        duration_seconds=payload.durationSeconds,
+        direction=payload.direction,
+    )
+
+    import anthropic
+
+    try:
+        message = anthropic.Anthropic().messages.create(
+            model=model,
+            max_tokens=3200,
+            system=f"{system_prompt}\n\n{MEDICAL_EDITORIAL_PROMPT}",
+            output_config={
+                "format": {"type": "json_schema", "schema": PODCAST_DIALOGUE_SCHEMA}
+            },
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        raw_text = "".join(getattr(block, "text", "") for block in message.content)
+        parsed = json.loads(raw_text)
+        dialogue = normalize_podcast_dialogue(
+            parsed,
+            duration_seconds=payload.durationSeconds,
+        )
+    except anthropic.APIStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Claude respondeu {exc.status_code}. Nenhuma conversa foi salva.",
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Claude não retornou uma conversa em JSON válido. Nenhuma conversa foi salva.",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"A conversa do Claude não passou pela validação: {exc}",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Falha ao gerar a conversa com Claude: {exc}. Nenhuma conversa foi salva.",
+        ) from exc
+
+    combined_dialogue = " ".join(turn["text"] for turn in dialogue["turns"])
+    source_context = json.dumps(source, ensure_ascii=False)
+    new_numbers = unsupported_numeric_claims(combined_dialogue, source_context)
+    new_experience = unsupported_personal_experience(combined_dialogue, source_context)
+    validation_issues: list[str] = []
+    if new_numbers:
+        validation_issues.append(
+            "acrescentou dado numérico ausente no material: " + ", ".join(new_numbers)
+        )
+    if new_experience:
+        validation_issues.append(
+            "acrescentou experiência clínica não informada: " + ", ".join(new_experience)
+        )
+    if validation_issues:
+        raise HTTPException(
+            status_code=502,
+            detail="A conversa do Claude não passou pela validação editorial: "
+            + "; ".join(validation_issues)
+            + ". Nenhuma conversa foi salva.",
+        )
+
+    response = {
+        "ok": True,
+        "provider": "claude",
+        "model": model,
+        "promptVersion": PODCAST_DIALOGUE_PROMPT_VERSION,
+        "title": dialogue["title"],
+        "turns": dialogue["turns"],
+        "turnCount": len(dialogue["turns"]),
+        "wordCount": len(combined_dialogue.split()),
+    }
+    _record_anthropic_usage("podcast-dialogue.generate", model, message)
+    _ai_cache_put("podcast-dialogue.generate", cache_payload, response)
+    return response
+
+
+@app.get("/api/scripts/{script_id}/podcast-generation/plan")
+def get_podcast_generation_plan(
+    script_id: str,
+    speechMode: Literal["natural", "fiel", "direto", "enfatico"] = "natural",
+    voiceMood: Literal["confident", "upbeat", "warm", "serious", "neutral"] = "confident",
+    orientation: Literal["portrait", "landscape"] = "portrait",
+) -> dict:
+    _find_script(script_id)
+    plan = _podcast_plan(script_id)
+    if not plan:
+        raise HTTPException(status_code=409, detail="Salve o podcast antes de montar a geração.")
+    try:
+        generation = build_podcast_generation_result(
+            script_id=script_id,
+            podcast_plan=plan,
+            speech_mode=speechMode,
+            voice_mood=voiceMood,
+            orientation=orientation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "generation": generation.to_dict()}
+
+
+@app.post("/api/scripts/{script_id}/podcast-generation/submit")
+def submit_podcast_generation(script_id: str, payload: PodcastVideoConfirmIn) -> dict:
+    """Gera uma tomada curta por fala e preserva o par avatar/voz do participante."""
+    with _paid_generation_lock(script_id):
+        plan = _podcast_plan(script_id)
+        if not plan:
+            raise _paid_error(
+                409,
+                "PODCAST_CONFIGURATION_INCOMPLETE",
+                "Salve o podcast antes de enviar as falas para produção.",
+            )
+        if str(plan.get("orientation") or "portrait") != payload.orientation:
+            raise _paid_error(
+                409,
+                "PODCAST_ORIENTATION_CONFLICT",
+                "O formato mudou. Salve o podcast novamente antes de gerar.",
+            )
+        final_dialogue = podcast_spoken_text(plan)
+        authorization = _authorize_paid_generation(
+            script_id=script_id,
+            duration_seconds=payload.durationSeconds,
+            expected_script_revision=payload.expectedScriptRevision,
+            expected_final_speech_hash=payload.expectedFinalSpeechHash,
+            contract_version=payload.contractVersion,
+            requested_speech=final_dialogue,
+            ai_operation_in_flight=False,
+            final_confirmed=payload.confirmed,
+        )
+        script = authorization["script"]
+        try:
+            generation = build_podcast_generation_result(
+                script_id=script_id,
+                podcast_plan=plan,
+                speech_mode=payload.speechMode,
+                voice_mood=payload.voiceMood,
+                orientation=payload.orientation,
+            )
+        except ValueError as exc:
+            raise _paid_error(422, "PODCAST_PLAN_INVALID", str(exc)) from exc
+
+        base_key = payload.idempotencyKey or request_fingerprint(
+            {
+                "generation": generation.to_dict(),
+                "scriptRevision": authorization["scriptRevision"],
+                "finalSpeechHash": authorization["finalSpeechHash"],
+            }
+        )
+        if payload.forceNewVersion and not payload.idempotencyKey:
+            base_key = f"{base_key}:version:{uuid.uuid4().hex[:12]}"
+        reservations: list[tuple[Any, dict[str, Any], str]] = []
+        for request in generation.requests:
+            now = _now()
+            turn_key = f"podcast-video:{script_id}:{request.turn_id}:{base_key}"
+            production_settings = {
+                "avatarId": request.avatar_id,
+                "voiceId": request.voice_id,
+                "speakerId": request.speaker_id,
+                "speakerName": request.speaker_name,
+                "orientation": request.orientation,
+                "durationSeconds": payload.durationSeconds,
+                "speechMode": request.speech_mode,
+                "voiceMood": request.voice_mood,
+                "generationMode": "direct",
+                "captions": payload.captions,
+                "optimizePronunciation": True,
+                "spokenText": request.spoken_text,
+                "sceneCount": generation.turn_count,
+                "cutPolicy": "hard_cut",
+                "backgroundMusic": False,
+                "audioPolicy": "one_voice_per_clip",
+                "podcastTitle": str(plan.get("title") or "Podcast"),
+            }
+            reserved_job = {
+                "id": f"pv-{uuid.uuid4().hex[:12]}",
+                "scriptId": script_id,
+                "scriptRevision": authorization["scriptRevision"],
+                "finalSpeechHash": authorization["finalSpeechHash"],
+                "contractVersion": authorization["contractVersion"],
+                "requestFingerprint": request_fingerprint(
+                    {
+                        "scriptId": script_id,
+                        "scriptRevision": authorization["scriptRevision"],
+                        "finalSpeechHash": authorization["finalSpeechHash"],
+                        "contractVersion": authorization["contractVersion"],
+                        "generationMode": "podcast_scene",
+                        "turnId": request.turn_id,
+                        "productionSettings": production_settings,
+                    }
+                ),
+                "status": "fila",
+                "provider": "heygen",
+                "progresso": 0,
+                "criadoEm": now,
+                "atualizadoEm": now,
+                "submissionState": "reserved",
+                "isScene": True,
+                "isPodcastScene": True,
+                "sceneBatchId": base_key,
+                "sceneId": request.turn_id,
+                "sceneOrder": request.order,
+                "speakerId": request.speaker_id,
+                "speakerName": request.speaker_name,
+                "productionSettings": production_settings,
+            }
+            job, reservation = _job_store().reserve_video(
+                reserved_job,
+                idempotency_key=turn_key,
+                force_new_version=payload.forceNewVersion,
+            )
+            if reservation == "conflict":
+                if job.get("idempotencyKey") == turn_key:
+                    raise _paid_error(
+                        409,
+                        "IDEMPOTENCY_KEY_CONFLICT",
+                        "Esta chave de idempotência já foi usada com outro trecho.",
+                    )
+                raise _paid_error(
+                    409,
+                    "PODCAST_GENERATION_IN_PROGRESS",
+                    f"A fala {request.order} já está em produção.",
+                )
+            reservations.append((request, job, reservation))
+
+    created_jobs = [job for _request, job, reservation in reservations if reservation == "created"]
+    jobs: list[dict[str, Any]] = [
+        job for _request, job, reservation in reservations if reservation == "duplicate"
+    ]
+    try:
+        command = _heygen_cli()
+        _, private_looks, _from_cache = _private_avatar_library(command, allow_cache=False)
+        ready_avatar_ids = {
+            str(look.get("id"))
+            for look in private_looks
+            if isinstance(look, dict) and look.get("status") == "completed" and look.get("id")
+        }
+        missing = [
+            request.avatar_id
+            for request, _job, reservation in reservations
+            if reservation == "created" and request.avatar_id not in ready_avatar_ids
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Avatares não prontos na HeyGen: {', '.join(sorted(set(missing)))}",
+            )
+        continuity = _validate_podcast_cast(
+            generation=generation,
+            private_looks=private_looks,
+        )
+        for job in created_jobs:
+            job["continuity"] = continuity
+            job["productionSettings"] = {
+                **(job.get("productionSettings") or {}),
+                "continuityPolicy": continuity["mode"],
+            }
+            _job_store().upsert("video", job)
+    except Exception as exc:
+        message = _safe_video_provider_error(exc)
+        for job in created_jobs:
+            job["status"] = "erro"
+            job["erro"] = message
+            job["retrySafe"] = True
+            job["submissionState"] = "failed_safe"
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+        if isinstance(exc, HTTPException):
+            raise
+        raise _paid_error(502, "HEYGEN_CONFIGURATION_FAILED", message) from exc
+
+    for request, job, reservation in reservations:
+        if reservation == "duplicate":
+            continue
+        try:
+            job["submissionState"] = "submitting"
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            direct_payload = _direct_video_payload(
+                script=script,
+                narration_text=request.spoken_text,
+                avatar_id=request.avatar_id,
+                voice_id=request.voice_id,
+                orientation=request.orientation,
+                speech_mode=request.speech_mode,
+                voice_mood=request.voice_mood,
+                captions=payload.captions,
+                optimize_pronunciation=True,
+            )
+            response = _run_heygen_json(command, ["video", "create"], payload=direct_payload, timeout=60)
+            video_id = _find_value(response, "video_id", "videoId", "id")
+            if not video_id:
+                raise RuntimeError("HeyGen não retornou o identificador da fala.")
+            job["status"] = "fila"
+            job["submissionState"] = "submitted"
+            job["remoteVideoId"] = video_id
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            jobs.append(job)
+        except Exception as exc:
+            job["status"] = "erro"
+            job["erro"] = _safe_video_provider_error(exc)
+            job["retrySafe"] = job.get("submissionState") != "submitting"
+            job["submissionState"] = (
+                "failed_safe" if job["retrySafe"] else "submission_uncertain"
+            )
+            job["atualizadoEm"] = _now()
+            _job_store().upsert("video", job)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Falha ao gerar a fala {request.order}: {job['erro']}",
+            ) from exc
+    return {"ok": True, "generation": generation.to_dict(), "jobs": jobs}
 
 
 @app.get("/api/scripts/{script_id}/scene-plan")
@@ -9534,7 +10489,7 @@ def create_video(payload: VideoCreateIn) -> dict:
         payload.generationMode,
         payload.forceNewVersion,
     )
-    if payload.durationSeconds > 60:
+    if payload.durationSeconds > 60 and payload.generationMode == "direct":
         raise HTTPException(
             status_code=422,
             detail=(
@@ -9562,11 +10517,17 @@ def create_video(payload: VideoCreateIn) -> dict:
             detail="Escreva a direção cinematic antes de enviar este modo para produção.",
         )
     if payload.generationMode == "direct" and (
-        payload.styleId or payload.brandKitId or payload.videoAgentMode != "generate"
+        payload.styleId
+        or payload.brandKitId
+        or payload.videoAgentMode != "generate"
+        or payload.videoAgentVisualMode != "standard"
+        or payload.videoAgentInstructions.strip()
+        or payload.videoAgentAttachments
+        or payload.videoAgentIncognitoMode
     ):
         raise HTTPException(
             status_code=422,
-            detail="styleId, brandKitId e modo chat pertencem somente ao Video Agent.",
+            detail="As opções avançadas do Agent pertencem somente ao Video Agent.",
         )
     provider_capabilities: dict[str, Any] | None = None
     if payload.generationMode in {"video_agent", "cinematic"}:
@@ -9577,6 +10538,11 @@ def create_video(payload: VideoCreateIn) -> dict:
                 style_id=payload.styleId,
                 brand_kit_id=payload.brandKitId,
                 mode=payload.videoAgentMode,
+                files=[
+                    {"type": "asset_id", "asset_id": attachment.assetId}
+                    for attachment in payload.videoAgentAttachments
+                ],
+                incognito_mode=payload.videoAgentIncognitoMode,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -9650,6 +10616,14 @@ def create_video(payload: VideoCreateIn) -> dict:
             "styleId": payload.styleId,
             "brandKitId": payload.brandKitId,
             "videoAgentMode": payload.videoAgentMode,
+            "videoAgentVisualMode": payload.videoAgentVisualMode,
+            "videoAgentInstructions": _clean_cinematic_prompt(
+                payload.videoAgentInstructions
+            ),
+            "videoAgentAttachments": [
+                attachment.model_dump() for attachment in payload.videoAgentAttachments
+            ],
+            "videoAgentIncognitoMode": payload.videoAgentIncognitoMode,
             **(
                 {
                     "providerCapabilitiesVersion": provider_capabilities["capabilitiesVersion"],
@@ -9811,6 +10785,41 @@ def _create_video_job(
                 if payload.generationMode == "cinematic"
                 else existing_profile.get("cinematicPrompt", "")
             ),
+            "styleId": (
+                payload.styleId
+                if payload.generationMode != "direct"
+                else existing_profile.get("styleId")
+            ),
+            "brandKitId": (
+                payload.brandKitId
+                if payload.generationMode != "direct"
+                else existing_profile.get("brandKitId")
+            ),
+            "videoAgentMode": (
+                payload.videoAgentMode
+                if payload.generationMode != "direct"
+                else existing_profile.get("videoAgentMode", "generate")
+            ),
+            "videoAgentVisualMode": (
+                payload.videoAgentVisualMode
+                if payload.generationMode != "direct"
+                else existing_profile.get("videoAgentVisualMode", "standard")
+            ),
+            "videoAgentInstructions": (
+                payload.videoAgentInstructions
+                if payload.generationMode != "direct"
+                else existing_profile.get("videoAgentInstructions", "")
+            ),
+            "videoAgentAttachments": (
+                [attachment.model_dump() for attachment in payload.videoAgentAttachments]
+                if payload.generationMode != "direct"
+                else existing_profile.get("videoAgentAttachments", [])
+            ),
+            "videoAgentIncognitoMode": (
+                payload.videoAgentIncognitoMode
+                if payload.generationMode != "direct"
+                else existing_profile.get("videoAgentIncognitoMode", False)
+            ),
         }
     )
     job["productionSettings"]["avatarId"] = avatar_id
@@ -9872,6 +10881,8 @@ def _create_video_job(
             cinematic_prompt if payload.generationMode == "cinematic" else None,
             payload.durationSeconds,
             payload.voiceMood,
+            visual_mode=payload.videoAgentVisualMode,
+            agent_instructions=payload.videoAgentInstructions,
         )
         if not agent_text:
             raise HTTPException(status_code=400, detail="A fala final não pode estar vazia para o Video Agent.")
@@ -9896,6 +10907,11 @@ def _create_video_job(
                 style_id=payload.styleId,
                 brand_kit_id=payload.brandKitId,
                 mode=payload.videoAgentMode,
+                files=[
+                    {"type": "asset_id", "asset_id": attachment.assetId}
+                    for attachment in payload.videoAgentAttachments
+                ],
+                incognito_mode=payload.videoAgentIncognitoMode,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -10031,6 +11047,21 @@ def create_video_preview(payload: VideoPreviewCreateIn) -> dict:
                 "musicTrackId": existing_profile.get("musicTrackId"),
                 "musicVolume": existing_profile.get("musicVolume", 0.12),
                 "cinematicPrompt": existing_profile.get("cinematicPrompt", ""),
+                "styleId": existing_profile.get("styleId"),
+                "brandKitId": existing_profile.get("brandKitId"),
+                "videoAgentMode": existing_profile.get("videoAgentMode", "generate"),
+                "videoAgentVisualMode": existing_profile.get(
+                    "videoAgentVisualMode", "standard"
+                ),
+                "videoAgentInstructions": existing_profile.get(
+                    "videoAgentInstructions", ""
+                ),
+                "videoAgentAttachments": existing_profile.get(
+                    "videoAgentAttachments", []
+                ),
+                "videoAgentIncognitoMode": existing_profile.get(
+                    "videoAgentIncognitoMode", False
+                ),
             }
         )
         job["submissionState"] = "submitting"
@@ -10167,7 +11198,10 @@ def refresh_video(job_id: str) -> dict:
     composed_job = None
     if job.get("isScene") and job.get("status") == "pronto":
         try:
-            composed_job = _compose_final_video_if_ready(str(job.get("scriptId") or ""))
+            if job.get("isPodcastScene"):
+                composed_job = _compose_podcast_video_if_ready(str(job.get("scriptId") or ""))
+            else:
+                composed_job = _compose_final_video_if_ready(str(job.get("scriptId") or ""))
         except HTTPException:
             pass
     return {"ok": True, "job": job, "composedJob": composed_job}
@@ -10859,22 +11893,9 @@ async def _receive_local_video_kit_upload(request: Request, *, prefix: str) -> d
 
 @app.post("/api/local-video-kit/uploads")
 async def upload_local_video_kit_source(request: Request) -> dict:
-    """Recebe o vídeo e inicia transcrição + direção visual automaticamente."""
+    """Recebe o vídeo sem iniciar transcrição, análise ou render."""
     upload = await _receive_local_video_kit_upload(request, prefix="kit-upload")
-    response = {"ok": True, **{key: value for key, value in upload.items() if key != "path"}}
-    try:
-        analysis = create_post_production(
-            PostProductionCreateIn(
-                uploadId=str(upload["uploadId"]),
-                sourceName=str(upload["filename"]),
-                requireClaude=True,
-                generatePack=True,
-            )
-        )
-        response["analysisJob"] = analysis["job"]
-    except HTTPException as exc:
-        response["analysisError"] = str(exc.detail)
-    return response
+    return {"ok": True, **{key: value for key, value in upload.items() if key != "path"}}
 
 
 @app.post("/api/local-video-kit/insert-uploads")
@@ -14181,6 +15202,7 @@ def _delete_script_local_data(script_id: str) -> dict[str, Any]:
             "script_editor_states",
             "production_profiles",
             "scene_plans",
+            "podcast_plans",
             "visual_plans",
             "video_slide_renders",
             "visual_packs",
@@ -14277,8 +15299,8 @@ class PackIn(BaseModel):
     cta: str = ""
     cuidadosMedicos: str = ""
     formatoSugerido: str = "Reels"
-    family: Literal["editorial", "didatico", "storytelling"] | None = None
-    themeId: Literal["modernist-red", "ocean-deep"] | None = None
+    family: Literal["editorial", "didatico", "storytelling", "manifesto", "clinico"] | None = None
+    themeId: Literal["modernist-red", "ocean-deep", "soft-sage", "soft-rose"] | None = None
 
 
 class PackSlideLayoutIn(BaseModel):
@@ -14294,8 +15316,8 @@ class PackCoverNoteIn(BaseModel):
 
 
 class PackPresentationIn(BaseModel):
-    family: Literal["editorial", "didatico", "storytelling"]
-    themeId: Literal["modernist-red", "ocean-deep"]
+    family: Literal["editorial", "didatico", "storytelling", "manifesto", "clinico"]
+    themeId: Literal["modernist-red", "ocean-deep", "soft-sage", "soft-rose"]
 
 
 def _pack_text(pack: dict[str, Any]) -> str:
@@ -14592,6 +15614,12 @@ def _production_configuration_key(payload: VideoCreateIn, display_text: str, spo
         "styleId": payload.styleId,
         "brandKitId": payload.brandKitId,
         "videoAgentMode": payload.videoAgentMode,
+        "videoAgentVisualMode": payload.videoAgentVisualMode,
+        "videoAgentInstructions": _clean_cinematic_prompt(payload.videoAgentInstructions),
+        "videoAgentAttachments": [
+            attachment.model_dump() for attachment in payload.videoAgentAttachments
+        ],
+        "videoAgentIncognitoMode": payload.videoAgentIncognitoMode,
     }
     digest = hashlib.sha256(json.dumps(configuration, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     return f"video:{payload.scriptId}:{digest[:32]}"
@@ -14619,11 +15647,24 @@ def _compose_video_agent_prompt(
     cinematic_prompt: str | None,
     duration_seconds: int,
     voice_mood: str = "confident",
+    *,
+    visual_mode: str = "standard",
+    agent_instructions: str = "",
 ) -> tuple[str, str]:
     clean_script = approved_script.strip()
     if not clean_script:
         return "", "approved_text_plus_voice_direction"
     clean_direction = _clean_cinematic_prompt(cinematic_prompt)
+    clean_instructions = _clean_cinematic_prompt(agent_instructions)
+    visual_direction = (
+        "VISUAL GENERATION MODE (instructions only; never read aloud): Use AI-generated "
+        "cinematic animated visuals that closely match the script. Favor dynamic camera motion, "
+        "purposeful transitions, and generated scenes over conventional stock footage."
+        if visual_mode == "seedance"
+        else "VISUAL GENERATION MODE (instructions only; never read aloud): Use primarily B-roll, "
+        "stock footage, motion graphics, and attached media. Keep the result traditional, "
+        "credible, and brand-focused."
+    )
     prompt_parts = [
         (
             "The selected presenter explains the approved topic in Brazilian Portuguese. "
@@ -14642,6 +15683,7 @@ def _compose_video_agent_prompt(
             f"Keep the video around {duration_seconds} seconds. "
             "Do not add new medical claims, mockery, caricature, or sensational framing."
         ),
+        visual_direction,
         f"APPROVED SCRIPT (Portuguese):\n{clean_script}",
         "EDITORIAL PROFILE (instructions only; never read aloud):\n"
         + MEDICAL_EDITORIAL_PROMPT,
@@ -14656,6 +15698,11 @@ def _compose_video_agent_prompt(
         )
         prompt_parts.append(
             f"CINEMATIC DIRECTION (interpret visually, do not read aloud):\n{clean_direction}"
+        )
+    if clean_instructions:
+        prompt_parts.append(
+            "ADDITIONAL VIDEO AGENT INSTRUCTIONS (follow visually; never read aloud):\n"
+            + clean_instructions
         )
     prompt = "\n\n".join(prompt_parts)
     return (
@@ -14744,18 +15791,23 @@ IDENTIDADE:
 - Nunca invente, troque ou escolha outro avatarId; a identidade é anexada pelo backend.
 - Se houver Avatar Set, ele representa a mesma pessoa em posições diferentes; mantenha essa continuidade também nas fotos.
 
-OBJETIVO DE COPY: leitura instantanea e entendimento na primeira passada.
-- Uma unica ideia por slide.
-- O NARRATIVE BRIEF define a funcao e a fonte editorial de cada posicao. Cada slide deve desenvolver apenas o sourceText correspondente, sem trocar de assunto.
+OBJETIVO DE COPY: aprendizagem clara, leitura instantanea e entendimento na primeira passada.
+- Uma unica ideia por slide, sempre com uma funcao educativa: apresentar, contextualizar, definir, explicar, interpretar, limitar ou resumir.
+- O NARRATIVE BRIEF define a etapa, a funcao e a fonte de cada posicao. Cada slide deve desenvolver apenas o sourceText correspondente, sem trocar de assunto.
 - O roteiro aprovado e a fonte principal de verdade; a ideia vinculada complementa angulo, publico e contexto. Nao crie uma tese nova para preencher espaco.
 - Cada slide precisa fazer sentido sozinho e tambem continuar logicamente o anterior. Evite saltos de assunto e conselhos genericos que poderiam servir para qualquer tema.
-- Headline curta, concreta e com no maximo 11 palavras.
-- Frases ativas; prefira palavras comuns e verbos concretos.
-- Explique termos medicos em linguagem cotidiana.
-- Corte introducoes, adjetivos vazios, repeticoes e frases de efeito genericas.
-- Nao repita a headline no body.
+- Headline curta, concreta e com no maximo 11 palavras. Frases ativas; prefira palavras comuns e verbos concretos.
+- Explique termos medicos em linguagem cotidiana antes de usalos como conclusao. Se houver dado, explique o que ele significa; nao deixe numero isolado.
+- Use tom acolhedor e neutro em todos os slides. Transforme duvidas em explicacoes, sem culpar, assustar ou confrontar quem le.
+- Nunca use frases como "voce confunde", "voce esta fazendo errado", "ninguem te contou" ou referencias vagas como "aquele produto que achei por ai".
+- Corte introducoes, adjetivos vazios, repeticoes e frases de efeito genericas. Nao repita a headline no body.
 - Nao use emoji, markdown, rotulos como "Slide 1" ou texto sobre o design.
 - A pessoa precisa captar a mensagem central de cada tela em ate 3 segundos.
+
+TOM EDUCATIVO OBRIGATORIO EM TODOS OS SLIDES:
+- Ensine com calma: contextualize antes de concluir, defina antes de comparar e explique antes de orientar.
+- Prefira perguntas neutras, exemplos concretos e conclusoes proporcionais à fonte.
+- Uma ressalva clinica deve esclarecer o limite da informacao, nao substituir a explicacao principal.
 
 COMPLIANCE:
 - Nao prescreva medicamento, dose ou conduta individual.
@@ -14769,14 +15821,16 @@ COMPLIANCE:
 
 COMPOSICAO:
 - Exatamente 7 slides.
-- Slide 1: hero_photo ou photo_overlay. Slide 7: cta_photo.
-- Slides 2 a 6: escolha livre entre os 12 layouts conforme a funcao narrativa.
-- Inclua obrigatoriamente um slide explainer entre os slides 3 e 5. Esse e o slide de contexto: mais explicativo, pode ter body maior e deve traduzir o contexto gerado pela IA para linguagem comum.
-- Os layouts sao uma paleta visual, nao uma grade obrigatoria. Voce pode repetir um layout se isso deixar a mensagem mais clara.
-- Use pelo menos 4 tipos de layout no total, para manter ritmo.
-- Maximo 3 slides com foto; nunca dois full bleed seguidos.
-- Maximo 2 fundos escuros consecutivos.
-- Sequencia: gancho -> tensao -> contexto explicado -> evidencia/riscos -> ponto central -> aplicacao/autoridade -> CTA.
+- Slide 1: hero_photo ou photo_overlay. Apresente o tema e o que a pessoa vai entender.
+- Slide 2: contexto. Use pergunta comum, comparacao neutra ou explicacao curta; nunca uma provocacao isolada.
+- Slides 3 e 4: conceito-chave e como funciona. Inclua obrigatoriamente um explainer em um desses dois slides e use pelo menos mais um layout explicativo entre os slides 3 e 6.
+- Slide 5: dado, evidencia ou implicacao. Use number_stat somente quando a fonte trouxer o dado; caso contrario, explique a implicacao sem inventar numero.
+- Slide 6: cuidados e limites. Deixe claro o que ainda exige cautela ou avaliacao individual.
+- Slide 7: cta_photo com resumo e proximo passo educativo seguro.
+- Os layouts sao uma paleta visual, nao uma grade obrigatoria. Voce pode repetir layout se isso deixar a mensagem mais clara.
+- Use pelo menos 4 tipos de layout no total, para manter ritmo sem sacrificar entendimento.
+- Maximo 3 slides com foto; nunca dois full bleed seguidos. Maximo 2 fundos escuros consecutivos.
+- Sequencia obrigatoria: tema e objetivo -> contexto -> conceito-chave -> como funciona -> o que a fonte mostra -> cuidados e limites -> resumo e proximo passo.
 - photoId deve vir apenas da biblioteca enviada no pedido.
 - Layout e texto devem obedecer aos limites descritos no pedido.
 - Se a ideia nao couber com leitura confortavel em um layout, reescreva a copy ou escolha outro layout. Nunca deixe frase cortada, incompleta ou dependente de contexto oculto.
@@ -14785,7 +15839,7 @@ COMPOSICAO:
 - Em myth_fact, item1 precisa conter um mito especifico, curto e popular do roteiro; item2 precisa conter o fato correspondente, tambem curto. Se nao existir mito real e claro, nao use myth_fact.
 - Em myth_fact, use exatamente os titulos "Mito" e "Fato". Cada texto precisa ser uma frase completa dentro do limite do layout.
 - Nunca termine headline, body, quote ou item.text em conectivo, determinante ou verbo pendente, como "mas não", "para sua", "vem", "pode" ou "é".
-- Em efeitos colaterais, riscos e sinais de alerta, prefira lista visual, pergunta, explicador ou grande afirmacao. Nao transforme lista de riscos em mito/fato.
+- Em efeitos colaterais, riscos e sinais de alerta, prefira lista visual, pergunta ou explicador. Nao transforme lista de riscos em mito/fato.
 - Voce nao gera HTML, CSS ou imagens.
 
 {MEDICAL_EDITORIAL_PROMPT}"""
@@ -14798,14 +15852,17 @@ usando exclusivamente o schema fornecido.
 REGRAS DE CONTEÚDO:
 - A transcrição é a única fonte de verdade. Não invente dados, números, estudos, marcas,
   comparações, diagnósticos, prescrições ou conclusões.
-- Uma ideia por slide, com sequência: gancho, problema, contexto, explicação, evidência
-  ou ressalva, conclusão prática e CTA.
+- Uma ideia por slide, com sequência educativa: tema e objetivo, contexto, conceito-chave,
+  como funciona, o que a fonte mostra, cuidados e limites, resumo e próximo passo.
+- Todo slide deve ensinar algo de forma acolhedora e fácil de entender. Não confronte quem lê,
+  não use frases de efeito e não deixe dados sem explicação.
+- Explique termos médicos em palavras comuns e transforme dúvidas em comparações neutras.
 - Se um tipo de layout exigir uma informação que não existe, escolha outro layout.
 - Headline curta, concreta e completa. Não repita a headline no body.
 - Use linguagem comum e preserve as ressalvas da fala.
 - Sem emojis, markdown, alarmismo, promessa ou autodiagnóstico.
 - O slide 1 usa hero_photo ou photo_overlay; o slide 7 usa cta_photo.
-- Inclua um explainer entre os slides 3 e 5 e use pelo menos 4 layouts diferentes.
+- Inclua um explainer no slide 3 ou 4 e use pelo menos mais um layout explicativo entre os slides 3 e 6.
 - Todo photoId deve vir da biblioteca permitida.
 - O disclaimer final deve ser exatamente: {MEDICAL_EDUCATIONAL_DISCLAIMER}
 - A legenda e o footer finais devem identificar: {MEDICAL_PROFESSIONAL_IDENTIFICATION}
@@ -14834,7 +15891,8 @@ def _generate_post_production_pack(job_id: str) -> dict[str, Any]:
         "transcriptVersion": transcript.get("version"),
         "schemaVersion": PACK_SCHEMA_VERSION,
         "slideCount": PACK_SLIDE_COUNT,
-        "flow": "local-transcript-pack-v1",
+        "flow": "local-transcript-pack-v2",
+        "educationalFlowVersion": PACK_EDUCATIONAL_FLOW_VERSION,
     }
     cached = _ai_cache_get("post_production.pack", cache_payload)
     cached_pack = cached.get("pack") if isinstance(cached, dict) else None
@@ -14859,7 +15917,8 @@ def _generate_post_production_pack(job_id: str) -> dict[str, Any]:
         f"{json.dumps(photo_context, ensure_ascii=False)}\n\n"
         "LAYOUTS E LIMITES:\n"
         f"{json.dumps(layout_context, ensure_ascii=False)}\n\n"
-        "Entregue exatamente 7 slides. Campos que não pertencem ao layout devem ser vazios."
+        "Entregue exatamente 7 slides seguindo a sequencia educativa: tema, contexto, conceito, "
+        "explicacao, evidencia, cuidados e resumo. Campos que não pertencem ao layout devem ser vazios."
     )
 
     def request_pack(correction: list[str] | None = None, rejected: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -14901,6 +15960,7 @@ def _generate_post_production_pack(job_id: str) -> dict[str, Any]:
             dict.fromkeys(
                 [
                     *validate_pack_contract(pack),
+                    *educational_flow_issues(pack),
                     *_pack_grounding_errors(pack, grounding_context),
                 ]
             )
@@ -14910,9 +15970,11 @@ def _generate_post_production_pack(job_id: str) -> dict[str, Any]:
 
     pack = repair_pack_copy(pack)
     pack = _normalize_pack_design(pack)
+    pack["educationalFlowVersion"] = PACK_EDUCATIONAL_FLOW_VERSION
     pack = _apply_pack_presentation(pack, family="didatico", theme_id="modernist-red")
     validation_errors = [
         *validate_pack_contract(pack),
+        *educational_flow_issues(pack),
         *_pack_grounding_errors(pack, grounding_context),
     ]
     if validation_errors:
@@ -15031,6 +16093,7 @@ def _pack_photo_asset(asset_id: str) -> dict[str, Any]:
 def _pack_design_plan(pack: dict[str, Any]) -> dict[str, Any]:
     return {
         "schemaVersion": pack.get("schemaVersion") or PACK_SCHEMA_VERSION,
+        "educationalFlowVersion": pack.get("educationalFlowVersion") or "legacy",
         "family": pack.get("family") or DEFAULT_PACK_FAMILY,
         "themeId": pack.get("themeId") or LEGACY_PACK_THEME,
         "carousel": [
@@ -15092,10 +16155,10 @@ def _normalize_pack_design(pack: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault(
         "checklist",
         [
-            "7 slides em sequencia narrativa",
-            "1 slide explicativo com contexto da IA",
-            "12 layouts de marca disponiveis",
-            "Copy curta e validada por campo",
+            "7 slides em uma sequencia educativa clara",
+            "Conceito explicado antes de dados e cuidados",
+            "Uma ideia principal por tela, sem jargao ou confronto",
+            "Dados apresentados com contexto",
             "PNG 1080 x 1350 pronto para Instagram",
         ],
     )
@@ -15136,6 +16199,7 @@ def _attach_pack_metadata(
     if pack_context:
         identity = pack_context.get("identity") if isinstance(pack_context.get("identity"), dict) else {}
         enriched["packContextVersion"] = PACK_CONTEXT_VERSION
+        enriched["educationalFlowVersion"] = PACK_EDUCATIONAL_FLOW_VERSION
         enriched["sourceIdentityKey"] = pack_context.get("identityKey")
         enriched["sourceAvatarSetId"] = identity.get("avatarSetId")
         enriched["sourcePrimaryAvatarId"] = identity.get("primaryAvatarId")
@@ -15190,8 +16254,9 @@ def _pack_generation_context(script_id: str, script: dict[str, Any]) -> tuple[di
         "photoLibrary": list(PHOTO_LIBRARY),
         "rules": [
             "Claude escolhe copy, narrativa, layout e photoId; o renderer controla HTML/CSS.",
-            "Exatamente 7 slides; layouts sao sugestoes flexiveis e podem repetir quando fizer sentido.",
-            "Um slide explainer no meio traduz o contexto da IA em linguagem simples.",
+            "Exatamente 7 slides em uma trilha educativa: tema, contexto, conceito, explicacao, evidencia, cuidados e resumo.",
+            "Um slide explainer nos slides 3 ou 4 traduz o contexto para linguagem simples.",
+            "Todo slide usa tom acolhedor, sem julgamento ou frases de impacto vagas.",
             "O Pack herda a identidade do Roteiro e não escolhe outro avatar.",
         ],
     }
@@ -15252,6 +16317,7 @@ def generate_pack(payload: PackIn) -> dict:
         "request": payload.model_dump(exclude={"family", "themeId"}),
         "context": pack_context,
         "identityKey": pack_context["identityKey"],
+        "educationalFlowVersion": PACK_EDUCATIONAL_FLOW_VERSION,
         "recentPackContext": recent_context,
         "schemaVersion": PACK_SCHEMA_VERSION,
         "slideCount": PACK_SLIDE_COUNT,
@@ -15276,6 +16342,7 @@ def generate_pack(payload: PackIn) -> dict:
             )
             validation_errors = [
                 *validate_pack_contract(pack),
+                *educational_flow_issues(pack),
                 *_pack_grounding_errors(pack, pack_context),
             ]
             if validation_errors:
@@ -15326,7 +16393,7 @@ def generate_pack(payload: PackIn) -> dict:
             "editorialFreedom": [
                 "Escolha o layout que melhor explica a mensagem, mesmo que diferente da sugestao inicial.",
                 "Pode repetir layout se isso evitar corte de texto ou melhorar entendimento.",
-                "Priorize uma frase forte por slide; detalhes ficam na legenda.",
+                "Priorize uma explicacao simples por slide; detalhes ficam na legenda.",
                 "Nao use myth_fact para listas de riscos ou efeitos colaterais.",
             ],
         },
@@ -15339,8 +16406,9 @@ def generate_pack(payload: PackIn) -> dict:
         f"BIBLIOTECA DE FOTOS (use somente estes IDs):\n{photo_context}\n\n"
         f"VOCABULARIO E LIMITES:\n{layout_context}\n\n"
         f"ULTIMOS CARROSSEIS — evite repetir a mesma sequencia e os mesmos ganchos:\n{diversity}\n\n"
-        "Entregue exatamente 7 slides seguindo, na mesma ordem, o slidePlan do NARRATIVE BRIEF. "
+        "Entregue exatamente 7 slides seguindo, na mesma ordem, o slidePlan educativo do NARRATIVE BRIEF. "
         "Cada tela deve ser entendida isoladamente e levar naturalmente a proxima. "
+        "Use tom acolhedor e explicativo em todas as telas; nunca confronte quem le. "
         "Todo percentual ou estatistica precisa aparecer literalmente na ideia vinculada ou no roteiro aprovado. "
         "Use fields irrelevantes ao layout como string vazia ou item vazio."
     )
@@ -15355,7 +16423,7 @@ def generate_pack(payload: PackIn) -> dict:
         if correction_errors:
             correction = (
                 "\n\nA RESPOSTA ABAIXO FOI REJEITADA. Corrija somente os campos/layouts necessarios, "
-                "preserve a sequencia narrativa e devolva novamente o objeto completo com exatamente 7 slides.\n"
+                "preserve a sequencia educativa e devolva novamente o objeto completo com exatamente 7 slides.\n"
                 "ERROS A CORRIGIR:\n- "
                 + "\n- ".join(correction_errors)
                 + "\n\nRASCUNHO REJEITADO:\n"
@@ -15393,6 +16461,7 @@ def generate_pack(payload: PackIn) -> dict:
             dict.fromkeys(
                 [
                     *validate_pack_contract(pack),
+                    *educational_flow_issues(pack),
                     *_pack_grounding_errors(pack, pack_context),
                 ]
             )
@@ -15406,6 +16475,7 @@ def generate_pack(payload: PackIn) -> dict:
         # layout sem descartar o carrossel inteiro.
         pack = repair_pack_copy(pack)
         contract_errors = validate_pack_contract(pack)
+        educational_errors = educational_flow_issues(pack)
         grounding_errors = _pack_grounding_errors(pack, pack_context)
         if contract_errors:
             raise HTTPException(
@@ -15418,6 +16488,11 @@ def generate_pack(payload: PackIn) -> dict:
                 status_code=502,
                 detail="O carrossel trouxe dados que nao existem na ideia ou no roteiro: "
                 + "; ".join(grounding_errors),
+            )
+        if educational_errors:
+            raise HTTPException(
+                status_code=502,
+                detail="O carrossel nao seguiu a sequencia educativa: " + "; ".join(educational_errors),
             )
     except anthropic.APIStatusError as exc:
         raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
@@ -15475,6 +16550,9 @@ def get_pack(script_id: str) -> dict:
             or pack_slide_count != PACK_SLIDE_COUNT
         )
     )
+    outdated_educational_flow = bool(
+        pack and pack.get("educationalFlowVersion") != PACK_EDUCATIONAL_FLOW_VERSION
+    )
     outdated = bool(
         pack
         and (
@@ -15494,6 +16572,7 @@ def get_pack(script_id: str) -> dict:
         "outdatedAvatar": outdated,
         "outdatedIdentity": outdated,
         "outdatedPackSchema": outdated_pack_schema,
+        "outdatedEducationalFlow": outdated_educational_flow,
         "requiredSlideCount": PACK_SLIDE_COUNT,
     }
 
@@ -15693,8 +16772,8 @@ class PackStaticPost(BaseModel):
 class PackBody(BaseModel):
     schemaVersion: str = PACK_SCHEMA_VERSION
     designDirection: str = "institute_carousel_v1"
-    family: Literal["editorial", "didatico", "storytelling"] = DEFAULT_PACK_FAMILY
-    themeId: Literal["modernist-red", "ocean-deep"] = LEGACY_PACK_THEME
+    family: Literal["editorial", "didatico", "storytelling", "manifesto", "clinico"] = DEFAULT_PACK_FAMILY
+    themeId: Literal["modernist-red", "ocean-deep", "soft-sage", "soft-rose"] = LEGACY_PACK_THEME
     carousel: list[PackSlide] = Field(default_factory=list)
     slides: list[PackSlide] = Field(default_factory=list)
     staticPost: PackStaticPost = Field(default_factory=PackStaticPost)

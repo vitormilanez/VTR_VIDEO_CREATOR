@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from api.services.local_video_captions import (
     caption_cues,
@@ -45,6 +46,36 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LocalVideoKitTests(unittest.TestCase):
+    def test_source_upload_does_not_start_post_production(self) -> None:
+        from api import server
+
+        received = AsyncMock(
+            return_value={
+                "uploadId": "kit-upload-1234567890abcdef",
+                "filename": "consulta.mp4",
+                "size": 2048,
+                "path": Path("/tmp/consulta.mp4"),
+            }
+        )
+        with (
+            patch.object(server, "_receive_local_video_kit_upload", received),
+            patch.object(server, "create_post_production") as create_analysis,
+        ):
+            request = object()
+            response = asyncio.run(server.upload_local_video_kit_source(request))
+
+        received.assert_awaited_once_with(request, prefix="kit-upload")
+        create_analysis.assert_not_called()
+        self.assertEqual(
+            response,
+            {
+                "ok": True,
+                "uploadId": "kit-upload-1234567890abcdef",
+                "filename": "consulta.mp4",
+                "size": 2048,
+            },
+        )
+
     def test_generic_visual_events_keep_only_safe_claude_suggestions(self) -> None:
         events = _generic_visual_events(
             {

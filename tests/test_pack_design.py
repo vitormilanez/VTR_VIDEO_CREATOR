@@ -4,9 +4,11 @@ from copy import deepcopy
 
 from api.pack_design import (
     LAYOUT_SPECS,
+    PACK_FAMILIES,
     PACK_LAYOUTS,
     PACK_SCHEMA_VERSION,
     PHOTO_LIBRARY,
+    educational_flow_issues,
     empty_fields,
     normalize_slide,
     pack_slides,
@@ -137,6 +139,24 @@ def sample_pack() -> dict[str, object]:
 
 def test_sample_pack_follows_closed_contract() -> None:
     assert validate_pack_contract(sample_pack()) == []
+
+
+def test_sample_pack_follows_the_educational_flow() -> None:
+    assert educational_flow_issues(sample_pack()) == []
+
+
+def test_educational_flow_rejects_accusatory_copy_and_late_explanation() -> None:
+    pack = sample_pack()
+    pack["slides"][1]["layoutId"] = "big_statement"
+    pack["slides"][1]["layout"] = "big_statement"
+    pack["slides"][1]["fields"]["headline"] = "Você confunde estudo com medicamento aprovado"
+    pack["slides"][3]["layoutId"] = "three_points"
+    pack["slides"][3]["layout"] = "three_points"
+
+    issues = educational_flow_issues(pack)
+
+    assert any("tom acusatorio" in issue for issue in issues)
+    assert any("slides 3 ou 4" in issue for issue in issues)
 
 
 def test_doctor_quote_uses_the_registered_medical_identification() -> None:
@@ -460,6 +480,58 @@ def test_slide_html_applies_modernist_theme_without_changing_copy() -> None:
     assert "#C8392B" in html
     assert "#12B2A6" not in html
     assert "Por que o peso volta depois da dieta" in html
+
+
+def test_slide_html_applies_soft_themes_without_changing_copy() -> None:
+    slide = sample_pack()["slides"][0]
+
+    sage = slide_html(slide, index=1, total=7, theme_id="soft-sage")
+    rose = slide_html(slide, index=1, total=7, theme_id="soft-rose")
+
+    assert "data-theme='soft-sage'" in sage
+    assert "#86A996" in sage
+    assert "#12B2A6" not in sage
+    assert "data-theme='soft-rose'" in rose
+    assert "#C78B93" in rose
+    assert "#12B2A6" not in rose
+    assert "Por que o peso volta depois da dieta" in sage
+    assert "Por que o peso volta depois da dieta" in rose
+
+
+def test_light_slides_keep_footer_text_readable() -> None:
+    slide = sample_pack()["slides"][1]
+
+    html = slide_html(slide, index=2, total=7, theme_id="soft-sage")
+
+    assert ".question.bg-light .footer-row" in html
+    assert "color:#71877D" in html
+
+
+def test_didactic_slides_use_compact_question_and_explainer_cards() -> None:
+    pack = sample_pack()
+
+    question_html = slide_html(pack["slides"][1], index=2, total=7, family="didatico", theme_id="soft-sage")
+    explainer_html = slide_html(pack["slides"][3], index=4, total=7, family="didatico", theme_id="soft-sage")
+
+    assert "question-guide" in question_html
+    assert "question-answer" in question_html
+    assert "font-size:212px" in question_html
+    assert "font-size:760px" not in question_html
+    assert '<p>Sinais internos mudam.</p>' in explainer_html
+    assert 'class="step step-final"' in explainer_html
+
+
+def test_new_pack_templates_are_available_in_the_renderer() -> None:
+    slide = sample_pack()["slides"][0]
+
+    manifesto = slide_html(slide, index=1, total=7, family="manifesto")
+    clinico = slide_html(slide, index=1, total=7, family="clinico")
+
+    assert {"manifesto", "clinico"}.issubset(PACK_FAMILIES)
+    assert "data-family='manifesto'" in manifesto
+    assert "html[data-family='manifesto'] .accent-bar" in manifesto
+    assert "data-family='clinico'" in clinico
+    assert "html[data-family='clinico'] .bg-light" in clinico
 
 
 def test_every_closed_layout_has_a_renderer() -> None:

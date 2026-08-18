@@ -266,7 +266,7 @@ function VideoDetalhe() {
   }
 
   async function regenerateOnlyThisScene() {
-    if (!job?.isScene) return;
+    if (!job?.isScene || job.isPodcastScene) return;
     setRegeneratingScene(true);
     try {
       const replacement = await regenerateSceneVideo(job.id);
@@ -340,7 +340,7 @@ function VideoDetalhe() {
               {autoRefreshing ? "Acompanhando..." : "Atualizar status"}
             </Button>
           </WithTooltip>
-          {job.isScene ? (
+          {job.isScene && !job.isPodcastScene ? (
             <ConfirmAction
               title="Regenerar somente esta tomada?"
               description="O HeyGen receberá apenas esta cena, com o mesmo look, voz, texto e corte seco. As outras tomadas do lote serão preservadas."
@@ -1119,9 +1119,5 @@ function buildReelCaption(script: Script): string {
     obesidade: ["#Obesidade", "#Emagrecimento", "#Saude", "#ConteudoMedico"],
     educativo: ["#Saude", "#BemEstar", "#Informacao", "#ConteudoMedico"],
   };
-  return formatPublicationCaption(
-    sections.join("\n\n"),
-    familyHashtags[script.categoria],
-    2200,
-  );
+  return formatPublicationCaption(sections.join("\n\n"), familyHashtags[script.categoria], 2200);
 }

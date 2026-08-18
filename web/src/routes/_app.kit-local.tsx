@@ -415,6 +415,8 @@ type EditorFlowState =
   | "choose"
   | "uploading"
   | "upload_failed"
+  | "configure"
+  | "queueing"
   | "transcribing"
   | "analyzing"
   | "analysis_failed"
@@ -430,6 +432,7 @@ function LocalVideoKitPage() {
   const { videoJobId, sourceName } = Route.useSearch();
   const fileInput = useRef<HTMLInputElement>(null);
   const sourceSelection = useRef(0);
+  const analysisStartInFlight = useRef(false);
   const [file, setFile] = useState<File | null>(null);
   const [sourcePreview, setSourcePreview] = useState<string | null>(null);
   const [sourceDuration, setSourceDuration] = useState<number | null>(null);
@@ -442,6 +445,7 @@ function LocalVideoKitPage() {
   const [analysisArtifacts, setAnalysisArtifacts] = useState<PostProductionArtifacts | null>(null);
   const [analysisPack, setAnalysisPack] = useState<GeneratedContentPack | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [startingAnalysis, setStartingAnalysis] = useState(false);
   const [retryingAnalysis, setRetryingAnalysis] = useState(false);
   const [visualReviewConfirmed, setVisualReviewConfirmed] = useState(false);
   const [activeEditorTab, setActiveEditorTab] = useState("base");
@@ -547,6 +551,7 @@ function LocalVideoKitPage() {
     setAnalysisPack(null);
     setAnalysisError(null);
     setVisualReviewConfirmed(false);
+    setStartingAnalysis(false);
     setUploadingSource(false);
     setSourceDuration(null);
     setJob(null);
@@ -562,29 +567,6 @@ function LocalVideoKitPage() {
       claudeInserts: DEFAULT_CLAUDE_INSERTS,
     }));
   }, [sourceName, videoJobId]);
-
-  useEffect(() => {
-    if (!videoJobId) return;
-    let cancelled = false;
-    void createPostProduction(videoJobId, false, {
-      requireClaude: true,
-      generatePack: true,
-    })
-      .then((current) => {
-        if (cancelled) return;
-        setAnalysisJob(current);
-        setAnalysisError(current.status === "failed" ? current.erro || "A análise falhou." : null);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setAnalysisError(
-          error instanceof Error ? error.message : "Não foi possível iniciar a análise do vídeo.",
-        );
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [videoJobId]);
 
   const activeJobId = job?.id;
   const activeJobStatus = job?.status;
@@ -677,18 +659,12 @@ function LocalVideoKitPage() {
 
   function acceptSourceUpload(uploaded: Awaited<ReturnType<typeof uploadLocalVideoKitSource>>) {
     setSourceUpload(uploaded);
-    setAnalysisJob(uploaded.analysisJob || null);
+    setAnalysisJob(null);
     setAnalysisArtifacts(null);
     setAnalysisPack(null);
-    setAnalysisError(uploaded.analysisError || null);
+    setAnalysisError(null);
     setVisualReviewConfirmed(false);
-    if (uploaded.analysisError) {
-      toast.error(`Vídeo enviado, mas a análise não iniciou: ${uploaded.analysisError}`);
-    } else if (uploaded.analysisJob) {
-      toast.success("Vídeo enviado. A transcrição local e as legendas foram iniciadas.");
-    } else {
-      toast.success("Vídeo carregado no editor.");
-    }
+    toast.success("Vídeo carregado. Ajuste a edição e confirme quando quiser iniciar.");
   }
 
   async function selectFile(selected?: File) {
@@ -710,6 +686,7 @@ function LocalVideoKitPage() {
     setAnalysisPack(null);
     setAnalysisError(null);
     setVisualReviewConfirmed(false);
+    setStartingAnalysis(false);
     setJob(null);
     setRenderConfigDirty(false);
     setActiveEditorTab("base");
@@ -902,6 +879,41 @@ function LocalVideoKitPage() {
     );
   }
 
+  async function startAnalysis() {
+    if (analysisStartInFlight.current || analysisJob) return;
+    if (!sourceUpload && !videoJobId) {
+      toast.error("Escolha um vídeo antes de iniciar a preparação.");
+      return;
+    }
+    const selection = sourceSelection.current;
+    analysisStartInFlight.current = true;
+    setStartingAnalysis(true);
+    setAnalysisError(null);
+    setAnalysisArtifacts(null);
+    setAnalysisPack(null);
+    setVisualReviewConfirmed(false);
+    try {
+      const current = sourceUpload
+        ? await createUploadedPostProduction(sourceUpload.uploadId, sourceUpload.filename)
+        : await createPostProduction(videoJobId!, false, {
+            requireClaude: true,
+            generatePack: true,
+          });
+      if (sourceSelection.current !== selection) return;
+      setAnalysisJob(current);
+      toast.success("Preparação confirmada e adicionada à fila.");
+    } catch (error) {
+      if (sourceSelection.current !== selection) return;
+      const message =
+        error instanceof Error ? error.message : "Não foi possível adicionar a preparação à fila.";
+      setAnalysisError(message);
+      toast.error(message);
+    } finally {
+      analysisStartInFlight.current = false;
+      if (sourceSelection.current === selection) setStartingAnalysis(false);
+    }
+  }
+
   async function retryVisualAnalysis() {
     if (!sourceUpload && !analysisJob && !videoJobId) return;
     setRetryingAnalysis(true);
@@ -1090,36 +1102,44 @@ function LocalVideoKitPage() {
     (videoJobId ? videoFileUrl(videoJobId) : job ? localVideoKitSourceUrl(job.id) : null);
   const enabledVisualCount =
     analysisArtifacts?.timeline.events.filter((event) => event.enabled).length ?? 0;
+  const preparationConfirmed = Boolean(startingAnalysis || analysisJob || legacyProject || job);
   const flowState: EditorFlowState = uploadingSource
     ? "uploading"
     : sourceUploadError
       ? "upload_failed"
-      : analysisFailed && Boolean(file || videoJobId)
-        ? "analysis_failed"
-        : transcriptionRunning
-          ? "transcribing"
-          : claudeRunning ||
-              (sourceReady && !analysisReady && Boolean(file || analysisJob || job?.analysisJobId))
-            ? "analyzing"
-            : analysisReady && reviewRequired && !visualReviewConfirmed
-              ? "review"
-              : sourceReady && analysisReady && reviewReady && visualTimingIssues.length
-                ? "fix_visuals"
-                : sourceReady && analysisReady && reviewReady && insertErrors.length
-                  ? "fix_clips"
-                  : working
-                    ? "rendering"
-                    : job?.status === "erro" && !renderConfigDirty
-                      ? "render_failed"
-                      : job?.status === "pronto" && !renderConfigDirty
-                        ? "done"
-                        : canRender
-                          ? "ready"
-                          : "choose";
+      : startingAnalysis
+        ? "queueing"
+        : analysisFailed && Boolean(file || videoJobId)
+          ? "analysis_failed"
+          : transcriptionRunning
+            ? "transcribing"
+            : claudeRunning ||
+                (sourceReady && !analysisReady && Boolean(analysisJob || job?.analysisJobId))
+              ? "analyzing"
+              : analysisReady && reviewRequired && !visualReviewConfirmed
+                ? "review"
+                : sourceReady && analysisReady && reviewReady && visualTimingIssues.length
+                  ? "fix_visuals"
+                  : sourceReady && analysisReady && reviewReady && insertErrors.length
+                    ? "fix_clips"
+                    : working
+                      ? "rendering"
+                      : job?.status === "erro" && !renderConfigDirty
+                        ? "render_failed"
+                        : job?.status === "pronto" && !renderConfigDirty
+                          ? "done"
+                          : canRender
+                            ? "ready"
+                            : sourceReady && !analysisJob && Boolean(file || videoJobId)
+                              ? "configure"
+                              : "choose";
   const currentStep =
-    flowState === "choose" || flowState === "uploading" || flowState === "upload_failed"
+    flowState === "choose" ||
+    flowState === "uploading" ||
+    flowState === "upload_failed" ||
+    flowState === "configure"
       ? 1
-      : flowState === "transcribing"
+      : flowState === "queueing" || flowState === "transcribing"
         ? 2
         : flowState === "analyzing" ||
             flowState === "analysis_failed" ||
@@ -1141,6 +1161,14 @@ function LocalVideoKitPage() {
         ? "Movimento social"
         : "Movimento suave",
   ];
+  const preparationSummary = [
+    "Transcrição local para análise",
+    config.includeCaptions ? "Legendas no vídeo final" : "Sem legendas no vídeo final",
+    "Direção visual do Claude + Pack",
+    config.inserts.length
+      ? `${config.inserts.length} ${config.inserts.length === 1 ? "clipe escolhido" : "clipes escolhidos"}`
+      : "Sem clipes de apoio",
+  ];
 
   return (
     <AppShell
@@ -1160,12 +1188,12 @@ function LocalVideoKitPage() {
                 Editor local
               </div>
               <h2 className="mt-2 font-display text-xl font-semibold tracking-tight">
-                Envie, revise a direção e gere o vídeo
+                Carregue, defina a edição e confirme para iniciar
               </h2>
               <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-                Ao enviar, o Whisper local cria as legendas com os segundos da fala. Depois, o
-                Claude usa essa transcrição para propor somente os visuais que ajudam e gerar o
-                Pack. Você revisa tudo antes do MP4 final.
+                Entrar no editor ou carregar um vídeo não inicia nenhum processamento. Ajuste o que
+                quiser e confirme; só então entram na fila a transcrição local, a direção do Claude
+                e o Pack. O render final continua dependendo da sua revisão.
               </p>
             </div>
             <ol
@@ -1174,7 +1202,7 @@ function LocalVideoKitPage() {
             >
               {(
                 [
-                  ["1", "Upload", sourceReady],
+                  ["1", "Definir", preparationConfirmed],
                   ["2", "Legendas", captionsReady],
                   ["3", "Claude", analysisReady && reviewReady],
                   ["4", "Render", job?.status === "pronto"],
@@ -1216,6 +1244,7 @@ function LocalVideoKitPage() {
               id="local-kit-video"
               type="file"
               accept="video/mp4,video/quicktime,video/webm"
+              aria-label="Selecionar vídeo local"
               className="hidden"
               onChange={(event) => {
                 const selected = event.target.files?.[0];
@@ -1262,9 +1291,15 @@ function LocalVideoKitPage() {
                               ? "Vídeo enviado · a análise precisa ser reiniciada"
                               : analysisReady
                                 ? `Análise e Pack prontos · ${formatFileSize(sourceUpload.size)}`
-                                : `Vídeo enviado · preparando análise · ${formatFileSize(sourceUpload.size)}`
+                                : `Vídeo carregado · aguardando sua confirmação · ${formatFileSize(sourceUpload.size)}`
                           : videoJobId
-                            ? "Carregado da Produção · clique para substituir"
+                            ? analysisRunning
+                              ? `${analysisJob?.etapa || "Processando transcrição e direção visual"} · ${analysisJob?.progresso ?? 0}%`
+                              : analysisFailed
+                                ? "Carregado da Produção · a análise precisa ser reiniciada"
+                                : analysisReady
+                                  ? "Carregado da Produção · análise e Pack prontos"
+                                  : "Carregado da Produção · aguardando sua confirmação"
                             : job
                               ? job.status === "erro"
                                 ? "Tentativa anterior recuperada · clique para trocar"
@@ -1298,9 +1333,9 @@ function LocalVideoKitPage() {
           }
           captionCueCount={analysisJob?.captionCueCount ?? 0}
           visualCount={enabledVisualCount}
-          summary={renderSummary}
+          summary={flowState === "configure" ? preparationSummary : renderSummary}
           job={job}
-          busy={retryingAnalysis || retryingRender}
+          busy={startingAnalysis || retryingAnalysis || retryingRender}
           error={
             flowState === "upload_failed"
               ? sourceUploadError
@@ -1316,6 +1351,7 @@ function LocalVideoKitPage() {
           }
           onChoose={() => fileInput.current?.click()}
           onRetryUpload={() => void retrySourceUpload()}
+          onStartAnalysis={() => void startAnalysis()}
           onRetryAnalysis={() => void retryVisualAnalysis()}
           onReview={() => setActiveEditorTab("visuais")}
           onFixVisuals={() => setActiveEditorTab("visuais")}
@@ -1605,6 +1641,7 @@ function LocalVideoKitPage() {
                   artifacts={analysisArtifacts}
                   pack={analysisPack}
                   error={analysisError}
+                  starting={startingAnalysis}
                   retrying={retryingAnalysis}
                   hasSource={sourceReady}
                   existingProjectWithoutAnalysis={legacyProject}
@@ -2090,6 +2127,7 @@ function EditorNextStepCard({
   error,
   onChoose,
   onRetryUpload,
+  onStartAnalysis,
   onRetryAnalysis,
   onReview,
   onFixVisuals,
@@ -2108,6 +2146,7 @@ function EditorNextStepCard({
   error: string | null;
   onChoose: () => void;
   onRetryUpload: () => void;
+  onStartAnalysis: () => void;
   onRetryAnalysis: () => void;
   onReview: () => void;
   onFixVisuals: () => void;
@@ -2121,13 +2160,28 @@ function EditorNextStepCard({
         return {
           eyebrow: "Etapa 1 de 4",
           title: "Carregando o vídeo",
-          detail: "A prévia já pode ser vista. A análise começa assim que o envio local terminar.",
+          detail:
+            "Somente o arquivo está sendo carregado. Nenhuma transcrição, análise ou edição será iniciada automaticamente.",
         };
       case "upload_failed":
         return {
           eyebrow: "Envio interrompido",
           title: "Não foi possível carregar o vídeo",
           detail: error || "O arquivo foi preservado e pode ser enviado novamente.",
+        };
+      case "configure":
+        return {
+          eyebrow: "Aguardando sua definição",
+          title: "Defina a edição antes de iniciar",
+          detail:
+            "Revise identidade, clipes, visuais manuais e estilo. Quando estiver satisfeito, confirme para adicionar a preparação à fila.",
+        };
+      case "queueing":
+        return {
+          eyebrow: "Confirmação recebida",
+          title: "Adicionando a preparação à fila",
+          detail:
+            "Aguarde enquanto registramos sua escolha. A transcrição será a primeira ação da sequência.",
         };
       case "transcribing":
         return {
@@ -2200,7 +2254,7 @@ function EditorNextStepCard({
           eyebrow: "Comece aqui",
           title: "Escolha o vídeo que será editado",
           detail:
-            "Depois do envio, as legendas são sincronizadas localmente. Em seguida, o Claude analisa essa mesma transcrição.",
+            "O vídeo será apenas carregado. Você poderá definir todos os ajustes antes de iniciar qualquer processamento.",
         };
     }
   })();
@@ -2213,22 +2267,26 @@ function EditorNextStepCard({
     "render_failed",
   ].includes(state);
   const complete = state === "done";
-  const inProgress = ["uploading", "transcribing", "analyzing", "rendering"].includes(state);
+  const inProgress = ["uploading", "queueing", "transcribing", "analyzing", "rendering"].includes(
+    state,
+  );
   const Icon = failed
     ? CircleAlert
     : complete
       ? CheckCircle2
       : inProgress
         ? LoaderCircle
-        : state === "review"
-          ? BrainCircuit
-          : state === "ready"
-            ? WandSparkles
-            : state === "fix_visuals"
-              ? Clock3
-              : state === "fix_clips"
-                ? Film
-                : Upload;
+        : state === "configure"
+          ? SlidersHorizontal
+          : state === "review"
+            ? BrainCircuit
+            : state === "ready"
+              ? WandSparkles
+              : state === "fix_visuals"
+                ? Clock3
+                : state === "fix_clips"
+                  ? Film
+                  : Upload;
 
   return (
     <section
@@ -2268,8 +2326,8 @@ function EditorNextStepCard({
           <p className="mt-1 max-w-3xl text-xs leading-relaxed text-muted-foreground">
             {copy.detail}
           </p>
-          {state === "ready" ? (
-            <div className="mt-3 flex flex-wrap gap-1.5" aria-label="Resumo do vídeo">
+          {state === "configure" || state === "ready" ? (
+            <div className="mt-3 flex flex-wrap gap-1.5" aria-label="Resumo da preparação">
               {summary.map((item) => (
                 <span
                   key={item}
@@ -2293,6 +2351,21 @@ function EditorNextStepCard({
           {state === "choose" ? (
             <Button type="button" size="lg" className="min-h-11" onClick={onChoose}>
               <Upload className="mr-2 h-4 w-4" /> Escolher vídeo
+            </Button>
+          ) : state === "configure" ? (
+            <Button
+              type="button"
+              size="lg"
+              className="min-h-11"
+              disabled={busy}
+              onClick={onStartAnalysis}
+            >
+              {busy ? (
+                <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <ArrowRight className="mr-2 h-4 w-4" />
+              )}
+              Confirmar e iniciar preparação
             </Button>
           ) : state === "upload_failed" ? (
             <Button type="button" className="min-h-11" disabled={busy} onClick={onRetryUpload}>
@@ -2647,6 +2720,7 @@ function ClaudeVisualAnalysisCard({
   artifacts,
   pack,
   error,
+  starting,
   retrying,
   hasSource,
   existingProjectWithoutAnalysis,
@@ -2661,6 +2735,7 @@ function ClaudeVisualAnalysisCard({
   artifacts: PostProductionArtifacts | null;
   pack: GeneratedContentPack | null;
   error: string | null;
+  starting: boolean;
   retrying: boolean;
   hasSource: boolean;
   existingProjectWithoutAnalysis: boolean;
@@ -2672,8 +2747,9 @@ function ClaudeVisualAnalysisCard({
   onConfirm: () => void;
 }) {
   const running = Boolean(
-    job &&
-    ["queued", "transcribing", "planning", "preflight", "generating_pack"].includes(job.status),
+    starting ||
+    (job &&
+      ["queued", "transcribing", "planning", "preflight", "generating_pack"].includes(job.status)),
   );
   const events = artifacts?.timeline.events || [];
   const enabledCount = events.filter((event) => event.enabled).length;
@@ -2693,7 +2769,13 @@ function ClaudeVisualAnalysisCard({
             </p>
           </div>
           <span className="shrink-0 rounded-full border border-primary/20 bg-primary/8 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
-            {job?.plannerMode === "anthropic" ? "Claude" : running ? "Analisando" : "Automático"}
+            {job?.plannerMode === "anthropic"
+              ? "Claude"
+              : starting
+                ? "Enfileirando"
+                : running
+                  ? "Analisando"
+                  : "Sob confirmação"}
           </span>
         </div>
       </CardHeader>
@@ -2714,12 +2796,22 @@ function ClaudeVisualAnalysisCard({
         ) : !hasSource ? (
           <div className="rounded-xl border border-dashed px-4 py-6 text-center">
             <Upload className="mx-auto h-6 w-6 text-muted-foreground/60" />
-            <p className="mt-2 text-sm font-semibold">Envie um vídeo para iniciar</p>
+            <p className="mt-2 text-sm font-semibold">Escolha um vídeo para configurar</p>
             <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
-              Primeiro criamos a legenda local. Só depois o Claude analisa a transcrição.
+              Após sua confirmação, primeiro criamos a legenda local. Só depois o Claude analisa a
+              transcrição.
             </p>
           </div>
-        ) : running || (!job && !failed) ? (
+        ) : !job && !failed && !starting ? (
+          <div className="rounded-xl border border-dashed bg-muted/10 px-4 py-6 text-center">
+            <Clock3 className="mx-auto h-6 w-6 text-primary/70" />
+            <p className="mt-2 text-sm font-semibold">Aguardando sua confirmação</p>
+            <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
+              Nenhuma análise foi iniciada. Defina os ajustes e use “Confirmar e iniciar preparação”
+              quando quiser colocar as ações na fila.
+            </p>
+          </div>
+        ) : running ? (
           <div
             className="space-y-3 rounded-xl border border-status-info/25 bg-status-info/5 p-4"
             aria-live="polite"
