@@ -199,11 +199,18 @@ def test_thumbnail_endpoint_renders_the_seven_slides_once_and_invalidates_cache(
     state["pack"]["updatedAt"] = "2026-08-18T10:00:00Z"
     state["pack"]["family"] = "didatico"
     state["pack"]["themeId"] = "soft-sage"
-    renders: list[tuple[str, str]] = []
+    renders: list[tuple[str, str, bool]] = []
 
-    def _render(output_dir, carousel, *, family: str, theme_id: str):
+    def _render(
+        output_dir,
+        carousel,
+        *,
+        family: str,
+        theme_id: str,
+        grayscale_photos: bool,
+    ):
         rows = list(carousel)
-        renders.append((family, theme_id))
+        renders.append((family, theme_id, grayscale_photos))
         output_dir.mkdir(parents=True, exist_ok=True)
         for index in range(1, len(rows) + 1):
             (output_dir / f"slide-{index:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -215,7 +222,7 @@ def test_thumbnail_endpoint_renders_the_seven_slides_once_and_invalidates_cache(
     first = server.get_pack_slide_thumbnail("s-test", 0)
     seventh = server.get_pack_slide_thumbnail("s-test", 6)
 
-    assert renders == [("didatico", "soft-sage")]
+    assert renders == [("didatico", "soft-sage", True)]
     assert first.path != seventh.path
     assert first.headers["cache-control"] == "public, max-age=31536000, immutable"
 
@@ -225,10 +232,14 @@ def test_thumbnail_endpoint_renders_the_seven_slides_once_and_invalidates_cache(
     after_family = server.get_pack_slide_thumbnail("s-test", 0)
     state["pack"]["themeId"] = "soft-rose"
     after_theme = server.get_pack_slide_thumbnail("s-test", 0)
+    state["pack"]["grayscalePhotos"] = False
+    after_photo_treatment = server.get_pack_slide_thumbnail("s-test", 0)
 
-    assert len(renders) == 4
-    assert len({first.path, after_copy.path, after_family.path, after_theme.path}) == 4
-    assert renders[-1] == ("editorial", "soft-rose")
+    assert len(renders) == 5
+    assert len(
+        {first.path, after_copy.path, after_family.path, after_theme.path, after_photo_treatment.path}
+    ) == 5
+    assert renders[-1] == ("editorial", "soft-rose", False)
 
 
 # --------------------------------------------------------------------------
@@ -263,14 +274,14 @@ def test_clarity_flags_a_number_without_any_explanation() -> None:
     assert any("numerico" in warning for warning in warnings)
 
 
-def test_clarity_flags_an_explainer_with_an_empty_step_grid() -> None:
+def test_clarity_accepts_the_explainer_prose_fallback_without_a_false_warning() -> None:
     slide = deepcopy(sample_pack()["carousel"][3])
     for name in ("item1", "item2", "item3"):
         slide["fields"][name] = {"title": "", "text": ""}
 
     warnings = slide_clarity(slide)["warnings"]
 
-    assert any("etapas" in warning for warning in warnings)
+    assert not any("etapas" in warning for warning in warnings)
 
 
 def test_clarity_report_covers_every_slide_of_a_valid_pack() -> None:
@@ -437,6 +448,24 @@ def test_editing_still_blocks_a_positive_cure_claim(no_claude: None, stored_pack
     assert "Palavra ou promessa proibida: cura" in str(error.value.detail)
 
 
+def test_editing_can_reduce_a_legacy_compliance_issue_one_slide_at_a_time(
+    no_claude: None, stored_pack
+) -> None:
+    from api import server
+
+    state, _versions = stored_pack
+    state["pack"]["carousel"][0]["fields"]["headline"] = "Novo comprimido aprovado"
+    state["pack"]["carousel"][2]["fields"]["body"] = "O comprimido exige revisão médica."
+
+    response = server.update_pack_carousel_fields(
+        "s-test", 0, server.PackSlideFieldsIn(headline="Nova forma oral aprovada")
+    )
+
+    assert response["pack"]["carousel"][0]["fields"]["headline"] == "Nova forma oral aprovada"
+    assert response["compliance"]["blocked"] is True
+    assert response["compliance"]["issues"] == ["Possível menção de dose ou formulação"]
+
+
 def test_compliance_fields_of_the_last_slide_cannot_be_edited(no_claude: None, stored_pack) -> None:
     from api import server
     from fastapi import HTTPException
@@ -507,6 +536,24 @@ def test_changing_photo_never_calls_claude_and_never_exports(no_claude: None, st
     assert response["pack"]["slides"] == response["pack"]["carousel"]
 
 
+def test_removing_photo_preserves_layout_and_copy(no_claude: None, stored_pack) -> None:
+    from api import server
+
+    before = stored_pack[0]["pack"]["carousel"][0]
+    headline = before["fields"]["headline"]
+    layout = before["layoutId"]
+
+    response = server.update_pack_carousel_photo(
+        "s-test", 0, server.PackSlidePhotoIn(photoAssetId=None)
+    )
+    slide = response["pack"]["carousel"][0]
+
+    assert slide["layoutId"] == layout
+    assert slide["fields"]["headline"] == headline
+    assert slide["fields"]["photoId"] == ""
+    assert slide.get("photoAsset") is None
+
+
 def test_design_system_exposes_real_limits_for_every_layout(no_claude: None) -> None:
     from api import server
 
@@ -516,4 +563,8 @@ def test_design_system_exposes_real_limits_for_every_layout(no_claude: None) -> 
     assert set(layouts) == set(PACK_LAYOUTS)
     assert layouts["myth_fact"]["itemMaxChars"]["text"] > 0
     assert layouts["explainer"]["editableFields"][0] == "eyebrow"
+    assert layouts["hero_photo"]["photoOptional"] is True
+    assert "photoId" not in layouts["hero_photo"]["required"]
+    assert payload["photoOptional"] is True
+    assert payload["grayscalePhotosDefault"] is True
     assert payload["fieldLabels"]["headline"]

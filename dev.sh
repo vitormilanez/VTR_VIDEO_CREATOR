@@ -50,7 +50,7 @@ if [ ! -d "$ROOT/web/node_modules" ]; then
   (cd "$ROOT/web" && npm install --no-audit --no-fund)
 fi
 echo "Iniciando frontend em http://localhost:8080 ..."
-(cd "$ROOT/web" && npm run dev -- --force) &
+(cd "$ROOT/web" && npm run dev -- --force --host 127.0.0.1) &
 WEB_PID=$!
 
 trap 'echo; echo "Parando..."; kill $API_PID $WEB_PID 2>/dev/null || true' INT TERM

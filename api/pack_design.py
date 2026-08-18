@@ -28,7 +28,13 @@ EDUCATIONAL_FLOW_VERSION = "educational-flow-v1"
 # A apresentação é uma preferência local do Pack. Ela nunca participa do
 # prompt/cache de conteúdo e pode mudar sem chamar o Claude.
 PACK_FAMILIES = ("editorial", "didatico", "storytelling", "manifesto", "clinico")
-PACK_THEMES = ("modernist-red", "ocean-deep", "soft-sage", "soft-rose")
+PACK_THEMES = (
+    "modernist-red",
+    "modernist-teal",
+    "ocean-deep",
+    "soft-sage",
+    "soft-rose",
+)
 DEFAULT_PACK_FAMILY = "didatico"
 DEFAULT_PACK_THEME = "modernist-red"
 LEGACY_PACK_THEME = "ocean-deep"
@@ -331,8 +337,11 @@ FIELD_NAMES = (
 )
 
 LAYOUT_SPECS: dict[str, dict[str, Any]] = {
-    "hero_photo": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 46, "coverNote": 180, "footer": 48}},
-    "photo_split": {"required": ("headline", "body", "photoId"), "max": {"eyebrow": 22, "headline": 52, "body": 160, "footer": 48}},
+    # Os layouts com fotografia tambem funcionam como composicoes graficas.
+    # ``photoId`` continua disponivel, mas nunca e obrigatorio: o editor pode
+    # remover a imagem sem trocar o texto, o layout ou a etapa educativa.
+    "hero_photo": {"required": ("eyebrow", "headline"), "max": {"eyebrow": 22, "headline": 46, "coverNote": 180, "footer": 48}},
+    "photo_split": {"required": ("headline", "body"), "max": {"eyebrow": 22, "headline": 52, "body": 160, "footer": 48}},
     "big_statement": {"required": ("headline",), "max": {"headline": 64, "footer": 90}},
     "question": {"required": ("headline",), "max": {"eyebrow": 30, "headline": 52, "body": 110, "footer": 48}},
     # Os dois painéis comportam duas linhas confortáveis. O limite anterior de
@@ -343,9 +352,9 @@ LAYOUT_SPECS: dict[str, dict[str, Any]] = {
     "three_points": {"required": ("headline", "item1", "item2", "item3"), "max": {"headline": 40}, "item_max": {"title": 24, "text": 90}},
     "explainer": {"required": ("headline", "body"), "max": {"eyebrow": 22, "headline": 56, "body": 320, "disclaimer": 90}, "item_max": {"title": 24, "text": 54}},
     "doctor_quote": {"required": ("quote", "caption"), "max": {"quote": 90, "caption": 48}},
-    "photo_overlay": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 60, "coverNote": 180, "footer": 48}},
+    "photo_overlay": {"required": ("eyebrow", "headline"), "max": {"eyebrow": 22, "headline": 60, "coverNote": 180, "footer": 48}},
     "do_dont": {"required": ("item1", "item2"), "max": {"disclaimer": 90}, "item_max": {"title": 34, "text": 34}},
-    "cta_photo": {"required": ("headline", "cta", "photoId", "disclaimer", "footer"), "max": {"headline": 62, "body": 70, "cta": 22, "disclaimer": 220, "footer": 100}},
+    "cta_photo": {"required": ("headline", "cta", "disclaimer", "footer"), "max": {"headline": 62, "body": 70, "cta": 22, "disclaimer": 220, "footer": 100}},
 }
 
 
@@ -669,7 +678,6 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
         "cta": MEDICAL_DEFAULT_SAFE_CTA,
         "footer": "Arraste para o lado",
         "disclaimer": MEDICAL_EDUCATIONAL_DISCLAIMER,
-        "photoId": "seated-front",
     }
     if layout_id == "cta_photo":
         scalar_fallbacks.update(
@@ -679,7 +687,6 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
                 "cta": safe_editorial_cta(fields.get("cta")),
                 "disclaimer": MEDICAL_EDUCATIONAL_DISCLAIMER,
                 "footer": MEDICAL_PROFESSIONAL_IDENTIFICATION,
-                "photoId": fields.get("photoId") or "seated-front",
             }
         )
     elif layout_id == "doctor_quote":
@@ -689,9 +696,6 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
                 "caption": fields.get("caption") or "Dr. Guilherme Martins",
             }
         )
-    elif layout_id in PHOTO_LAYOUTS:
-        scalar_fallbacks["photoId"] = fields.get("photoId") or "seated-front"
-
     for name in spec.get("required", ()):
         if name.startswith("item"):
             continue
@@ -1046,11 +1050,6 @@ def slide_clarity(slide: dict[str, Any], index: int = 0) -> dict[str, Any]:
     if density == "denso":
         warnings.append("texto acima do confortavel para leitura no celular")
 
-    if layout_id == "explainer" and not any(
-        _has_item_content(fields.get(name)) for name in ("item1", "item2", "item3")
-    ):
-        warnings.append("explainer sem etapas: a grade de cartoes fica em branco")
-
     lowered = _strip_accents(text.casefold()) if text else ""
     jargon = sorted(
         {
@@ -1305,10 +1304,19 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
         errors.append("slides 3 a 5 precisam incluir um explainer com contexto da IA")
     if len(set(layouts)) < 4:
         errors.append("use pelo menos 4 tipos de layout para manter ritmo visual")
-    if sum(layout in PHOTO_LAYOUTS for layout in layouts) > 3:
+    slides_with_photo = [
+        bool(_text(slide["fields"].get("photoId")))
+        for slide in normalized
+    ]
+    if sum(slides_with_photo) > 3:
         errors.append("o carrossel pode ter no maximo 3 slides com foto")
     for index in range(1, len(layouts)):
-        if layouts[index - 1] in FULL_BLEED_PHOTO_LAYOUTS and layouts[index] in FULL_BLEED_PHOTO_LAYOUTS:
+        if (
+            slides_with_photo[index - 1]
+            and slides_with_photo[index]
+            and layouts[index - 1] in FULL_BLEED_PHOTO_LAYOUTS
+            and layouts[index] in FULL_BLEED_PHOTO_LAYOUTS
+        ):
             errors.append(f"slides {index} e {index + 1} usam foto full bleed em sequencia")
 
     dark_run = 0

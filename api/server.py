@@ -305,10 +305,22 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0", lifespan=_lifespan)
 
-# Dev: o frontend roda em outra porta (vite). Liberar localhost.
+
+def _cors_allowed_origins() -> list[str]:
+    """Limita chamadas diretas do navegador a origens explicitamente confiaveis."""
+
+    configured = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    origins = [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
+    if origins:
+        return origins
+    return ["http://localhost:8080", "http://127.0.0.1:8080"]
+
+
+# Dev: o frontend roda em outra porta (Vite). Em publicacao, /api permanece na
+# mesma origem por meio do gateway autenticado.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_allowed_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -15666,7 +15678,8 @@ class PackIn(BaseModel):
     cuidadosMedicos: str = ""
     formatoSugerido: str = "Reels"
     family: Literal["editorial", "didatico", "storytelling", "manifesto", "clinico"] | None = None
-    themeId: Literal["modernist-red", "ocean-deep", "soft-sage", "soft-rose"] | None = None
+    themeId: Literal["modernist-red", "modernist-teal", "ocean-deep", "soft-sage", "soft-rose"] | None = None
+    grayscalePhotos: bool = True
 
 
 class PackSlideLayoutIn(BaseModel):
@@ -15683,7 +15696,8 @@ class PackCoverNoteIn(BaseModel):
 
 class PackPresentationIn(BaseModel):
     family: Literal["editorial", "didatico", "storytelling", "manifesto", "clinico"]
-    themeId: Literal["modernist-red", "ocean-deep", "soft-sage", "soft-rose"]
+    themeId: Literal["modernist-red", "modernist-teal", "ocean-deep", "soft-sage", "soft-rose"]
+    grayscalePhotos: bool = True
 
 
 class PackSlideItemIn(BaseModel):
@@ -15840,8 +15854,25 @@ def _forbidden_pack_claim(text: str, term: str) -> bool:
     return False
 
 
+def _pack_compliance_text(pack: dict[str, Any]) -> str:
+    """Texto publicavel, sem aliases e metadados legados duplicados."""
+
+    slides = pack_slides(pack)
+    if slides:
+        scope = {
+            "carousel": slides,
+            "caption": pack.get("caption"),
+            "hashtags": pack.get("hashtags"),
+        }
+        if pack.get("schemaVersion") != PACK_SCHEMA_VERSION:
+            scope["stories"] = pack.get("stories")
+            scope["staticPost"] = pack.get("staticPost")
+        return _norm(_pack_text(scope))
+    return _norm(_pack_text(pack))
+
+
 def _pack_compliance(pack: dict[str, Any]) -> dict[str, Any]:
-    text = _norm(_pack_text(pack))
+    text = _pack_compliance_text(pack)
     issues: list[str] = []
     for term in DEFAULT_SETTINGS["palavrasProibidas"]:
         if _forbidden_pack_claim(text, term):
@@ -15850,6 +15881,39 @@ def _pack_compliance(pack: dict[str, Any]) -> dict[str, Any]:
         if re.search(rule["pattern"], text):
             issues.append(rule["titulo"])
     return {"ok": not issues, "blocked": bool(issues), "issues": list(dict.fromkeys(issues))}
+
+
+def _pack_compliance_issue_counts(pack: dict[str, Any]) -> dict[str, int]:
+    """Conta evidencias para permitir reparar um Pack bloqueado por etapas.
+
+    O endpoint de edicao continua recusando qualquer alerta novo. A contagem
+    existe apenas para reconhecer quando a pessoa removeu ao menos uma
+    ocorrencia antiga, mesmo que outro slide ainda precise ser corrigido.
+    """
+
+    text = _pack_compliance_text(pack)
+    counts: dict[str, int] = {}
+    for term in DEFAULT_SETTINGS["palavrasProibidas"]:
+        if _forbidden_pack_claim(text, term):
+            counts[f"Palavra ou promessa proibida: {term}"] = 1
+    for rule in MEDICAL_COMPLIANCE_RULES:
+        matches = re.findall(rule["pattern"], text)
+        if matches:
+            counts[rule["titulo"]] = len(matches)
+    return counts
+
+
+def _pack_edit_reduces_existing_compliance_issue(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> bool:
+    previous = _pack_compliance_issue_counts(before)
+    candidate = _pack_compliance_issue_counts(after)
+    if not previous:
+        return False
+    if any(count > previous.get(issue, 0) for issue, count in candidate.items()):
+        return False
+    return sum(candidate.values()) < sum(previous.values())
 
 
 _NARRATION_PLACEHOLDERS: list[tuple[re.Pattern[str], str]] = [
@@ -16231,6 +16295,8 @@ COMPLIANCE:
 - O disclaimer do slide 7 deve conter exatamente: "{MEDICAL_EDUCATIONAL_DISCLAIMER}".
 - A legenda e o footer do slide 7 devem conter exatamente: "{MEDICAL_PROFESSIONAL_IDENTIFICATION}".
 - Nunca invente numero, estatistica, mito ou comparacao. Sem fonte real, escolha outro layout.
+- Nao transforme exposicao semelhante ou comparacao indireta em "mesma eficacia". Preserve o comparador e o desenho do estudo descritos na fonte.
+- Nao invente mecanismo nem local de absorcao; use apenas o que estiver explicitamente sustentado pela fonte.
 
 COMPOSICAO:
 - Exatamente 7 slides.
@@ -16242,9 +16308,10 @@ COMPOSICAO:
 - Slide 7: cta_photo com resumo e proximo passo educativo seguro.
 - Os layouts sao uma paleta visual, nao uma grade obrigatoria. Voce pode repetir layout se isso deixar a mensagem mais clara.
 - Use pelo menos 4 tipos de layout no total, para manter ritmo sem sacrificar entendimento.
-- Maximo 3 slides com foto; nunca dois full bleed seguidos. Maximo 2 fundos escuros consecutivos.
+- Fotos sao opcionais. Use photoId vazio quando a imagem nao ajudar a explicacao.
+- Maximo 3 slides com foto de fato; nunca duas fotos full bleed seguidas. Maximo 2 fundos escuros consecutivos.
 - Sequencia obrigatoria: tema e objetivo -> contexto -> conceito-chave -> como funciona -> o que a fonte mostra -> cuidados e limites -> resumo e proximo passo.
-- photoId deve vir apenas da biblioteca enviada no pedido.
+- photoId deve ser vazio ou vir apenas da biblioteca enviada no pedido.
 - Layout e texto devem obedecer aos limites descritos no pedido.
 - Se a ideia nao couber com leitura confortavel em um layout, reescreva a copy ou escolha outro layout. Nunca deixe frase cortada, incompleta ou dependente de contexto oculto.
 - Use do_dont somente para uma comparação prática real: cada item deve ter, à esquerda, algo a evitar e, à direita, a alternativa preferível. Nunca use esse layout para cronologia, mecanismos ou listas de consequências.
@@ -16276,7 +16343,7 @@ REGRAS DE CONTEÚDO:
 - Sem emojis, markdown, alarmismo, promessa ou autodiagnóstico.
 - O slide 1 usa hero_photo ou photo_overlay; o slide 7 usa cta_photo.
 - Inclua um explainer no slide 3 ou 4 e use pelo menos mais um layout explicativo entre os slides 3 e 6.
-- Todo photoId deve vir da biblioteca permitida.
+- Fotos sao opcionais; todo photoId preenchido deve vir da biblioteca permitida.
 - O disclaimer final deve ser exatamente: {MEDICAL_EDUCATIONAL_DISCLAIMER}
 - A legenda e o footer finais devem identificar: {MEDICAL_PROFESSIONAL_IDENTIFICATION}
 - O CTA pode ser apenas educativo e neutro; nunca comercial, de captação ou pedido para seguir.
@@ -16413,6 +16480,7 @@ def _generate_post_production_pack(job_id: str) -> dict[str, Any]:
         design_direction=str(pack.get("designDirection") or "institute_carousel_v1"),
         family=str(pack.get("family") or DEFAULT_PACK_FAMILY),
         theme_id=str(pack.get("themeId") or DEFAULT_PACK_THEME),
+        grayscale_photos=bool(pack.get("grayscalePhotos", True)),
         render_extras=False,
     )
     _ai_cache_put("post_production.pack", cache_payload, {"pack": pack})
@@ -16509,6 +16577,7 @@ def _pack_design_plan(pack: dict[str, Any]) -> dict[str, Any]:
         "educationalFlowVersion": pack.get("educationalFlowVersion") or "legacy",
         "family": pack.get("family") or DEFAULT_PACK_FAMILY,
         "themeId": pack.get("themeId") or LEGACY_PACK_THEME,
+        "grayscalePhotos": bool(pack.get("grayscalePhotos", True)),
         "carousel": [
             {
                 "layoutId": slide.get("layoutId") or slide.get("layout"),
@@ -16539,6 +16608,7 @@ def _normalize_pack_design(pack: dict[str, Any]) -> dict[str, Any]:
         if normalized.get("themeId") in PACK_THEMES
         else LEGACY_PACK_THEME
     )
+    normalized["grayscalePhotos"] = bool(normalized.get("grayscalePhotos", True))
     normalized["designDirection"] = "institute_carousel_v1"
     normalized["carousel"] = carousel
     normalized["slides"] = carousel
@@ -16583,10 +16653,15 @@ def _apply_pack_presentation(
     *,
     family: str | None,
     theme_id: str | None,
+    grayscale_photos: bool | None = None,
 ) -> dict[str, Any]:
     """Aplica preferências visuais validadas sem tocar na copy canônica."""
     pack["family"] = family if family in PACK_FAMILIES else DEFAULT_PACK_FAMILY
     pack["themeId"] = theme_id if theme_id in PACK_THEMES else DEFAULT_PACK_THEME
+    if grayscale_photos is not None:
+        pack["grayscalePhotos"] = bool(grayscale_photos)
+    else:
+        pack["grayscalePhotos"] = bool(pack.get("grayscalePhotos", True))
     pack["designPlan"] = _pack_design_plan(pack)
     return pack
 
@@ -16666,9 +16741,10 @@ def _pack_generation_context(script_id: str, script: dict[str, Any]) -> tuple[di
         "layouts": list(PACK_LAYOUTS),
         "photoLibrary": list(PHOTO_LIBRARY),
         "rules": [
-            "Claude escolhe copy, narrativa, layout e photoId; o renderer controla HTML/CSS.",
+            "Claude escolhe copy, narrativa, layout e, quando ajudar, photoId; o renderer controla HTML/CSS.",
             "Exatamente 7 slides em uma trilha educativa: tema, contexto, conceito, explicacao, evidencia, cuidados e resumo.",
             "Um slide explainer nos slides 3 ou 4 traduz o contexto para linguagem simples.",
+            "Fotos sao opcionais e podem ser removidas localmente sem alterar a copy.",
             "Todo slide usa tom acolhedor, sem julgamento ou frases de impacto vagas.",
             "O Pack herda a identidade do Roteiro e não escolhe outro avatar.",
         ],
@@ -16710,6 +16786,8 @@ def get_pack_design_system() -> dict:
         "schemaVersion": PACK_SCHEMA_VERSION,
         "families": list(PACK_FAMILIES),
         "themes": list(PACK_THEMES),
+        "photoOptional": True,
+        "grayscalePhotosDefault": True,
         "fieldLabels": FIELD_LABELS,
         "layouts": [
             {
@@ -16719,6 +16797,7 @@ def get_pack_design_system() -> dict:
                 "maxChars": LAYOUT_SPECS[layout_id].get("max", {}),
                 "itemMaxChars": LAYOUT_SPECS[layout_id].get("item_max", {}),
                 "usesPhoto": layout_id in PHOTO_LAYOUTS,
+                "photoOptional": layout_id in PHOTO_LAYOUTS,
                 "comfort": list(LAYOUT_COMFORT_RANGE.get(layout_id, (60, 260))),
                 "editableFields": list(LAYOUT_EDITABLE_FIELDS.get(layout_id, ())),
             }
@@ -16758,7 +16837,7 @@ def generate_pack(payload: PackIn) -> dict:
     cache_payload = {
         # Família e tema são apresentação local: trocar qualquer um não pode
         # invalidar a resposta de conteúdo nem consumir novos tokens.
-        "request": payload.model_dump(exclude={"family", "themeId"}),
+        "request": payload.model_dump(exclude={"family", "themeId", "grayscalePhotos"}),
         "context": pack_context,
         "identityKey": pack_context["identityKey"],
         "educationalFlowVersion": PACK_EDUCATIONAL_FLOW_VERSION,
@@ -16783,6 +16862,7 @@ def generate_pack(payload: PackIn) -> dict:
                 pack,
                 family=payload.family,
                 theme_id=payload.themeId,
+                grayscale_photos=payload.grayscalePhotos,
             )
             validation_errors = [
                 *validate_pack_contract(pack),
@@ -16957,6 +17037,7 @@ def generate_pack(payload: PackIn) -> dict:
         pack,
         family=payload.family,
         theme_id=payload.themeId,
+        grayscale_photos=payload.grayscalePhotos,
     )
     _snapshot_visual_pack(script_id, "geracao-completa")
     _save_visual_pack(script_id, pack)
@@ -17081,11 +17162,12 @@ def get_pack_slide_preview(script_id: str, slide_index: int) -> HTMLResponse:
         total=len(carousel),
         family=str(pack.get("family") or DEFAULT_PACK_FAMILY),
         theme_id=str(pack.get("themeId") or DEFAULT_PACK_THEME),
+        grayscale_photos=bool(pack.get("grayscalePhotos", True)),
     )
     return HTMLResponse(document, headers={"Cache-Control": "no-store"})
 
 
-_PACK_THUMBNAIL_RENDER_VERSION = "pack-thumbnail-v1"
+_PACK_THUMBNAIL_RENDER_VERSION = "pack-thumbnail-v2"
 
 
 def _pack_thumbnail_cache_directory(script_id: str, pack: dict[str, Any]) -> Path:
@@ -17108,6 +17190,7 @@ def _pack_thumbnail_cache_directory(script_id: str, pack: dict[str, Any]) -> Pat
         "updatedAt": updated_at,
         "family": str(pack.get("family") or DEFAULT_PACK_FAMILY),
         "themeId": str(pack.get("themeId") or DEFAULT_PACK_THEME),
+        "grayscalePhotos": bool(pack.get("grayscalePhotos", True)),
     }
     pack_key = hashlib.sha256(script_id.encode("utf-8")).hexdigest()[:16]
     generation_key = hashlib.sha256(
@@ -17152,6 +17235,7 @@ def get_pack_slide_thumbnail(script_id: str, slide_index: int) -> FileResponse:
                         carousel,
                         family=str(pack.get("family") or DEFAULT_PACK_FAMILY),
                         theme_id=str(pack.get("themeId") or DEFAULT_PACK_THEME),
+                        grayscale_photos=bool(pack.get("grayscalePhotos", True)),
                     )
                     if int(rendered.get("images") or 0) != slide_count:
                         raise RuntimeError(
@@ -17164,6 +17248,7 @@ def get_pack_slide_thumbnail(script_id: str, slide_index: int) -> FileResponse:
                                 "updatedAt": pack.get("updatedAt"),
                                 "family": pack.get("family"),
                                 "themeId": pack.get("themeId"),
+                                "grayscalePhotos": bool(pack.get("grayscalePhotos", True)),
                             },
                             ensure_ascii=False,
                             sort_keys=True,
@@ -17259,7 +17344,9 @@ def update_pack_carousel_fields(
     candidate_pack["slides"] = candidate_carousel
 
     compliance = _pack_compliance(candidate_pack)
-    if compliance["blocked"]:
+    if compliance["blocked"] and not _pack_edit_reduces_existing_compliance_issue(
+        pack, candidate_pack
+    ):
         raise HTTPException(
             status_code=422,
             detail="O texto precisa respeitar as regras medicas: " + "; ".join(compliance["issues"]),
@@ -17415,6 +17502,7 @@ def regenerate_pack_slide(
         candidate_pack,
         family=pack.get("family"),
         theme_id=pack.get("themeId"),
+        grayscale_photos=bool(pack.get("grayscalePhotos", True)),
     )
     candidate_pack["sourceAvatarId"] = pack.get("sourceAvatarId")
     candidate_pack["avatarAsset"] = pack.get("avatarAsset")
@@ -17503,6 +17591,7 @@ def update_pack_presentation(
         pack,
         family=payload.family,
         theme_id=payload.themeId,
+        grayscale_photos=payload.grayscalePhotos,
     )
     saved = _save_visual_pack(script_id, pack)
     return _pack_envelope(saved)
@@ -17653,7 +17742,8 @@ class PackBody(BaseModel):
     schemaVersion: str = PACK_SCHEMA_VERSION
     designDirection: str = "institute_carousel_v1"
     family: Literal["editorial", "didatico", "storytelling", "manifesto", "clinico"] = DEFAULT_PACK_FAMILY
-    themeId: Literal["modernist-red", "ocean-deep", "soft-sage", "soft-rose"] = LEGACY_PACK_THEME
+    themeId: Literal["modernist-red", "modernist-teal", "ocean-deep", "soft-sage", "soft-rose"] = LEGACY_PACK_THEME
+    grayscalePhotos: bool = True
     carousel: list[PackSlide] = Field(default_factory=list)
     slides: list[PackSlide] = Field(default_factory=list)
     staticPost: PackStaticPost = Field(default_factory=PackStaticPost)
@@ -17771,6 +17861,7 @@ def export_pack(payload: PackExportIn) -> dict:
                     "designDirection": pack.designDirection,
                     "family": pack.family,
                     "themeId": pack.themeId,
+                    "grayscalePhotos": pack.grayscalePhotos,
                     "designPlan": pack.designPlan,
                     "compliance": compliance,
                 },
@@ -17799,6 +17890,7 @@ def export_pack(payload: PackExportIn) -> dict:
             avatar_asset=pack.avatarAsset,
             family=pack.family,
             theme_id=pack.themeId,
+            grayscale_photos=pack.grayscalePhotos,
             render_extras=not is_institute_pack,
         )
         imagens = int(resultado.get("images", 0))
