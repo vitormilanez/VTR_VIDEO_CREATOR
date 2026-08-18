@@ -258,7 +258,7 @@ export function RadarPage() {
       } catch {
         toast.warning("Ideia salva, mas o status da tendencia nao foi atualizado.");
       }
-      toast.success("Ideia criada e salva no Sheets.");
+      toast.success("Ideia criada e salva no banco de dados.");
       navigate({ to: "/ideias/$id", params: { id: saved.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel criar a ideia.");
@@ -271,7 +271,7 @@ export function RadarPage() {
     updateTrend(t.id, { status: "descartado" });
     try {
       await setSheetStatus("radar", t.id, "descartado");
-      toast.success("Tendencia descartada e sincronizada com o Sheets.");
+      toast.success("Tendência descartada e atualizada no banco de dados.");
     } catch (err) {
       updateTrend(t.id, { status: t.status });
       toast.error(err instanceof Error ? err.message : "Falha ao sincronizar.");
@@ -289,7 +289,7 @@ export function RadarPage() {
       if (res.partial) {
         toast.warning(
           res.detail ||
-            `Tendencias capturadas localmente, mas a sincronizacao com o Sheets falhou no passo '${res.failedStep}'.`,
+            `Tendências capturadas localmente, mas a persistência falhou no passo '${res.failedStep}'.`,
           { id: aviso },
         );
       } else {
@@ -314,7 +314,7 @@ export function RadarPage() {
       title="Radar de tendencias"
       actions={
         <>
-          <WithTooltip label="Rodar busca real (Google News/Trends) e sincronizar com o Sheets">
+          <WithTooltip label="Rodar busca real (Google News/Trends) e salvar no banco de dados">
             <Button
               size="sm"
               variant="secondary"
@@ -343,7 +343,7 @@ export function RadarPage() {
               onClose={() => setOpen(false)}
               onCreate={(t) => {
                 addTrend(t);
-                toast.success("Tendencia registrada e salva no Sheets.");
+                toast.success("Tendência registrada e salva no banco de dados.");
                 setOpen(false);
               }}
             />
@@ -908,7 +908,9 @@ function NovaTendenciaDialog({
       onCreate(saved);
     } catch (err) {
       toast.error(
-        err instanceof Error ? err.message : "Nao foi possivel salvar a tendencia no Sheets.",
+        err instanceof Error
+          ? err.message
+          : "Não foi possível salvar a tendência no banco de dados.",
       );
     } finally {
       setSalvando(false);

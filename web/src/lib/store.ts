@@ -24,6 +24,7 @@ interface State {
   settings: AppSettings;
   complianceRules: ComplianceRule[];
   syncedAt: string | null;
+  dataBackend: "postgres" | "sheets" | null;
   // acoes basicas
   addTrend: (t: Trend) => void;
   updateTrend: (id: string, patch: Partial<Trend>) => void;
@@ -48,7 +49,7 @@ interface State {
   }) => string;
   marcarPublicado: (postId: string) => void;
   registrarMetricasFake: (postId: string) => void;
-  // hidratacao a partir da API local (dados reais do Google Sheets)
+  // hidratação a partir da API local
   hydrate: (payload: Partial<HydratePayload> & { updatedAt?: string | null }) => void;
 }
 
@@ -62,6 +63,7 @@ export interface HydratePayload {
   settings: AppSettings;
   complianceRules?: ComplianceRule[];
   updatedAt?: string | null;
+  dataBackend?: "postgres" | "sheets";
 }
 
 // Estado inicial vazio: os dados reais chegam da API local (hydrate) no load.
@@ -75,6 +77,7 @@ const initial = {
   settings: defaultSettings,
   complianceRules: [] as ComplianceRule[],
   syncedAt: null as string | null,
+  dataBackend: null as "postgres" | "sheets" | null,
 };
 
 const nextStatus: Record<VideoJobStatus, VideoJobStatus | null> = {
@@ -185,6 +188,7 @@ export const useStore = create<State>()(
           settings: payload.settings ?? s.settings,
           complianceRules: payload.complianceRules ?? s.complianceRules,
           syncedAt: payload.updatedAt ?? s.syncedAt,
+          dataBackend: payload.dataBackend ?? s.dataBackend,
         })),
 
       advanceVideoJob: (id) => {

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://institutoguilhermemartins.com/schemas/carousel-content-v1.json",
+  "title": "CarouselContent",
+  "description": "Versao canonica unica do conteudo de um carrossel. As tres familias de layout (editorial, didatico, storytelling) renderizam este mesmo objeto. Trocar de familia nao consome tokens e nao regenera texto.",
+  "type": "object",
+  "required": ["schemaVersion", "packId", "topic", "slides", "caption", "evidenceLevel"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "carousel-content-v1" },
+    "packId": { "type": "string", "minLength": 1 },
+    "topic": { "type": "string", "maxLength": 120 },
+    "format": {
+      "type": "string",
+      "enum": ["4:5"],
+      "default": "4:5",
+      "description": "Fase 1 implementa apenas 1080x1350. 1:1 e 9:16 ficam reservados."
+    },
+    "family": {
+      "type": "string",
+      "enum": ["editorial", "didatico", "storytelling"],
+      "default": "didatico",
+      "description": "Escolha do usuario. Nao entra na chave de cache de geracao de conteudo."
+    },
+    "recommendedFamily": { "type": "string", "enum": ["editorial", "didatico", "storytelling"] },
+    "recommendationReason": { "type": "string", "maxLength": 240 },
+    "evidenceLevel": {
+      "type": "string",
+      "enum": ["observational", "trial", "consensus", "opinion"],
+      "description": "Governa o lexico permitido. Em 'observational', proibido apresentar associacao como causalidade."
+    },
+    "caption": { "type": "string", "minLength": 1, "maxLength": 2200 },
+    "hashtags": { "type": "array", "items": { "type": "string", "pattern": "^[^#\\s]+$" }, "maxItems": 12 },
+    "slides": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 9,
+      "default": [],
+      "items": { "$ref": "#/$defs/slide" }
+    }
+  },
+  "$defs": {
+    "slide": {
+      "type": "object",
+      "required": ["role", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "cover", "context", "question", "problem", "mechanism", "explanation",
+            "steps", "key_points", "statistic", "myth_fact", "medical_quote",
+            "conclusion", "cta"
+          ]
+        },
+        "densityHint": {
+          "type": "string",
+          "enum": ["L", "M", "S"],
+          "description": "Opcional. Se ausente, o renderer deriva o degrau da contagem de caracteres."
+        },
+        "continuation": {
+          "type": "object",
+          "description": "Preenchido quando um slide precisou ser dividido por excesso de conteudo.",
+          "required": ["of", "part", "total"],
+          "additionalProperties": false,
+          "properties": {
+            "of": { "type": "string" },
+            "part": { "type": "integer", "minimum": 1 },
+            "total": { "type": "integer", "minimum": 2, "maximum": 3 }
+          }
+        },
+        "photo": { "$ref": "#/$defs/photo" },
+        "fields": { "$ref": "#/$defs/fields" }
+      }
+    },
+    "fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eyebrow": { "type": "string", "maxLength": 26 },
+        "headline": { "type": "string", "maxLength": 90, "description": "Maximo 11 palavras (regra herdada de validate_pack_contract)." },
+        "subheadline": { "type": "string", "maxLength": 110 },
+        "body": { "type": "string", "maxLength": 280 },
+        "statistic": { "type": "string", "maxLength": 8 },
+        "caption": { "type": "string", "maxLength": 90 },
+        "quote": { "type": "string", "maxLength": 160 },
+        "attribution": { "type": "string", "maxLength": 60 },
+        "cta": { "type": "string", "maxLength": 32 },
+        "footer": { "type": "string", "maxLength": 48 },
+        "disclaimer": { "type": "string", "maxLength": 110 },
+        "source": { "type": "string", "maxLength": 120, "description": "Obrigatorio quando role = statistic." },
+        "items": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {
+              "title": { "type": "string", "maxLength": 34 },
+              "text": { "type": "string", "maxLength": 90 }
+            }
+          }
+        },
+        "steps": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "required": ["label"],
+            "additionalProperties": false,
+            "properties": { "label": { "type": "string", "maxLength": 60 } }
+          }
+        }
+      }
+    },
+    "photo": {
+      "type": "object",
+      "required": ["assetId", "focalPointX", "focalPointY", "fit", "overlayStrength"],
+      "additionalProperties": false,
+      "properties": {
+        "assetId": { "type": "string", "description": "Chave de PHOTO_LIBRARY, ex.: seated-front, portrait-closeup." },
+        "focalPointX": { "type": "number", "minimum": 0, "maximum": 1 },
+        "focalPointY": { "type": "number", "minimum": 0, "maximum": 1 },
+        "fit": { "type": "string", "enum": ["cover", "contain"] },
+        "position": { "type": "string", "description": "object-position calculado; opcional, derivavel do focal point." },
+        "overlayStrength": { "type": "number", "minimum": 0, "maximum": 1, "description": "0.55 leve, 0.82 medio, 0.92 pesado." }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "O primeiro slide e sempre cover.",
+      "properties": { "slides": { "prefixItems": [{ "properties": { "role": { "const": "cover" } } }] } }
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.ai-video-creator/story-critic-v1.json",
+  "title": "AI Video Creator Story Critique",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "decision", "overallRisk", "summary", "issues", "shotAssessments"],
+  "properties": {
+    "contractVersion": { "const": "story-critic-v1" },
+    "decision": {
+      "type": "string",
+      "enum": ["ready", "changes_required", "blocked"]
+    },
+    "overallRisk": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "summary": { "type": "string", "minLength": 3, "maxLength": 500 },
+    "issues": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "category", "severity", "shotIds", "message", "suggestedAction"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "NARRATIVE_ARC_WEAK",
+              "NARRATIVE_PURPOSE_UNCLEAR",
+              "SHOT_REDUNDANT",
+              "CHARACTER_CONTINUITY_RISK",
+              "WARDROBE_CONTINUITY_RISK",
+              "ENVIRONMENT_CONTINUITY_RISK",
+              "CAMERA_CONTINUITY_RISK",
+              "HISTORICAL_ANACHRONISM_RISK",
+              "HISTORICAL_ACCURACY_RISK",
+              "MEDICAL_VISUAL_OVERCLAIM",
+              "MEDICAL_CONTEXT_RISK",
+              "PROVIDER_MISMATCH",
+              "SHOT_DIFFICULTY_HIGH"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": ["narrative", "continuity", "historical", "medical", "redundancy", "provider"]
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["info", "warning", "blocking"]
+          },
+          "shotIds": {
+            "type": "array",
+            "maxItems": 12,
+            "items": { "type": "string", "pattern": "^shot-[0-9]{2}$" }
+          },
+          "message": { "type": "string", "minLength": 3, "maxLength": 400 },
+          "suggestedAction": { "type": "string", "minLength": 3, "maxLength": 400 }
+        }
+      }
+    },
+    "shotAssessments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "shotId",
+          "difficulty",
+          "continuityRisk",
+          "historicalRisk",
+          "medicalRisk",
+          "recommendedProvider",
+          "recommendationReason",
+          "redundantWithShotId"
+        ],
+        "properties": {
+          "shotId": { "type": "string", "pattern": "^shot-[0-9]{2}$" },
+          "difficulty": { "type": "string", "enum": ["low", "medium", "high"] },
+          "continuityRisk": { "type": "string", "enum": ["low", "medium", "high"] },
+          "historicalRisk": { "type": "string", "enum": ["low", "medium", "high", "not_applicable"] },
+          "medicalRisk": { "type": "string", "enum": ["low", "medium", "high"] },
+          "recommendedProvider": {
+            "type": "string",
+            "enum": ["video_agent", "direct_video", "local_compositor"]
+          },
+          "recommendationReason": { "type": "string", "minLength": 3, "maxLength": 400 },
+          "redundantWithShotId": {
+            "type": ["string", "null"],
+            "pattern": "^shot-[0-9]{2}$"
+          }
+        }
+      }
+    }
+  }
+}

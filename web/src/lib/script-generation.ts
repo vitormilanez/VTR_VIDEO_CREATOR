@@ -46,7 +46,7 @@ export interface GenerateScriptOptions {
   editorialTone: EditorialTone;
   durationSeconds?: DurationPreset;
   outro?: string;
-  /** true quando a ideia ainda nao foi salva no Sheets (sugestao de artigo/ideia manual). */
+  /** true quando a ideia ainda não foi persistida (sugestão de artigo/ideia manual). */
   persistIdea?: boolean;
 }
 
@@ -130,7 +130,7 @@ export async function generateAndPersistCaptureScripts(
 
 /**
  * Gera o roteiro + texto falado completo via IA (uma unica chamada paga) e
- * persiste ideia (se necessario) e roteiro no Sheets.
+ * persiste ideia (se necessário) e roteiro no backend configurado.
  */
 export async function generateAndPersistScript(
   options: GenerateScriptOptions,

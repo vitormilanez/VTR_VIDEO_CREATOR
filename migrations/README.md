@@ -8,7 +8,11 @@ As migrations usam `DATABASE_URL` e o driver psycopg 3.
 .venv/bin/alembic downgrade -1
 ```
 
-O metadata fica em `api/database/models/`. Alterações de schema devem gerar
+Em desenvolvimento, o Alembic também lê `.env` e `.env.database` sem
+sobrescrever variáveis já exportadas pelo ambiente.
+
+O metadata fica em `api/database/models/` e as revisões oficiais ficam em
+`migrations/revisions/`. Alterações de schema devem gerar
 uma nova revision; migrations já aplicadas nunca devem importar ou chamar
 `Base.metadata.create_all()`.
 

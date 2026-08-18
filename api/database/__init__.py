@@ -1,7 +1,7 @@
 """Infraestrutura PostgreSQL multi-tenant do AI Video Creator.
 
-Os módulos são importáveis sem abrir conexão. A aplicação atual continua
-usando Sheets/SQLite até que o backend PostgreSQL seja ativado explicitamente.
+Os módulos são importáveis sem abrir conexão. Com ``DATA_BACKEND=postgres``,
+o PostgreSQL é a fonte principal dos domínios de conteúdo migrados.
 """
 
 from api.database.config import DatabaseSettings

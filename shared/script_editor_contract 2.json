@@ -1,0 +1,32 @@
+{
+  "contractVersion": "2.0.0",
+  "durationPresets": [10, 15, 30, 45, 60, 90, 120, 180],
+  "durationStatuses": ["ideal", "warning", "blocking"],
+  "medicalReviewStatuses": ["not_required", "recommended", "required", "approved"],
+  "titleAlignmentStatuses": ["aligned", "possible_mismatch", "unknown"],
+  "generationEligibilityStatuses": ["allowed", "blocked"],
+  "generationGateReasonCodes": [
+    "speech_empty",
+    "duration_blocking",
+    "ai_in_flight",
+    "ai_schema_invalid",
+    "technical_error",
+    "medical_review_required",
+    "unsaved",
+    "not_confirmed"
+  ],
+  "wordPattern": "[0-9A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-’'][0-9A-Za-zÀ-ÖØ-öø-ÿ]+)*",
+  "speechProfile": {
+    "id": "pt-br-medical-default",
+    "language": "pt-BR",
+    "wordsPerMinute": 144,
+    "tolerancePercent": 0.07,
+    "generationTargetMinPercent": 0.88,
+    "generationTargetMaxPercent": 0.94
+  },
+  "editorialProfile": {
+    "id": "pt-br-medical-editorial",
+    "language": "pt-BR",
+    "promptVersion": "2.0.0"
+  }
+}

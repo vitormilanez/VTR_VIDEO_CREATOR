@@ -91,7 +91,7 @@ function TendenciaDetalhe() {
       } catch {
         toast.warning("Ideia salva, mas o status da tendencia nao foi atualizado.");
       }
-      toast.success("Ideia criada e salva no Sheets.");
+      toast.success("Ideia criada e salva no banco de dados.");
       navigate({ to: "/ideias/$id", params: { id: saved.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel criar a ideia.");
@@ -160,7 +160,7 @@ function TendenciaDetalhe() {
       await setSheetStatus("radar", trend.id, status);
       toast.success(
         status === "descartado"
-          ? "Tendencia descartada e sincronizada com o Sheets."
+          ? "Tendência descartada e atualizada no banco de dados."
           : "Tendencia marcada como em analise.",
       );
     } catch (err) {
@@ -429,7 +429,7 @@ function TendenciaDetalhe() {
 
         <aside className="space-y-3">
           <div className="rounded-xl border bg-card p-3 text-xs text-muted-foreground shadow-sm">
-            O status e salvo no Google Sheets para manter o Radar sincronizado.
+            O status é salvo no banco de dados para manter o Radar atualizado.
           </div>
           <Button
             size="sm"

@@ -153,7 +153,7 @@ function IdeiaDetalhe() {
         toast.warning("Roteiro salvo, mas o status da ideia nao foi atualizado.");
       }
       setToneOpen(false);
-      toast.success("Roteiro gerado pelo Claude e salvo no Sheets.");
+      toast.success("Roteiro gerado pelo Claude e salvo no banco de dados.");
       navigate({ to: "/roteiros/$id", params: { id: script.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar o roteiro.");

@@ -71,7 +71,7 @@ function CalendarioPage() {
         publicadoEm: new Date().toISOString(),
       });
       updatePost(id, updated);
-      toast.success("Publicado e sincronizado com o Sheets.");
+      toast.success("Publicado e atualizado no banco de dados.");
       return true;
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao sincronizar.");
@@ -92,7 +92,7 @@ function CalendarioPage() {
         publicadoEm: undefined,
       });
       updatePost(editing.id, updated);
-      toast.success("Publicacao reagendada e salva no Sheets.");
+      toast.success("Publicação reagendada e salva no banco de dados.");
       setEditing(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao reagendar.");
@@ -191,7 +191,7 @@ function CalendarioPage() {
                   <div className="mt-2 flex gap-1">
                     <ConfirmAction
                       title="Marcar como publicado?"
-                      description="Atualiza o status na aba Calendario do Google Sheets."
+                      description="Atualiza o status persistido no banco de dados."
                       confirmLabel="Marcar publicado"
                       onConfirm={() => publicar(p.id)}
                       trigger={
@@ -217,8 +217,8 @@ function CalendarioPage() {
           </div>
 
           <div className="rounded-xl border bg-card p-3 text-[11px] text-muted-foreground shadow-sm">
-            Marcar como publicado atualiza o status na aba Calendario do Sheets. As metricas
-            aparecem em Performance quando preenchidas na planilha.
+            Marcar como publicado atualiza o status no banco de dados. As métricas aparecem em
+            Performance quando preenchidas na planilha.
             <BarChart3 className="ml-1 inline h-3 w-3 align-text-bottom" />
           </div>
         </div>

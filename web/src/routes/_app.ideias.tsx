@@ -226,7 +226,7 @@ export function IdeiasPage() {
   const previewScript = preview ? scriptForIdea(preview) : undefined;
   const previewVideo = previewScript ? videoForScript(previewScript.id) : undefined;
 
-  /** Ideia ja salva no Sheets: so falta escolher o tom e gerar o roteiro. */
+  /** Ideia já persistida: só falta escolher o tom e gerar o roteiro. */
   function gerarRoteiro(i: Idea) {
     const quality = evaluateIdeaQuality(i);
     if (!quality.ready) {
@@ -301,7 +301,7 @@ export function IdeiasPage() {
       setArticleOpen(false);
       setManualSeed("");
       setManualIdeas([]);
-      toast.success("Roteiro gerado pelo Claude e salvo no Sheets.");
+      toast.success("Roteiro gerado pelo Claude e salvo no banco de dados.");
       navigate({ to: "/roteiros/$id", params: { id: script.id } });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Nao foi possivel gerar o roteiro.");
@@ -411,7 +411,7 @@ export function IdeiasPage() {
     updateIdea(i.id, { status: "descartado" });
     try {
       await setSheetStatus("ideias", i.id, "descartado");
-      toast.success("Ideia descartada e sincronizada com o Sheets.");
+      toast.success("Ideia descartada e atualizada no banco de dados.");
     } catch (err) {
       updateIdea(i.id, { status: i.status });
       toast.error(err instanceof Error ? err.message : "Falha ao sincronizar.");

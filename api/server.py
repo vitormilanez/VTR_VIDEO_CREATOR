@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-API local que serve os dados reais do projeto (snapshot do Google Sheets)
-no formato que o frontend (web/) espera.
+API local que serve os dados reais do projeto no formato esperado pelo
+frontend (web/). PostgreSQL é o backend principal; o snapshot do Google
+Sheets permanece disponível como fallback explícito.
 
 Roda em http://127.0.0.1:8000
 
@@ -194,6 +195,15 @@ from api.services.pack_context import (
     PACK_EDUCATIONAL_FLOW_VERSION,
     build_pack_context,
 )
+from api.repositories import ContentConflictError, ContentNotFoundError
+from api.services.data_backend import (
+    close_data_backend,
+    content_repository,
+    data_backend_health,
+    data_backend_name,
+    initialize_data_backend,
+    postgres_enabled,
+)
 from api.video_slides import render_video_slides
 from integrations.heygen_client import load_dotenv
 from integrations.google_news import resolve_google_news_url
@@ -254,6 +264,8 @@ MUSIC_LIBRARY: tuple[dict[str, Any], ...] = (
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    backend = initialize_data_backend()
+    LOGGER.info("data_backend backend=%s", backend.get("backend"))
     reconciliation = _reconcile_incomplete_video_jobs()
     if any(reconciliation.values()):
         LOGGER.info(
@@ -273,7 +285,10 @@ async def _lifespan(_app: FastAPI):
     interrupted_local = reconcile_interrupted_local_video_kit_jobs()
     if interrupted_local:
         LOGGER.info("local_video_kit_reconciliation interrupted=%s", interrupted_local)
-    yield
+    try:
+        yield
+    finally:
+        close_data_backend()
 
 
 app = FastAPI(title="AI Video Creator API", version="0.1.0", lifespan=_lifespan)
@@ -292,15 +307,15 @@ app.add_middleware(
 # --------------------------------------------------------------------------- #
 def _load_env_file() -> None:
     """Carrega variaveis locais sem sobrescrever variaveis ja definidas."""
-    env_file = ROOT / ".env"
-    if not env_file.exists():
-        return
-    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    for env_file in (ROOT / ".env", ROOT / ".env.database"):
+        if not env_file.exists():
             continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 _load_env_file()
@@ -316,6 +331,16 @@ def _load_snapshot() -> dict[str, Any]:
             ),
         )
     return json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+
+
+def _repository_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, ContentNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ContentConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=503, detail=f"Falha no PostgreSQL: {exc}")
 
 
 def _now() -> str:
@@ -4656,23 +4681,48 @@ def refresh_heygen_avatar(job_id: str) -> dict:
 @app.get("/api/state")
 def state() -> dict:
     """Payload unico que hidrata o store do frontend."""
-    snap = _load_snapshot()
-    sheets = snap.get("sheets", {})
-    calendar_posts = map_calendar(sheets.get("calendario", []))
-    performance = _attach_calendar_links(
-        map_performance(sheets.get("performance", [])), calendar_posts
-    )
+    if postgres_enabled():
+        try:
+            persisted = content_repository().state()
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        trends = persisted["trends"]
+        ideas = persisted["ideas"]
+        scripts = persisted["scripts"]
+        calendar_posts = persisted["calendarPosts"]
+        performance = persisted["performance"]
+        updated_at = _now()
+    else:
+        snap = _load_snapshot()
+        sheets = snap.get("sheets", {})
+        calendar_posts = map_calendar(sheets.get("calendario", []))
+        performance = _attach_calendar_links(
+            map_performance(sheets.get("performance", [])), calendar_posts
+        )
+        trends = map_trends(sheets.get("radar", []))
+        ideas = map_ideas(sheets.get("ideias", []))
+        scripts = map_scripts(sheets.get("roteiros", []))
+        updated_at = snap.get("updated_at")
     return {
-        "trends": map_trends(sheets.get("radar", [])),
-        "ideas": map_ideas(sheets.get("ideias", [])),
-        "scripts": map_scripts(sheets.get("roteiros", [])),
+        "trends": trends,
+        "ideas": ideas,
+        "scripts": scripts,
         "videoJobs": _load_video_jobs(),
         "calendarPosts": calendar_posts,
         "performance": performance,
         "settings": _load_settings(),
         "complianceRules": MEDICAL_COMPLIANCE_RULES,
-        "updatedAt": snap.get("updated_at"),
+        "updatedAt": updated_at,
+        "dataBackend": data_backend_name(),
     }
+
+
+@app.get("/api/storage/health")
+def storage_health() -> dict[str, Any]:
+    health = data_backend_health()
+    if not health.get("ok"):
+        raise HTTPException(status_code=503, detail=health)
+    return health
 
 
 @app.put("/api/settings")
@@ -10278,6 +10328,14 @@ def create_script_from_draft(payload: CreateScriptFromDraftIn) -> dict:
 
 
 def _find_script(script_id: str) -> dict[str, Any]:
+    if postgres_enabled():
+        try:
+            script = content_repository().get_script(script_id)
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        if not _script_text(script):
+            raise HTTPException(status_code=400, detail="O roteiro nao possui texto para gerar o video.")
+        return script
     snapshot = _load_snapshot()
     scripts = map_scripts(snapshot.get("sheets", {}).get("roteiros", []))
     script = next((item for item in scripts if item["id"] == script_id), None)
@@ -12674,6 +12732,8 @@ def _run(script_args: list[str], timeout: int) -> subprocess.CompletedProcess:
 @app.post("/api/refresh")
 def refresh() -> dict:
     """Re-sincroniza o snapshot local a partir do Google Sheets."""
+    if postgres_enabled():
+        return {**content_repository().health(), "refreshed": False}
     script = ROOT / "sync_sheets_snapshot.py"
     if not script.exists():
         raise HTTPException(status_code=404, detail="sync_sheets_snapshot.py nao encontrado")
@@ -12703,6 +12763,8 @@ def hunt_trends() -> dict:
     Pipeline real de captura: trend_hunter -> sync p/ Sheets -> refresh snapshot.
     Requer .env e .google_sheets_token.json na raiz para os passos 2 e 3.
     """
+    if postgres_enabled():
+        return _hunt_trends_to_postgres()
     antes = len(map_trends(_load_snapshot().get("sheets", {}).get("radar", [])))
     settings = _load_settings()
     radar_settings = settings.get("radar", {})
@@ -12759,6 +12821,87 @@ def hunt_trends() -> dict:
         "added": max(depois - antes, 0),
         "queries": query_terms,
         "log": "\n\n".join(log)[-1500:],
+    }
+
+
+def _hunt_trends_to_postgres() -> dict[str, Any]:
+    """Executa o Trend Hunter e persiste o CSV diretamente no PostgreSQL."""
+    from sync_trends_to_sheets import read_trends, trend_to_radar_row
+
+    repository = content_repository()
+    before = repository.state()["trends"]
+    settings = _load_settings()
+    radar_settings = settings.get("radar", {})
+    query_terms = _clean_string_list(
+        [
+            *(settings.get("temasPrioritarios") or []),
+            *(radar_settings.get("termosExtras") or []),
+        ],
+        limit=80,
+    )
+    trend_args = [str(ROOT / "trend_hunter" / "trend_hunter.py")]
+    for term in query_terms:
+        trend_args.extend(["--query", term])
+    trend_args.extend(["--period", str(radar_settings.get("periodo") or "semana")])
+    for source in radar_settings.get("fontes") or []:
+        trend_args.extend(["--source", str(source)])
+    try:
+        process = _run(trend_args, timeout=180)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="trend_hunter: tempo esgotado") from exc
+    if process.returncode != 0:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Falha no Trend Hunter.\n{(process.stderr or process.stdout)[-400:]}",
+        )
+
+    csv_files = sorted((ROOT / "trend_hunter" / "output").glob("trends_*.csv"), reverse=True)
+    if not csv_files:
+        raise HTTPException(status_code=500, detail="Trend Hunter não gerou um CSV para importar.")
+    rows = sorted(
+        read_trends(csv_files[0]),
+        key=lambda row: int(float(row.get("score") or 0)),
+        reverse=True,
+    )
+    seen = {
+        f"{str(item.get('link') or '').strip()}|{str(item.get('sinal') or '').strip()}"
+        for item in before
+    }
+    limit = int(radar_settings.get("limitePorBusca") or 20)
+    added = 0
+    for raw in rows:
+        row = trend_to_radar_row(raw)
+        key = f"{row[5]}|{row[6]}"
+        if key in seen:
+            continue
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+        repository.create_trend(
+            {
+                "id": f"t-{digest}",
+                "titulo": row[2],
+                "subtema": row[3],
+                "fonte": row[4],
+                "link": row[5] or None,
+                "sinal": row[6] or None,
+                "dorPublico": row[7] or None,
+                "potencial": int(row[1]),
+                "prioridade": _prioridade(row[8]),
+                "status": "novo",
+                "notas": row[10] or None,
+                "criadoEm": str(row[0]),
+            }
+        )
+        seen.add(key)
+        added += 1
+        if added >= limit:
+            break
+    return {
+        "ok": True,
+        "partial": False,
+        "backend": "postgres",
+        "added": added,
+        "queries": query_terms,
+        "log": (process.stdout or "").strip()[-1500:],
     }
 
 
@@ -12928,6 +13071,8 @@ def _ensure_tab_ids(client: Any, tab: str) -> int:
 @app.post("/api/sheets/ensure-ids")
 def ensure_sheet_ids() -> dict:
     """Migra as abas operacionais para IDs permanentes e atualiza o snapshot."""
+    if postgres_enabled():
+        return {"ok": True, "backend": "postgres", "created": {}, "migratedVideoJobs": 0}
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     try:
@@ -12948,6 +13093,11 @@ def set_status(tab: str, item_id: str, payload: StatusUpdate) -> dict:
     """Grava o novo status de um item (radar/ideias/roteiros) na planilha."""
     if tab not in TAB_RANGE:
         raise HTTPException(status_code=404, detail=f"aba desconhecida: {tab}")
+    if postgres_enabled():
+        try:
+            return content_repository().set_status(tab, item_id, payload.status)
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
     label = STATUS_LABELS.get(tab, {}).get(payload.status)
     if not label:
         raise HTTPException(status_code=400, detail=f"status invalido: {payload.status}")
@@ -12971,6 +13121,26 @@ def set_status(tab: str, item_id: str, payload: StatusUpdate) -> dict:
         raise HTTPException(status_code=503, detail=f"falha ao gravar: {exc}")
     _update_snapshot_row(tab, item_id, {"Status": label})
     return {"ok": True, "cell": cell, "status": label}
+
+
+@app.post("/api/trends/{item_id}/status")
+def set_trend_status(item_id: str, payload: StatusUpdate) -> dict:
+    return set_status("radar", item_id, payload)
+
+
+@app.post("/api/ideas/{item_id}/status")
+def set_idea_status(item_id: str, payload: StatusUpdate) -> dict:
+    return set_status("ideias", item_id, payload)
+
+
+@app.post("/api/scripts/{item_id}/status")
+def set_script_status(item_id: str, payload: StatusUpdate) -> dict:
+    return set_status("roteiros", item_id, payload)
+
+
+@app.post("/api/calendar-posts/{item_id}/status")
+def set_calendar_status(item_id: str, payload: StatusUpdate) -> dict:
+    return set_status("calendario", item_id, payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -14950,10 +15120,19 @@ def _append(tab: str, row: list) -> None:
         raise HTTPException(status_code=503, detail=f"falha ao gravar no Sheets: {exc}")
 
 
+@app.post("/api/trends")
 @app.post("/api/sheets/radar")
 def append_trend(payload: TrendIn) -> dict:
     """Grava uma tendencia cadastrada manualmente na aba 'Radar Tendencias'."""
     item_id = payload.id or f"t-{uuid.uuid4().hex[:12]}"
+    if postgres_enabled():
+        try:
+            trend = content_repository().create_trend(
+                payload.model_dump(mode="json") | {"id": item_id}
+            )
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        return {"ok": True, "trend": trend}
     row = [
         _radar_date(payload.criadoEm),                    # Data
         payload.potencial,                                # Potencial Viral
@@ -14974,10 +15153,19 @@ def append_trend(payload: TrendIn) -> dict:
     return {"ok": True, "trend": map_trends([raw])[0]}
 
 
+@app.post("/api/ideas")
 @app.post("/api/sheets/ideias")
 def append_idea(payload: IdeaIn) -> dict:
     """Grava uma nova ideia na aba 'Ideias' (colunas reais)."""
     item_id = payload.id or f"i-{uuid.uuid4().hex[:12]}"
+    if postgres_enabled():
+        try:
+            idea, deduplicated = content_repository().create_idea(
+                payload.model_dump(mode="json") | {"id": item_id}
+            )
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        return {"ok": True, "idea": idea, "deduplicated": deduplicated}
     rows = _load_snapshot().get("sheets", {}).get("ideias", [])
     payload_key = _idea_dedupe_key(payload.titulo, payload.hook, payload.linkOrigem)
     existing = next(
@@ -15026,9 +15214,16 @@ def _idea_dedupe_key(title: Any, hook: Any, source_url: Any) -> tuple[str, str, 
     return (normalize(title), normalize(hook), normalize(source_url))
 
 
+@app.put("/api/ideas/{item_id}")
 @app.put("/api/sheets/ideias/{item_id}")
 def update_idea(item_id: str, payload: IdeaIn) -> dict:
     """Atualiza uma ideia completa, inclusive o contexto recuperado da fonte."""
+    if postgres_enabled():
+        try:
+            idea = content_repository().update_idea(item_id, payload.model_dump(mode="json"))
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        return {"ok": True, "idea": idea}
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     item_id = payload.id or item_id
@@ -15062,10 +15257,20 @@ def update_idea(item_id: str, payload: IdeaIn) -> dict:
     return {"ok": True, "idea": map_ideas([raw])[0]}
 
 
+@app.post("/api/scripts")
 @app.post("/api/sheets/roteiros")
 def append_script(payload: ScriptIn) -> dict:
     """Grava um novo roteiro e garante automaticamente as colunas do fluxo com IA."""
     item_id = payload.id or f"s-{uuid.uuid4().hex[:12]}"
+    if postgres_enabled():
+        try:
+            saved_script, deduplicated = content_repository().create_script(
+                payload.model_dump(mode="json") | {"id": item_id}
+            )
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        _script_editor_state(item_id, saved_script)
+        return {"ok": True, "script": saved_script, "deduplicated": deduplicated}
     existing = next(
         (
             row
@@ -15109,9 +15314,16 @@ def append_script(payload: ScriptIn) -> dict:
     return {"ok": True, "script": saved_script}
 
 
+@app.post("/api/calendar-posts")
 @app.post("/api/sheets/calendario")
 def append_calendar_post(payload: CalendarIn) -> dict:
     """Agenda uma publicacao no Sheets e atualiza imediatamente o snapshot."""
+    if postgres_enabled():
+        try:
+            post = content_repository().create_calendar_post(payload.model_dump(mode="json"))
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        return {"ok": True, "post": post}
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     item_id = payload.id or f"p-{uuid.uuid4().hex[:12]}"
@@ -15129,9 +15341,18 @@ def append_calendar_post(payload: CalendarIn) -> dict:
     return {"ok": True, "post": map_calendar([raw])[0]}
 
 
+@app.put("/api/calendar-posts/{item_id}")
 @app.put("/api/sheets/calendario/{item_id}")
 def update_calendar_post(item_id: str, payload: CalendarIn) -> dict:
     """Reagenda ou publica um item existente, persistindo a linha completa."""
+    if postgres_enabled():
+        try:
+            post = content_repository().update_calendar_post(
+                item_id, payload.model_dump(mode="json")
+            )
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        return {"ok": True, "post": post}
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     item_id = payload.id or item_id
@@ -15151,9 +15372,32 @@ def update_calendar_post(item_id: str, payload: CalendarIn) -> dict:
     return {"ok": True, "post": map_calendar([raw])[0]}
 
 
+@app.put("/api/scripts/{item_id}")
 @app.put("/api/sheets/roteiros/{item_id}")
 def update_script(item_id: str, payload: ScriptIn) -> dict:
     """Atualiza o roteiro completo no Sheets e no snapshot usado pela producao."""
+    if postgres_enabled():
+        item_id = payload.id or item_id
+        with _paid_generation_lock(item_id):
+            previous_script = _find_script(item_id)
+            try:
+                saved_script = content_repository().update_script(
+                    item_id, payload.model_dump(mode="json")
+                )
+            except Exception as exc:
+                raise _repository_http_error(exc) from exc
+            _script_editor_state(item_id, saved_script)
+            previous_speech = re.sub(
+                r"\s+", " ", _canonical_saved_script_speech(previous_script)
+            ).strip()
+            saved_speech = re.sub(
+                r"\s+", " ", _canonical_saved_script_speech(saved_script)
+            ).strip()
+            if previous_speech != saved_speech:
+                _sync_scene_plan_to_saved_speech(
+                    item_id, _canonical_saved_script_speech(saved_script)
+                )
+        return {"ok": True, "script": saved_script}
     from integrations.google_sheets_rest_client import GoogleSheetsRestClient
 
     item_id = payload.id or item_id
@@ -15233,6 +15477,7 @@ def _delete_script_local_data(script_id: str) -> dict[str, Any]:
     }
 
 
+@app.delete("/api/scripts/{item_id}")
 @app.delete("/api/sheets/roteiros/{item_id}")
 def delete_script(item_id: str) -> dict:
     """Exclui um roteiro sem deixar referencias de producao ou agenda quebradas."""
@@ -15249,6 +15494,14 @@ def delete_script(item_id: str) -> dict:
             status_code=409,
             detail="Este roteiro possui vídeo ou prévia de produção. Preserve o roteiro para manter o histórico do vídeo.",
         )
+
+    if postgres_enabled():
+        try:
+            removed = content_repository().delete_script(item_id)
+        except Exception as exc:
+            raise _repository_http_error(exc) from exc
+        cleanup = _delete_script_local_data(item_id)
+        return {"ok": True, **removed, **cleanup}
 
     snapshot = _load_snapshot()
     linked_posts = [

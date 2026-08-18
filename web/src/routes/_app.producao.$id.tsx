@@ -575,7 +575,7 @@ function VideoDetalhe() {
                         formato: script.formatoSugerido,
                       });
                       addCalendarPost(post);
-                      toast.success("Publicacao agendada e salva no Sheets.");
+                      toast.success("Publicação agendada e salva no banco de dados.");
                       setOpen(false);
                       navigate({ to: "/calendario" });
                     } catch (err) {

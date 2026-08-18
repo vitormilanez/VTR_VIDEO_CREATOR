@@ -12,11 +12,29 @@ elif [ -d /usr/local/opt/node@22/bin ]; then
 fi
 echo "node: $(node --version)"
 
+# --- PostgreSQL local ---
+# Lê somente as duas chaves necessárias, sem executar o arquivo de ambiente.
+if [ -f "$ROOT/.env.database" ]; then
+  while IFS='=' read -r key value; do
+    case "$key" in
+      DATA_BACKEND|DATABASE_URL) export "$key=$value" ;;
+    esac
+  done < "$ROOT/.env.database"
+fi
+if [ "${DATA_BACKEND:-sheets}" = "postgres" ]; then
+  echo "Iniciando PostgreSQL local..."
+  "$ROOT/tools/local_postgres.sh" start
+fi
+
 # --- API Python ---
 if [ ! -d "$ROOT/.venv" ]; then
   echo "Criando venv e instalando deps da API..."
   python3 -m venv "$ROOT/.venv"
   "$ROOT/.venv/bin/python" -m pip install -q -r "$ROOT/api/requirements.txt"
+fi
+if [ "${DATA_BACKEND:-sheets}" = "postgres" ]; then
+  echo "Aplicando migrations..."
+  "$ROOT/.venv/bin/alembic" upgrade head
 fi
 echo "Iniciando API em http://127.0.0.1:8000 ..."
 "$ROOT/.venv/bin/python" -m uvicorn api.server:app \

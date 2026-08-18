@@ -1,13 +1,16 @@
 # Plano de migração: Google Sheets para PostgreSQL multi-tenant
 
-Status: em execução
+Status: cutover do conteúdo principal concluído; operações e autenticação em execução
 Data: 2026-08-13  
 Branch: `codex/migrate-sheets-to-multitenant-db`
 
-Progresso em 2026-08-14: a fundação SQLAlchemy/Alembic, o schema de 39 tabelas,
+Progresso em 2026-08-17: a fundação SQLAlchemy/Alembic, o schema de 39 tabelas,
 as chaves tenant-aware, o `TenantContext` e as policies RLS estão implementados
-e testados contra PostgreSQL real. Auth/JWKS, onboarding da organização atual,
-repositórios, importadores e cutover permanecem como etapas seguintes.
+e testados contra PostgreSQL real. Radar, ideias, roteiros, calendário e
+performance operam por repositórios PostgreSQL; `GET /api/state` e as mutações
+da UI usam as rotas de domínio. O importador do snapshot é transacional e
+idempotente, e o ambiente local está em `DATA_BACKEND=postgres`. Auth/JWKS,
+storage e a migração do estado operacional ainda permanecem como próximas fases.
 
 ## Decisão recomendada
 
@@ -140,6 +143,9 @@ Saída: schema recriável do zero e testes negativos de isolamento entre dois te
 
 ### Fase 2 — Camada de persistência sem mudar a UI
 
+Status: núcleo editorial concluído. Migração de jobs, perfis, planos, packs e
+uso de IA ainda pendente.
+
 1. Extrair interfaces de repositório do `api/server.py`.
 2. Implementar repositórios PostgreSQL para radar, ideias, roteiros, calendário e performance.
 3. Manter `GET /api/state` com o mesmo formato, agora filtrado por organização.
@@ -150,6 +156,9 @@ Saída: schema recriável do zero e testes negativos de isolamento entre dois te
 Saída: o app pode operar integralmente em PostgreSQL com a UI atual.
 
 ### Fase 3 — Importador legado idempotente
+
+Status: concluído para snapshot de radar, ideias, roteiros, calendário e
+performance. A importação do SQLite e dos assets segue na Fase 4.
 
 Criar um comando com dois modos:
 

@@ -92,6 +92,8 @@ class CalendarPost(UUIDPrimaryKeyMixin, OrganizationOwnedMixin, TimestampMixin, 
     legacy_id: Mapped[str | None] = mapped_column(String(120))
     script_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
     job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
+    # Compatibilidade até os jobs locais também migrarem para PostgreSQL.
+    legacy_job_id: Mapped[str | None] = mapped_column(String(120))
     social_account_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     theme: Mapped[str | None] = mapped_column(String(500))

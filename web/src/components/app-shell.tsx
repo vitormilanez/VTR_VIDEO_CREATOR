@@ -142,6 +142,7 @@ export function AppShell({
   children: ReactNode;
 }) {
   const syncedAt = useStore((state) => state.syncedAt);
+  const dataBackend = useStore((state) => state.dataBackend);
 
   return (
     <SidebarProvider>
@@ -155,7 +156,7 @@ export function AppShell({
               {title}
             </h1>
             <div className="order-3 flex w-full flex-wrap items-center gap-2 sm:order-none sm:ml-auto sm:w-auto sm:justify-end">
-              <SyncStatus syncedAt={syncedAt} />
+              <SyncStatus syncedAt={syncedAt} dataBackend={dataBackend} />
               {actions}
             </div>
           </header>
@@ -166,19 +167,26 @@ export function AppShell({
   );
 }
 
-function SyncStatus({ syncedAt }: { syncedAt: string | null }) {
+function SyncStatus({
+  syncedAt,
+  dataBackend,
+}: {
+  syncedAt: string | null;
+  dataBackend: "postgres" | "sheets" | null;
+}) {
+  const source = dataBackend === "postgres" ? "PostgreSQL" : "Sheets";
   if (!syncedAt) {
     return (
       <span className="hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] text-muted-foreground md:inline-flex">
         <Clock3 className="h-3.5 w-3.5" />
-        Aguardando Sheets
+        Aguardando {source}
       </span>
     );
   }
   return (
     <span className="hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] text-muted-foreground md:inline-flex">
       <Clock3 className="h-3.5 w-3.5" />
-      Sheets {formatSyncTime(syncedAt)}
+      {source} {formatSyncTime(syncedAt)}
     </span>
   );
 }

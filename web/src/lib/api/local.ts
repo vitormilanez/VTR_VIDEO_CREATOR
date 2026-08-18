@@ -1,5 +1,5 @@
-// Cliente da API local (FastAPI em api/server.py) que serve os dados reais
-// do Google Sheets. Base configuravel via VITE_API_URL.
+// Cliente da API local (FastAPI em api/server.py). A persistência principal
+// pode ser PostgreSQL ou o backend legado, sem alterar os tipos da interface.
 import type { HydratePayload } from "../store";
 import type { AppSettings, CalendarPost, EditorialTone, Idea, Script, Trend } from "../mock-data";
 import type { VideoJob } from "../mock-data";
@@ -21,6 +21,7 @@ const BASE = import.meta.env.VITE_API_URL ?? "";
 
 export interface StatePayload extends HydratePayload {
   updatedAt?: string;
+  dataBackend?: "postgres" | "sheets";
 }
 
 export async function fetchState(): Promise<StatePayload> {
@@ -35,13 +36,19 @@ export async function refreshSnapshot(): Promise<{ ok: boolean }> {
   return (await res.json()) as { ok: boolean };
 }
 
-/** Grava o novo status de um item de volta no Google Sheets. */
+/** Grava o novo status no repositório de domínio configurado. */
 export async function setSheetStatus(
   tab: "radar" | "ideias" | "roteiros" | "calendario",
   itemId: string,
   status: string,
 ): Promise<{ ok: boolean }> {
-  const res = await fetch(`${BASE}/api/sheets/${tab}/${itemId}/status`, {
+  const resources = {
+    radar: "trends",
+    ideias: "ideas",
+    roteiros: "scripts",
+    calendario: "calendar-posts",
+  } as const;
+  const res = await fetch(`${BASE}/api/${resources[tab]}/${itemId}/status`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status }),
@@ -103,22 +110,22 @@ async function postJson<T = { ok: boolean }>(path: string, body: unknown): Promi
   return requestJson<T>(path, { method: "POST", body: JSON.stringify(body) });
 }
 
-/** Persiste uma tendencia cadastrada manualmente na aba Radar Tendencias do Sheets. */
+/** Persiste uma tendência cadastrada manualmente. */
 export async function appendTrend(trend: Trend): Promise<Trend> {
-  const response = await postJson<{ ok: boolean; trend: Trend }>("/api/sheets/radar", trend);
+  const response = await postJson<{ ok: boolean; trend: Trend }>("/api/trends", trend);
   return response.trend;
 }
 
-/** Persiste uma ideia gerada na aba Ideias do Sheets. */
+/** Persiste uma ideia gerada. */
 export async function appendIdea(idea: Idea): Promise<Idea> {
-  const response = await postJson<{ ok: boolean; idea: Idea }>("/api/sheets/ideias", idea);
+  const response = await postJson<{ ok: boolean; idea: Idea }>("/api/ideas", idea);
   return response.idea;
 }
 
-/** Atualiza uma ideia existente no Sheets, preservando ID e vinculo com a tendencia. */
+/** Atualiza uma ideia existente, preservando ID e vínculo com a tendência. */
 export async function saveIdea(idea: Idea): Promise<Idea> {
   const response = await requestJson<{ ok: boolean; idea: Idea }>(
-    `/api/sheets/ideias/${encodeURIComponent(idea.id)}`,
+    `/api/ideas/${encodeURIComponent(idea.id)}`,
     { method: "PUT", body: JSON.stringify(idea) },
   );
   return response.idea;
@@ -326,43 +333,40 @@ export async function createScriptFromDraft(
   return response;
 }
 
-/** Persiste um roteiro gerado na aba Roteiros do Sheets. */
+/** Persiste um roteiro gerado. */
 export async function appendScript(script: Script): Promise<Script> {
-  const response = await postJson<{ ok: boolean; script: Script }>("/api/sheets/roteiros", script);
+  const response = await postJson<{ ok: boolean; script: Script }>("/api/scripts", script);
   return response.script;
 }
 
-/** Atualiza o roteiro no Sheets e no snapshot usado para gerar o video. */
+/** Atualiza o roteiro na fonte de verdade usada pela produção. */
 export async function saveScript(script: Script): Promise<Script> {
   const response = await requestJson<{ ok: boolean; script: Script }>(
-    `/api/sheets/roteiros/${encodeURIComponent(script.id)}`,
+    `/api/scripts/${encodeURIComponent(script.id)}`,
     { method: "PUT", body: JSON.stringify(script) },
   );
   return response.script;
 }
 
-/** Exclui o roteiro no Sheets; o backend bloqueia quando existe vídeo ou agendamento vinculado. */
+/** Exclui o roteiro; o backend bloqueia quando existe vídeo ou agendamento vinculado. */
 export async function deleteScript(scriptId: string): Promise<{ id: string; title: string }> {
   const response = await requestJson<{ ok: boolean; id: string; title: string }>(
-    `/api/sheets/roteiros/${encodeURIComponent(scriptId)}`,
+    `/api/scripts/${encodeURIComponent(scriptId)}`,
     { method: "DELETE" },
   );
   return { id: response.id, title: response.title };
 }
 
-/** Cria um agendamento real na aba Calendario do Sheets. */
+/** Cria um agendamento persistente. */
 export async function appendCalendarPost(post: Omit<CalendarPost, "id">): Promise<CalendarPost> {
-  const response = await postJson<{ ok: boolean; post: CalendarPost }>(
-    "/api/sheets/calendario",
-    post,
-  );
+  const response = await postJson<{ ok: boolean; post: CalendarPost }>("/api/calendar-posts", post);
   return response.post;
 }
 
 /** Persiste reagendamento, publicacao e demais alteracoes do calendario. */
 export async function saveCalendarPost(post: CalendarPost): Promise<CalendarPost> {
   const response = await requestJson<{ ok: boolean; post: CalendarPost }>(
-    `/api/sheets/calendario/${encodeURIComponent(post.id)}`,
+    `/api/calendar-posts/${encodeURIComponent(post.id)}`,
     { method: "PUT", body: JSON.stringify(post) },
   );
   return response.post;

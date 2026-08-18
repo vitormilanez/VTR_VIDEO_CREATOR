@@ -20,6 +20,7 @@ data/heygen_avatar_cache.json
 data/operations.db
 data/operations.db-shm
 data/operations.db-wal
+.local-postgres/
 data/cut_uploads/
 data/cuts/
 data/local_video_kit_uploads/

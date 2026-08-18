@@ -96,8 +96,8 @@ function PerformancePage() {
         <div className="mb-3 flex items-start gap-2 rounded-md border border-status-info/40 bg-status-info/10 p-3 text-xs">
           <BarChart3 className="mt-0.5 h-4 w-4 text-status-info" />
           <div>
-            Metricas vindas da aba <strong>Performance</strong> do Google Sheets. A coleta
-            automatica via Meta ainda nao esta conectada.
+            Métricas persistidas no <strong>PostgreSQL</strong>. A coleta automatica via Meta ainda
+            nao esta conectada.
           </div>
         </div>
       )}

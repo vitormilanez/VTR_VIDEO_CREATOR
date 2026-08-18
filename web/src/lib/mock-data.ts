@@ -1,5 +1,4 @@
-// Tipos e seeds do AI Video Creator. Todos os dados sao mockados nesta fase.
-// TODO(cloud): substituir por tabelas Supabase (trends, ideas, scripts, ...).
+// Contratos compartilhados pelo frontend e pelo backend de persistência.
 
 export type ThemeFamily =
   "medicamento" | "comportamento" | "metabolismo" | "obesidade" | "educativo";
@@ -28,7 +27,7 @@ export interface Trend {
   status: TrendStatus;
   criadoEm: string;
   notas?: string;
-  // Campos do radar real (Google Sheets)
+  // Campos editoriais do radar
   subtema?: string;
   sinal?: string;
   dorPublico?: string;
@@ -82,7 +81,7 @@ export interface Script {
   outroText?: string;
   /** Provedor que efetivamente escreveu o texto; usado para auditoria do fluxo. */
   generationProvider?: "claude" | "fallback" | "manual";
-  /** Versao do fluxo que criou o roteiro, preservada no Sheets. */
+  /** Versão do fluxo que criou o roteiro, preservada na fonte de verdade. */
   generationFlowVersion?: string;
 }
 
@@ -138,7 +137,7 @@ export interface CalendarPost {
   canal: Canal;
   status: PostStatus;
   publicadoEm?: string;
-  // Campos reais da aba Calendario
+  // Metadados editoriais do calendário
   tema?: string;
   formato?: string;
   responsavel?: string;
