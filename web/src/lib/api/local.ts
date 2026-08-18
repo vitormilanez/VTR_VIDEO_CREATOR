@@ -1239,6 +1239,16 @@ export function packSlidePreviewUrl(scriptId: string, slideIndex: number): strin
   return `${BASE}/api/packs/${encodeURIComponent(scriptId)}/slides/${slideIndex}/preview`;
 }
 
+/** PNG pequeno em cache. A URL muda junto com copy, família ou tema. */
+export function packSlideThumbnailUrl(
+  scriptId: string,
+  slideIndex: number,
+  pack: Pick<GeneratedPack, "updatedAt" | "family" | "themeId">,
+): string {
+  const version = [pack.updatedAt ?? "legacy", pack.family ?? "", pack.themeId ?? ""].join("|");
+  return `${BASE}/api/packs/${encodeURIComponent(scriptId)}/slides/${slideIndex}/thumb.png?v=${encodeURIComponent(version)}`;
+}
+
 /** Edita o texto de um slide localmente. Nao chama o Claude. */
 export async function updatePackSlideFields(
   scriptId: string,

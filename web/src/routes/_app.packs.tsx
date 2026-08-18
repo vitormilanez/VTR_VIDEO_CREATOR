@@ -28,6 +28,7 @@ import {
   fetchPackVersions,
   generatePack,
   packSlidePreviewUrl,
+  packSlideThumbnailUrl,
   refreshPackAvatar,
   regeneratePackSlide,
   restorePackVersion,
@@ -879,9 +880,9 @@ function PacksPage() {
               ) : null}
 
               <div className="grid items-start gap-4 xl:grid-cols-[196px_minmax(0,392px)_minmax(0,1fr)]">
-                {/* Trilha: cada slide mostra a etapa educativa e o sinal de clareza. */}
+                {/* Trilha: PNGs pequenos em cache, sem abrir sete iframes. */}
                 <nav aria-label="Slides do carrossel" className="rounded-xl border bg-card p-2">
-                  <ol className="space-y-1">
+                  <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-1">
                     {pack.carousel.map((item, index) => {
                       const entry = clarity?.slides.find((row) => row.slide === index + 1);
                       const step =
@@ -893,33 +894,48 @@ function PacksPage() {
                             type="button"
                             onClick={() => setActiveSlide(index)}
                             aria-current={selected ? "true" : undefined}
+                            aria-label={`Abrir slide ${index + 1}: ${headlineOf(item)}`}
                             className={`w-full rounded-lg border px-2.5 py-2 text-left transition-colors ${
                               selected
                                 ? "border-primary bg-primary/5"
                                 : "border-transparent hover:border-primary/40 hover:bg-muted/50"
                             }`}
                           >
-                            <span className="flex items-center justify-between gap-2">
-                              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                                {String(index + 1).padStart(2, "0")}
+                            <span className="grid grid-cols-[68px_minmax(0,1fr)] items-start gap-2">
+                              <img
+                                src={packSlideThumbnailUrl(script.id, index, pack)}
+                                width={270}
+                                height={338}
+                                loading="eager"
+                                decoding="async"
+                                alt=""
+                                aria-hidden="true"
+                                className="aspect-[270/338] w-[68px] rounded-md border bg-muted object-cover shadow-sm"
+                              />
+                              <span className="min-w-0">
+                                <span className="flex items-center justify-between gap-2">
+                                  <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                                    {String(index + 1).padStart(2, "0")}
+                                  </span>
+                                  {entry?.warnings.length ? (
+                                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-warn" />
+                                  ) : (
+                                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-status-success" />
+                                  )}
+                                </span>
+                                <span className="mt-1 block text-xs font-medium leading-snug">
+                                  {step.title}
+                                </span>
+                                <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                                  {headlineOf(item)}
+                                </span>
+                                {entry ? (
+                                  <span className="mt-1 block">
+                                    <ClarityChip density={entry.density} />
+                                  </span>
+                                ) : null}
                               </span>
-                              {entry?.warnings.length ? (
-                                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-warn" />
-                              ) : (
-                                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-status-success" />
-                              )}
                             </span>
-                            <span className="mt-0.5 block text-xs font-medium leading-snug">
-                              {step.title}
-                            </span>
-                            <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
-                              {headlineOf(item)}
-                            </span>
-                            {entry ? (
-                              <span className="mt-1 block">
-                                <ClarityChip density={entry.density} />
-                              </span>
-                            ) : null}
                           </button>
                         </li>
                       );

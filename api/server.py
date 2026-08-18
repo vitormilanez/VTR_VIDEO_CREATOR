@@ -238,6 +238,7 @@ CUT_OUTPUTS = CONTENT_VIDEOS / "cortes"
 POST_PRODUCTION_OUTPUTS = CONTENT_VIDEOS / "pos-producao"
 PACK_AVATAR_ASSETS = ROOT / "data" / "pack_assets" / "avatars"
 PACK_PHOTO_ASSETS = ROOT / "data" / "pack_assets" / "photos"
+PACK_PREVIEWS = ROOT / "data" / "pack_previews"
 VIDEO_SLIDE_OUTPUTS = ROOT / "data" / "video_slides"
 COMPOSED_VIDEO_OUTPUTS = PRODUCED_VIDEO_OUTPUTS / "composicoes"
 STORY_SHOT_OUTPUTS = PRODUCED_VIDEO_OUTPUTS / "story-shots"
@@ -251,6 +252,7 @@ _STORY_PLAN_INFLIGHT: dict[str, Future[dict[str, Any]]] = {}
 _STORY_PLAN_INFLIGHT_LOCK = threading.Lock()
 _STORY_CRITIQUE_INFLIGHT: dict[str, Future[dict[str, Any]]] = {}
 _STORY_CRITIQUE_INFLIGHT_LOCK = threading.Lock()
+_PACK_PREVIEW_RENDER_LOCK = threading.Lock()
 
 
 def _paid_generation_lock(script_id: str) -> threading.RLock:
@@ -17081,6 +17083,105 @@ def get_pack_slide_preview(script_id: str, slide_index: int) -> HTMLResponse:
         theme_id=str(pack.get("themeId") or DEFAULT_PACK_THEME),
     )
     return HTMLResponse(document, headers={"Cache-Control": "no-store"})
+
+
+_PACK_THUMBNAIL_RENDER_VERSION = "pack-thumbnail-v1"
+
+
+def _pack_thumbnail_cache_directory(script_id: str, pack: dict[str, Any]) -> Path:
+    """Resolve uma geração imutável do cache visual deste Pack."""
+
+    updated_at = str(pack.get("updatedAt") or "")
+    if not updated_at:
+        # Packs históricos sem timestamp continuam corretos: a copy ocupa o
+        # papel do updatedAt até a próxima gravação normal pelo editor.
+        updated_at = hashlib.sha256(
+            json.dumps(
+                pack.get("carousel") or pack.get("slides") or [],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    identity = {
+        "renderVersion": _PACK_THUMBNAIL_RENDER_VERSION,
+        "updatedAt": updated_at,
+        "family": str(pack.get("family") or DEFAULT_PACK_FAMILY),
+        "themeId": str(pack.get("themeId") or DEFAULT_PACK_THEME),
+    }
+    pack_key = hashlib.sha256(script_id.encode("utf-8")).hexdigest()[:16]
+    generation_key = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    return PACK_PREVIEWS / pack_key / generation_key
+
+
+def _pack_thumbnail_cache_complete(directory: Path, slide_count: int) -> bool:
+    return (directory / ".ready").is_file() and all(
+        (directory / f"slide-{index:02d}.png").is_file()
+        for index in range(1, slide_count + 1)
+    )
+
+
+@app.get("/api/packs/{script_id}/slides/{slide_index}/thumb.png")
+def get_pack_slide_thumbnail(script_id: str, slide_index: int) -> FileResponse:
+    """Entrega PNG pequeno em cache; a primeira requisição renderiza os 7.
+
+    Sete ``img`` podem chegar em paralelo. O lock faz apenas a primeira abrir
+    o Chromium; as demais reaproveitam a mesma geração concluída. Nenhuma
+    etapa consulta Claude ou outro serviço externo.
+    """
+
+    from api.slides import render_pack_thumbnails
+
+    _find_script(script_id)
+    pack = _get_visual_pack(script_id)
+    if pack:
+        pack = _normalize_pack_design(pack)
+    carousel, _slide = _pack_slide_at(pack, slide_index)
+    assert pack is not None
+    directory = _pack_thumbnail_cache_directory(script_id, pack)
+    slide_count = len(carousel)
+
+    if not _pack_thumbnail_cache_complete(directory, slide_count):
+        with _PACK_PREVIEW_RENDER_LOCK:
+            if not _pack_thumbnail_cache_complete(directory, slide_count):
+                try:
+                    rendered = render_pack_thumbnails(
+                        directory,
+                        carousel,
+                        family=str(pack.get("family") or DEFAULT_PACK_FAMILY),
+                        theme_id=str(pack.get("themeId") or DEFAULT_PACK_THEME),
+                    )
+                    if int(rendered.get("images") or 0) != slide_count:
+                        raise RuntimeError(
+                            f"renderer devolveu {rendered.get('images', 0)} de {slide_count} miniaturas"
+                        )
+                    (directory / ".ready").write_text(
+                        json.dumps(
+                            {
+                                "slides": slide_count,
+                                "updatedAt": pack.get("updatedAt"),
+                                "family": pack.get("family"),
+                                "themeId": pack.get("themeId"),
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Nao foi possivel renderizar as miniaturas do Pack: {exc}",
+                    ) from exc
+
+    thumbnail = directory / f"slide-{slide_index + 1:02d}.png"
+    return FileResponse(
+        thumbnail,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.put("/api/packs/{script_id}/carousel/{slide_index}/fields")

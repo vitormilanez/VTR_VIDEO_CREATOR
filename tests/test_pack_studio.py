@@ -187,6 +187,50 @@ def test_caption_already_clean_is_not_rewritten() -> None:
     assert ensure_medical_publication_notice(clean) == clean
 
 
+def test_thumbnail_endpoint_renders_the_seven_slides_once_and_invalidates_cache(
+    no_claude: None,
+    stored_pack,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from api import server, slides
+
+    state, _versions = stored_pack
+    state["pack"]["updatedAt"] = "2026-08-18T10:00:00Z"
+    state["pack"]["family"] = "didatico"
+    state["pack"]["themeId"] = "soft-sage"
+    renders: list[tuple[str, str]] = []
+
+    def _render(output_dir, carousel, *, family: str, theme_id: str):
+        rows = list(carousel)
+        renders.append((family, theme_id))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(1, len(rows) + 1):
+            (output_dir / f"slide-{index:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        return {"images": len(rows), "width": 270, "height": 338}
+
+    monkeypatch.setattr(server, "PACK_PREVIEWS", tmp_path / "pack_previews")
+    monkeypatch.setattr(slides, "render_pack_thumbnails", _render)
+
+    first = server.get_pack_slide_thumbnail("s-test", 0)
+    seventh = server.get_pack_slide_thumbnail("s-test", 6)
+
+    assert renders == [("didatico", "soft-sage")]
+    assert first.path != seventh.path
+    assert first.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    state["pack"]["updatedAt"] = "2026-08-18T10:01:00Z"
+    after_copy = server.get_pack_slide_thumbnail("s-test", 0)
+    state["pack"]["family"] = "editorial"
+    after_family = server.get_pack_slide_thumbnail("s-test", 0)
+    state["pack"]["themeId"] = "soft-rose"
+    after_theme = server.get_pack_slide_thumbnail("s-test", 0)
+
+    assert len(renders) == 4
+    assert len({first.path, after_copy.path, after_family.path, after_theme.path}) == 4
+    assert renders[-1] == ("editorial", "soft-rose")
+
+
 # --------------------------------------------------------------------------
 # Export: o arquivo de texto precisa conter o conteúdo real do slide
 # --------------------------------------------------------------------------

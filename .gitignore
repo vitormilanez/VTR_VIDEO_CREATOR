@@ -49,3 +49,6 @@ content/videos/
 
 # Previews de avatar baixados automaticamente pelo catalogo HeyGen (cache local)
 data/pack_assets/avatars/
+
+# Miniaturas regeneraveis da trilha do Estudio de Pack
+data/pack_previews/

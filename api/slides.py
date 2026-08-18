@@ -31,6 +31,9 @@ from api.services.medical_identity import (
 
 ROOT = Path(__file__).resolve().parent.parent
 
+PACK_THUMBNAIL_WIDTH = 270
+PACK_THUMBNAIL_HEIGHT = 338
+
 COLORS = {
     "dark": "#0A1A2F",
     "deep": "#06121F",
@@ -641,4 +644,70 @@ def render_pack_images(
         "scale": 1,
         "family": family,
         "themeId": theme_id,
+    }
+
+
+def render_pack_thumbnails(
+    output_dir: Path,
+    carousel: Iterable[dict],
+    *,
+    family: str = "didatico",
+    theme_id: str = "ocean-deep",
+) -> dict[str, Any]:
+    """Renderiza a trilha inteira em um único Chromium, sem IA ou iframes.
+
+    O HTML continua sendo exatamente o mesmo do preview e do PNG final. O
+    ``transform`` apenas reduz a página de 1080×1350 para a miniatura 4:5; a
+    altura é arredondada para 338 px para não cortar a última meia linha.
+    """
+    from playwright.sync_api import sync_playwright
+
+    slides = list(carousel)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scale = PACK_THUMBNAIL_WIDTH / 1080
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        context = browser.new_context(
+            viewport={"width": PACK_THUMBNAIL_WIDTH, "height": PACK_THUMBNAIL_HEIGHT},
+            device_scale_factor=1,
+        )
+        page = context.new_page()
+        try:
+            for index, slide in enumerate(slides, start=1):
+                page.set_content(
+                    slide_html(
+                        slide,
+                        index=index,
+                        total=len(slides),
+                        family=family,
+                        theme_id=theme_id,
+                    ),
+                    wait_until="networkidle",
+                )
+                page.evaluate("document.fonts.ready")
+                page.add_style_tag(
+                    content=(
+                        "body{transform:scale("
+                        f"{scale}"
+                        ");transform-origin:top left}"
+                    )
+                )
+                page.screenshot(
+                    path=str(output_dir / f"slide-{index:02d}.png"),
+                    clip={
+                        "x": 0,
+                        "y": 0,
+                        "width": PACK_THUMBNAIL_WIDTH,
+                        "height": PACK_THUMBNAIL_HEIGHT,
+                    },
+                )
+        finally:
+            context.close()
+            browser.close()
+
+    return {
+        "images": len(slides),
+        "width": PACK_THUMBNAIL_WIDTH,
+        "height": PACK_THUMBNAIL_HEIGHT,
     }
