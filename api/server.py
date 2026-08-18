@@ -45,7 +45,7 @@ import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from api.cut_service import cancel_cut_job as cancel_cut_worker
 from api.cut_service import prepare_cut_job, process_cut_project
 from api.job_store import JobStore
@@ -15692,15 +15692,19 @@ class PackSlideItemIn(BaseModel):
 class PackSlideFieldsIn(BaseModel):
     """Edicao local de um slide. Nenhum campo aqui chama o Claude."""
 
+    model_config = ConfigDict(extra="forbid")
+
     eyebrow: str | None = Field(default=None, max_length=200)
     headline: str | None = Field(default=None, max_length=400)
     subheadline: str | None = Field(default=None, max_length=400)
+    coverNote: str | None = Field(default=None, max_length=400)
     body: str | None = Field(default=None, max_length=800)
     statistic: str | None = Field(default=None, max_length=40)
     quote: str | None = Field(default=None, max_length=400)
     cta: str | None = Field(default=None, max_length=120)
     footer: str | None = Field(default=None, max_length=300)
     caption: str | None = Field(default=None, max_length=300)
+    disclaimer: str | None = Field(default=None, max_length=300)
     item1: PackSlideItemIn | None = None
     item2: PackSlideItemIn | None = None
     item3: PackSlideItemIn | None = None
@@ -15817,11 +15821,28 @@ def _pack_grounding_errors(pack: dict[str, Any], pack_context: dict[str, Any]) -
     return errors
 
 
+def _forbidden_pack_claim(text: str, term: str) -> bool:
+    """Distingue uma promessa proibida de uma negação educativa explícita."""
+
+    pattern = re.compile(rf"(?<!\w){re.escape(_norm(term))}(?!\w)")
+    for match in pattern.finditer(text):
+        prefix = text[max(0, match.start() - 48) : match.start()]
+        explicitly_negated = re.search(
+            r"\b(?:nao|não|nem)\s+$"
+            r"|\b(?:nao|não)\s+(?:e|é|ha|há|existe|oferece|promete|representa|significa)\s+"
+            r"(?:(?:um|uma|o|a)\s+)?$",
+            prefix,
+        )
+        if not explicitly_negated:
+            return True
+    return False
+
+
 def _pack_compliance(pack: dict[str, Any]) -> dict[str, Any]:
     text = _norm(_pack_text(pack))
     issues: list[str] = []
     for term in DEFAULT_SETTINGS["palavrasProibidas"]:
-        if _norm(term) in text:
+        if _forbidden_pack_claim(text, term):
             issues.append(f"Palavra ou promessa proibida: {term}")
     for rule in MEDICAL_COMPLIANCE_RULES:
         if re.search(rule["pattern"], text):

@@ -243,6 +243,18 @@ def test_every_layout_declares_editable_fields_and_a_label() -> None:
         assert LAYOUT_LABELS.get(layout_id), layout_id
 
 
+def test_every_declared_editable_field_is_accepted_by_the_endpoint_contract() -> None:
+    from api import server
+
+    declared = {
+        field
+        for editable_fields in LAYOUT_EDITABLE_FIELDS.values()
+        for field in editable_fields
+    }
+
+    assert declared <= set(server.PackSlideFieldsIn.model_fields)
+
+
 # --------------------------------------------------------------------------
 # Custo: nenhuma operação local pode chamar o Claude
 # --------------------------------------------------------------------------
@@ -305,6 +317,34 @@ def test_editing_slide_text_never_calls_claude(no_claude: None, stored_pack) -> 
     assert [item["origin"] for item in versions] == ["edicao-manual"]
 
 
+def test_editing_cover_note_is_persisted_without_claude(no_claude: None, stored_pack) -> None:
+    from api import server
+
+    response = server.update_pack_carousel_fields(
+        "s-test",
+        0,
+        server.PackSlideFieldsIn(coverNote="Uma observação curta e educativa na capa."),
+    )
+
+    assert response["pack"]["carousel"][0]["fields"]["coverNote"] == (
+        "Uma observação curta e educativa na capa."
+    )
+
+
+def test_editing_cover_note_reports_the_layout_limit(no_claude: None, stored_pack) -> None:
+    from api import server
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as error:
+        server.update_pack_carousel_fields(
+            "s-test", 0, server.PackSlideFieldsIn(coverNote="x" * 181)
+        )
+
+    assert error.value.status_code == 422
+    assert "Mensagem na capa tem 181 caracteres" in str(error.value.detail)
+    assert "Abertura com foto comporta 180" in str(error.value.detail)
+
+
 def test_editing_rejects_text_that_does_not_fit_the_layout(no_claude: None, stored_pack) -> None:
     from api import server
     from fastapi import HTTPException
@@ -316,6 +356,41 @@ def test_editing_rejects_text_that_does_not_fit_the_layout(no_claude: None, stor
 
     assert error.value.status_code == 422
     assert "caracteres" in str(error.value.detail)
+
+
+def test_editing_allows_an_existing_explicit_negation_of_a_cure_claim(
+    no_claude: None, stored_pack
+) -> None:
+    from api import server
+
+    state, _versions = stored_pack
+    state["pack"]["carousel"][4]["fields"]["body"] = (
+        "Redução de gordura no fígado não cura fibrose."
+    )
+
+    response = server.update_pack_carousel_fields(
+        "s-test", 1, server.PackSlideFieldsIn(headline="Uma correção editorial local")
+    )
+
+    assert response["pack"]["carousel"][1]["fields"]["headline"] == (
+        "Uma correção editorial local"
+    )
+
+
+def test_editing_still_blocks_a_positive_cure_claim(no_claude: None, stored_pack) -> None:
+    from api import server
+    from fastapi import HTTPException
+
+    state, _versions = stored_pack
+    state["pack"]["carousel"][4]["fields"]["body"] = "Esta abordagem cura fibrose."
+
+    with pytest.raises(HTTPException) as error:
+        server.update_pack_carousel_fields(
+            "s-test", 1, server.PackSlideFieldsIn(headline="Uma correção editorial local")
+        )
+
+    assert error.value.status_code == 422
+    assert "Palavra ou promessa proibida: cura" in str(error.value.detail)
 
 
 def test_compliance_fields_of_the_last_slide_cannot_be_edited(no_claude: None, stored_pack) -> None:
