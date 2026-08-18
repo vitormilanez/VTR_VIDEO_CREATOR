@@ -291,7 +291,7 @@ def test_logs_never_include_full_script_source_or_secret(caplog: pytest.LogCaptu
     assert "input_words=" in caplog.text
 
 
-def test_failure_after_reservation_is_persisted_as_failed_safe() -> None:
+def test_failure_after_reservation_returns_and_persists_failed_safe_job() -> None:
     speech = words(100)
     script = {
         "id": "s-provider-failure",
@@ -333,18 +333,21 @@ def test_failure_after_reservation_is_persisted_as_failed_safe() -> None:
                     side_effect=ConnectionError("SEGREDO-DA-FALA"),
                 ),
             ):
-                with pytest.raises(ConnectionError):
-                    server.create_video(request)
+                result = server.create_video(request)
             saved = server._job_store().list("video")
         finally:
             server.OPERATIONAL_DB = original_database
             server.VIDEO_JOBS = original_jobs
 
+    assert result["ok"] is False
+    assert result["submissionFailed"] is True
     assert len(saved) == 1
+    assert result["job"]["id"] == saved[0]["id"]
     assert saved[0]["status"] == "erro"
     assert saved[0]["submissionState"] == "failed_safe"
     assert saved[0]["retrySafe"] is True
     assert "SEGREDO" not in saved[0]["erro"]
+    assert "SEGREDO" not in result["warning"]
 
 
 def test_reconciliation_distinguishes_safe_reservation_from_uncertain_submission() -> None:
