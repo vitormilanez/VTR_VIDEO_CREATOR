@@ -157,9 +157,23 @@ def _counter(index: int, total: int, *, light: bool = False) -> str:
 
 
 def _headline_size(layout_id: str, headline: str, base: int) -> int:
+    """Escala o titulo pela ocupacao real do limite do layout.
+
+    Antes a funcao so reduzia. Uma headline bem curta ficava no mesmo corpo de
+    uma headline no limite e deixava a tela ainda mais vazia; agora ela cresce
+    de forma controlada para ocupar a area util sem quebrar a caixa.
+    """
     maximum = int(LAYOUT_SPECS.get(layout_id, {}).get("max", {}).get("headline", max(len(headline), 1)))
     ratio = len(headline) / max(maximum, 1)
-    return base - 16 if ratio > 0.94 else base - 8 if ratio > 0.82 else base
+    if ratio > 0.94:
+        return base - 16
+    if ratio > 0.82:
+        return base - 8
+    if ratio < 0.34:
+        return base + 14
+    if ratio < 0.62:
+        return base + 8
+    return base
 
 
 def _copy_size(text: str, *, base: int, medium: int, small: int, medium_at: int, small_at: int) -> int:
@@ -242,18 +256,36 @@ def _big_statement(slide: dict[str, Any], index: int, total: int) -> str:
       <div class="statement-footer"><span>{_esc(f['footer'])}</span>{_counter(index,total,light=not light)}</div></section>"""
 
 
+def _question_footer(fields: dict[str, Any], index: int, total: int) -> str:
+    """Evita prometer uma resposta que o proximo card nao vai dar.
+
+    O texto padrao anterior era sempre "Resposta no proximo card", inclusive
+    quando a resposta ja estava no proprio slide e quando o slide seguinte era
+    o encerramento do carrossel.
+    """
+    saved = str(fields.get("footer") or "").strip()
+    if saved:
+        return saved
+    if index >= total - 1:
+        return ""
+    if str(fields.get("body") or "").strip():
+        return "Continua no próximo card"
+    return "Resposta no próximo card"
+
+
 def _question(slide: dict[str, Any], index: int, total: int) -> str:
     f = slide["fields"]
     dark = slide.get("variant") == "dark"
     size = _headline_size("question", f["headline"], 82)
+    has_body = bool(str(f.get("body") or "").strip())
     supporting_copy = (
-        f'<div class="question-answer"><p>{_esc(f["body"])}</p></div>' if str(f.get("body") or "").strip() else ""
+        f'<div class="question-answer"><p>{_esc(f["body"])}</p></div>' if has_body else ""
     )
     return f"""<section class="slide question {'bg-dark light-text' if dark else 'bg-light'}">
       {_brand(dark=dark)}<aside class="question-guide" aria-hidden="true"><span>Dúvida comum</span><div class="question-mark">?</div></aside>
       <div class="question-copy"><div class="question-label"><span>{index:02d}</span><div class="eyebrow">{_esc(f['eyebrow'] or 'Pergunta frequente')}</div></div>
         <h1 style="font-size:{size}px">{_esc(f['headline'])}</h1>{supporting_copy}</div>
-      <div class="footer-row"><span>{_esc(f['footer'] or 'Resposta no próximo card')}</span>{_counter(index,total,light=dark)}</div></section>"""
+      <div class="footer-row"><span>{_esc(_question_footer(f, index, total))}</span>{_counter(index,total,light=dark)}</div></section>"""
 
 
 def _myth_fact(slide: dict[str, Any], index: int, total: int) -> str:
@@ -300,13 +332,22 @@ def _explainer(slide: dict[str, Any], index: int, total: int) -> str:
             "step-final" if idx == len(items) else "",
             idx,
             item["title"] or item["text"],
-            f"<p>{item['text']}</p>" if item["text"] else "",
+            # Sem titulo, ``strong`` ja mostra o texto: repetir o mesmo trecho
+            # no paragrafo duplicava a frase dentro do cartao.
+            f"<p>{item['text']}</p>" if item["title"] and item["text"] else "",
         )
         for idx, item in enumerate(items, start=1)
     )
-    return f"""<section class="slide explainer bg-light">{_brand(dark=False)}<div class="explainer-copy">
-      <div class="eyebrow">{_esc(f['eyebrow'] or 'Como funciona')}</div><h1>{_esc(f['headline'])}</h1><p>{_esc(f['body'])}</p>
-      <div class="steps">{steps}</div></div><div class="explainer-footer"><span>{_esc(f['disclaimer'])}</span>{_counter(index,total)}</div></section>"""
+    # Sem etapas, a grade de cartoes saia em branco e o PNG terminava com
+    # metade da tela vazia. O estado de prosa usa o mesmo texto aprovado em
+    # um bloco editorial que ocupa a area util do slide.
+    prose = " explainer-prose" if not items else ""
+    body_size = _copy_size(str(f.get("body") or ""), base=46, medium=40, small=34, medium_at=180, small_at=280) if not items else 0
+    body_style = f' style="font-size:{body_size}px"' if not items else ""
+    steps_block = f'<div class="steps">{steps}</div>' if items else ""
+    return f"""<section class="slide explainer bg-light">{_brand(dark=False)}<div class="explainer-copy{prose}">
+      <div class="eyebrow">{_esc(f['eyebrow'] or 'Como funciona')}</div><h1>{_esc(f['headline'])}</h1><p{body_style}>{_esc(f['body'])}</p>
+      {steps_block}</div><div class="explainer-footer"><span>{_esc(f['disclaimer'])}</span>{_counter(index,total)}</div></section>"""
 
 
 def _doctor_quote(slide: dict[str, Any], index: int, total: int) -> str:
@@ -410,6 +451,35 @@ def _css() -> str:
     .three-copy{top:252px}.three-copy>h1{margin-top:22px;font-size:64px;line-height:1.05}.points{margin-top:48px;gap:30px}.point-row{gap:34px;padding-top:28px}.point-number{width:116px;font-size:58px}.point-row h3{font-size:40px}.point-row p{margin-top:10px;font-size:27px}
     .explainer-copy{top:246px}.explainer-copy h1{margin-top:24px;font-size:62px;line-height:1.06}.explainer-copy>p{margin-top:28px;max-width:900px;font-size:30px;line-height:1.46}.steps{margin-top:52px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.steps i{display:none}.step{width:auto;height:246px;padding:28px 26px;border:1px solid rgba(10,26,47,.14);border-radius:20px;background:{COLORS['white']};display:flex;flex-direction:column;justify-content:flex-start;gap:10px;color:{COLORS['dark']};box-shadow:0 14px 28px rgba(10,26,47,.05)}.step span{font-size:18px;font-weight:700;letter-spacing:.16em;color:{COLORS['teal']}}.step strong{font-size:31px;line-height:1.08;letter-spacing:-.02em}.step p{font-size:22px;line-height:1.3;color:{COLORS['body_dark']}}.step-final{background:{COLORS['dark']};color:{COLORS['light']};border-color:{COLORS['dark']};box-shadow:none}.step-final span{color:{COLORS['teal']}}.step-final p{color:{COLORS['body_light']}}.explainer-footer{padding-top:24px}
     html[data-theme='soft-sage'] .bg-light .eyebrow,html[data-theme='soft-rose'] .bg-light .eyebrow{color:{COLORS['body_dark']}}html[data-family='manifesto'] .question-guide,html[data-family='manifesto'] .step{border-radius:0}html[data-family='clinico'] .question-guide{border-radius:16px;box-shadow:0 18px 38px rgba(10,26,47,.08)}html[data-family='clinico'] .step{border-radius:16px;box-shadow:0 18px 38px rgba(10,26,47,.10)}
+    """
+    template += r"""
+    /* Ocupacao da tela.
+       As colunas de copy eram ancoradas por um ``top`` fixo e paravam onde o
+       texto acabava. Um slide curto deixava 500-700px de area morta acima do
+       rodape, o que no feed le como carrossel inacabado. Aqui elas passam a
+       ser caixas com topo e base definidos, distribuindo o conteudo entre a
+       marca e o rodape. Copy longa continua cabendo porque o bloco cresce
+       para cima a partir da base. */
+    /* Banda util = entre a marca (topo) e o rodape. O conteudo e centrado
+       nela: copy curta fica opticamente equilibrada em vez de concentrar toda
+       a area morta embaixo, e copy longa cresce para os dois lados. */
+    .question-copy{top:268px;bottom:186px;right:350px;gap:30px;justify-content:center}
+    .question-guide{top:268px;bottom:186px;height:auto;max-height:470px;margin:auto 0}
+    .big-statement .statement-copy{top:280px;bottom:206px;right:304px;justify-content:center}
+    .big-statement .statement-index{top:280px;bottom:206px;height:max-content;margin:auto 0}
+    .three-copy{top:236px;bottom:168px;display:flex;flex-direction:column}
+    .three-copy .points{margin-top:44px;flex:1;justify-content:space-around}
+    .three-points .point-row{border-top:1px solid rgba(10,26,47,.14)}
+    .explainer-copy{top:236px;bottom:164px;display:flex;flex-direction:column}
+    .explainer-copy .steps{margin-top:auto}
+    .explainer-prose>p{margin-top:44px;max-width:900px;font-weight:500;line-height:1.42;letter-spacing:-.01em;color:{COLORS['body_dark']}}
+    .explainer-prose{justify-content:flex-start}
+    .explainer-prose::after{content:"";display:block;margin-top:auto;width:180px;height:10px;background:{COLORS['teal']}}
+    .stat-copy{top:274px;bottom:190px;justify-content:center}
+    .number-stat .footer-row{padding-top:24px}
+    .quote-copy{top:280px;bottom:300px;display:flex;flex-direction:column;justify-content:center}
+    .myth-fact .fact-panel{justify-content:center}
+    .do-dont .compare-list{flex:1;justify-content:center}
     """
     for name, value in COLORS.items():
         template = template.replace("{COLORS['" + name + "']}", value)

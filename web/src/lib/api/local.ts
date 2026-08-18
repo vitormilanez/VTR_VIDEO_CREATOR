@@ -1027,34 +1027,37 @@ export interface PackCompliance {
 export async function generatePack(
   script: Script,
   presentation?: { family: PackFamily; themeId: PackTheme },
-): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+): Promise<PackMutationResult> {
   const res = await fetch(`${BASE}/api/packs/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...script, scriptId: script.id, ...presentation }),
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel gerar o pack."));
-  return (await res.json()) as { pack: GeneratedPack; compliance: PackCompliance };
+  return (await res.json()) as PackMutationResult;
 }
 
 /** Salva composição e tema do Pack localmente. Não chama Claude nem altera a copy. */
 export async function updatePackPresentation(
   scriptId: string,
   presentation: { family: PackFamily; themeId: PackTheme },
-): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+): Promise<PackMutationResult> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack;
     compliance: PackCompliance;
+    clarity: PackClarity;
   }>(`/api/packs/${encodeURIComponent(scriptId)}/presentation`, {
     method: "PUT",
     body: JSON.stringify(presentation),
   });
-  return { pack: response.pack, compliance: response.compliance };
+  return { pack: response.pack, compliance: response.compliance, clarity: response.clarity };
 }
 
 export async function fetchPack(scriptId: string): Promise<{
   pack: GeneratedPack | null;
+  clarity: PackClarity | null;
+  versions: PackVersion[];
   productionProfile: ProductionProfile | null;
   outdatedAvatar: boolean;
   outdatedIdentity?: boolean;
@@ -1065,6 +1068,8 @@ export async function fetchPack(scriptId: string): Promise<{
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack | null;
+    clarity?: PackClarity | null;
+    versions?: PackVersion[];
     productionProfile: ProductionProfile | null;
     outdatedAvatar: boolean;
     outdatedIdentity?: boolean;
@@ -1074,6 +1079,8 @@ export async function fetchPack(scriptId: string): Promise<{
   }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
   return {
     pack: response.pack,
+    clarity: response.clarity ?? null,
+    versions: response.versions ?? [],
     productionProfile: response.productionProfile,
     outdatedAvatar: response.outdatedAvatar,
     outdatedIdentity: response.outdatedIdentity,
@@ -1083,19 +1090,20 @@ export async function fetchPack(scriptId: string): Promise<{
   };
 }
 
-export async function refreshPackAvatar(scriptId: string): Promise<{
-  pack: GeneratedPack;
-  compliance: PackCompliance;
-  productionProfile: ProductionProfile | null;
-  outdatedAvatar: boolean;
-  outdatedIdentity?: boolean;
-}> {
+export async function refreshPackAvatar(scriptId: string): Promise<
+  PackMutationResult & {
+    productionProfile?: ProductionProfile | null;
+    outdatedAvatar?: boolean;
+    outdatedIdentity?: boolean;
+  }
+> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack;
     compliance: PackCompliance;
-    productionProfile: ProductionProfile | null;
-    outdatedAvatar: boolean;
+    clarity: PackClarity;
+    productionProfile?: ProductionProfile | null;
+    outdatedAvatar?: boolean;
     outdatedIdentity?: boolean;
   }>(`/api/packs/${encodeURIComponent(scriptId)}/refresh-avatar`, { method: "POST" });
   return response;
@@ -1106,16 +1114,17 @@ export async function updatePackCarouselLayout(
   scriptId: string,
   slideIndex: number,
   layout: PackLayout,
-): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+): Promise<PackMutationResult> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack;
     compliance: PackCompliance;
+    clarity: PackClarity;
   }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/layout`, {
     method: "PUT",
     body: JSON.stringify({ layout }),
   });
-  return { pack: response.pack, compliance: response.compliance };
+  return { pack: response.pack, compliance: response.compliance, clarity: response.clarity };
 }
 
 export async function fetchPackPhotoAssets(): Promise<PackPhotoAsset[]> {
@@ -1130,16 +1139,17 @@ export async function updatePackCarouselPhoto(
   scriptId: string,
   slideIndex: number,
   photoAssetId: string | null,
-): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+): Promise<PackMutationResult> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack;
     compliance: PackCompliance;
+    clarity: PackClarity;
   }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/photo`, {
     method: "PUT",
     body: JSON.stringify({ photoAssetId }),
   });
-  return { pack: response.pack, compliance: response.compliance };
+  return { pack: response.pack, compliance: response.compliance, clarity: response.clarity };
 }
 
 /** Salva a mensagem opcional exibida somente na caixa do Slide 1. */
@@ -1156,6 +1166,136 @@ export async function updatePackCoverNote(
     body: JSON.stringify({ text }),
   });
   return { pack: response.pack, compliance: response.compliance };
+}
+
+/** Sinais locais de clareza por slide. Calculados no backend, sem tokens. */
+export interface PackSlideClarity {
+  slide: number;
+  layoutId: PackLayout;
+  characters: number;
+  words: number;
+  comfortMin: number;
+  comfortMax: number;
+  density: "vazio" | "equilibrado" | "denso";
+  longestSentenceWords: number;
+  jargon: string[];
+  warnings: string[];
+}
+
+export interface PackClarity {
+  slides: PackSlideClarity[];
+  balanced: number;
+  empty: number[];
+  dense: number[];
+  repeatedAdjacentLayouts: PackLayout[];
+  distinctLayouts: number;
+  warnings: number;
+}
+
+export interface PackVersion {
+  id: number;
+  origin: string;
+  summary: string;
+  createdAt: string;
+}
+
+export interface PackLayoutSpec {
+  id: PackLayout;
+  label: string;
+  required: string[];
+  maxChars: Record<string, number>;
+  itemMaxChars: Record<string, number>;
+  usesPhoto: boolean;
+  comfort: [number, number];
+  editableFields: Array<keyof PackSlideFields>;
+}
+
+export interface PackDesignSystem {
+  slideCount: number;
+  schemaVersion: string;
+  families: PackFamily[];
+  themes: PackTheme[];
+  fieldLabels: Record<string, string>;
+  layouts: PackLayoutSpec[];
+}
+
+export interface PackMutationResult {
+  pack: GeneratedPack;
+  compliance: PackCompliance;
+  clarity: PackClarity;
+}
+
+/** Vocabulario fechado do Pack: layouts, rotulos e limites reais por campo. */
+export async function fetchPackDesignSystem(): Promise<PackDesignSystem> {
+  const response = await requestJson<{ ok: boolean } & PackDesignSystem>(
+    "/api/packs/design-system",
+    { method: "GET" },
+  );
+  return response;
+}
+
+/** URL do preview: e o mesmo HTML que vira PNG na exportacao. */
+export function packSlidePreviewUrl(scriptId: string, slideIndex: number): string {
+  return `${BASE}/api/packs/${encodeURIComponent(scriptId)}/slides/${slideIndex}/preview`;
+}
+
+/** Edita o texto de um slide localmente. Nao chama o Claude. */
+export async function updatePackSlideFields(
+  scriptId: string,
+  slideIndex: number,
+  fields: Partial<
+    Pick<
+      PackSlideFields,
+      | "eyebrow"
+      | "headline"
+      | "subheadline"
+      | "body"
+      | "statistic"
+      | "quote"
+      | "cta"
+      | "footer"
+      | "caption"
+      | "item1"
+      | "item2"
+      | "item3"
+    >
+  >,
+): Promise<PackMutationResult> {
+  return requestJson<{ ok: boolean } & PackMutationResult>(
+    `/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/fields`,
+    { method: "PUT", body: JSON.stringify(fields) },
+  );
+}
+
+/** Reescreve um unico slide com o menor contexto possivel. */
+export async function regeneratePackSlide(
+  scriptId: string,
+  slideIndex: number,
+  instruction = "",
+): Promise<PackMutationResult & { regeneratedSlide: number }> {
+  return requestJson<{ ok: boolean } & PackMutationResult & { regeneratedSlide: number }>(
+    `/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/regenerate`,
+    { method: "POST", body: JSON.stringify({ instruction }) },
+  );
+}
+
+export async function fetchPackVersions(scriptId: string): Promise<PackVersion[]> {
+  const response = await requestJson<{ ok: boolean; versions: PackVersion[] }>(
+    `/api/packs/${encodeURIComponent(scriptId)}/versions`,
+    { method: "GET" },
+  );
+  return response.versions ?? [];
+}
+
+/** Volta para uma versao anterior do conteudo. Nao chama o Claude. */
+export async function restorePackVersion(
+  scriptId: string,
+  versionId: number,
+): Promise<PackMutationResult> {
+  return requestJson<{ ok: boolean } & PackMutationResult>(
+    `/api/packs/${encodeURIComponent(scriptId)}/versions/${versionId}/restore`,
+    { method: "POST" },
+  );
 }
 
 export interface PackForExport {

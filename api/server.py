@@ -33,6 +33,7 @@ import time
 import unicodedata
 import uuid
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -43,7 +44,7 @@ from urllib.parse import quote, quote_plus, unquote, urlparse
 import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from api.cut_service import cancel_cut_job as cancel_cut_worker
 from api.cut_service import prepare_cut_job, process_cut_project
@@ -52,7 +53,12 @@ from api.pack_design import (
     DEFAULT_PACK_FAMILY,
     DEFAULT_PACK_THEME,
     FALLBACK_LAYOUTS,
+    FIELD_LABELS,
     FIELD_NAMES,
+    LAYOUT_COMFORT_RANGE,
+    LAYOUT_EDITABLE_FIELDS,
+    LAYOUT_LABELS,
+    PHOTO_LAYOUTS,
     LEGACY_PACK_THEME,
     LAYOUT_SPECS,
     PACK_FAMILIES,
@@ -63,10 +69,14 @@ from api.pack_design import (
     PHOTO_LIBRARY,
     educational_flow_issues,
     empty_fields,
+    normalize_fields,
     normalize_slide,
+    pack_clarity,
     pack_slides,
     photo_asset,
     repair_pack_copy,
+    slide_clarity,
+    slide_export_text,
     slide_headline,
     validate_pack_contract,
 )
@@ -479,6 +489,16 @@ def _ai_db() -> sqlite3.Connection:
             source_avatar_id TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS visual_pack_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            script_id TEXT NOT NULL,
+            pack_json TEXT NOT NULL,
+            origin TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS visual_pack_versions_script_idx
+            ON visual_pack_versions(script_id, id DESC);
         CREATE TABLE IF NOT EXISTS provider_capabilities (
             provider TEXT PRIMARY KEY,
             cli_version TEXT NOT NULL,
@@ -2921,6 +2941,97 @@ def _get_visual_pack(script_id: str) -> dict[str, Any] | None:
     if not row:
         return None
     return json.loads(str(row["pack_json"]))
+
+
+PACK_VERSION_HISTORY_LIMIT = 12
+
+
+def _pack_version_summary(pack: dict[str, Any]) -> str:
+    slides = [slide for slide in pack_slides(pack) if isinstance(slide, dict)]
+    headline = slide_headline(slides[0]) if slides else ""
+    return f"{len(slides)} slides · {headline}"[:180]
+
+
+def _snapshot_visual_pack(script_id: str, origin: str) -> int | None:
+    """Guarda a versao atual antes de sobrescrever o Pack.
+
+    Regerar copy custa tokens e antes destruia a versao anterior sem aviso.
+    Com o historico, voltar para uma versao ja aprovada e uma operacao local:
+    nenhuma chamada ao Claude.
+    """
+    current = _get_visual_pack(script_id)
+    if not isinstance(current, dict) or not pack_slides(current):
+        return None
+    conn = _ai_db()
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO visual_pack_versions(script_id, pack_json, origin, summary, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                script_id,
+                json.dumps(current, ensure_ascii=False),
+                origin,
+                _pack_version_summary(current),
+                str(current.get("updatedAt") or _now()),
+            ),
+        )
+        conn.execute(
+            """
+            DELETE FROM visual_pack_versions
+            WHERE script_id = ?
+              AND id NOT IN (
+                  SELECT id FROM visual_pack_versions
+                  WHERE script_id = ? ORDER BY id DESC LIMIT ?
+              )
+            """,
+            (script_id, script_id, PACK_VERSION_HISTORY_LIMIT),
+        )
+        conn.commit()
+        return int(cursor.lastrowid or 0) or None
+    finally:
+        conn.close()
+
+
+def _list_visual_pack_versions(script_id: str) -> list[dict[str, Any]]:
+    conn = _ai_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, origin, summary, created_at FROM visual_pack_versions
+            WHERE script_id = ? ORDER BY id DESC
+            """,
+            (script_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": int(row["id"]),
+            "origin": str(row["origin"]),
+            "summary": str(row["summary"]),
+            "createdAt": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def _get_visual_pack_version(script_id: str, version_id: int) -> dict[str, Any] | None:
+    conn = _ai_db()
+    try:
+        row = conn.execute(
+            "SELECT pack_json FROM visual_pack_versions WHERE script_id = ? AND id = ?",
+            (script_id, version_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    try:
+        return json.loads(str(row["pack_json"]))
+    except json.JSONDecodeError:
+        return None
 
 
 def _save_visual_pack(script_id: str, pack: dict[str, Any]) -> dict[str, Any]:
@@ -15573,6 +15684,32 @@ class PackPresentationIn(BaseModel):
     themeId: Literal["modernist-red", "ocean-deep", "soft-sage", "soft-rose"]
 
 
+class PackSlideItemIn(BaseModel):
+    title: str = Field(default="", max_length=200)
+    text: str = Field(default="", max_length=400)
+
+
+class PackSlideFieldsIn(BaseModel):
+    """Edicao local de um slide. Nenhum campo aqui chama o Claude."""
+
+    eyebrow: str | None = Field(default=None, max_length=200)
+    headline: str | None = Field(default=None, max_length=400)
+    subheadline: str | None = Field(default=None, max_length=400)
+    body: str | None = Field(default=None, max_length=800)
+    statistic: str | None = Field(default=None, max_length=40)
+    quote: str | None = Field(default=None, max_length=400)
+    cta: str | None = Field(default=None, max_length=120)
+    footer: str | None = Field(default=None, max_length=300)
+    caption: str | None = Field(default=None, max_length=300)
+    item1: PackSlideItemIn | None = None
+    item2: PackSlideItemIn | None = None
+    item3: PackSlideItemIn | None = None
+
+
+class PackSlideRegenerateIn(BaseModel):
+    instruction: str = Field(default="", max_length=400)
+
+
 def _pack_text(pack: dict[str, Any]) -> str:
     values: list[str] = []
 
@@ -16536,6 +16673,37 @@ def _pack_generation_context(script_id: str, script: dict[str, Any]) -> tuple[di
     return context, profile
 
 
+@app.get("/api/packs/design-system")
+def get_pack_design_system() -> dict:
+    """Vocabulario fechado do Pack: layouts, rotulos e limites de cada campo.
+
+    A interface consome isto para mostrar contadores reais durante a edicao,
+    em vez de duplicar os limites no frontend e sair de sincronia com o
+    renderer.
+    """
+    return {
+        "ok": True,
+        "slideCount": PACK_SLIDE_COUNT,
+        "schemaVersion": PACK_SCHEMA_VERSION,
+        "families": list(PACK_FAMILIES),
+        "themes": list(PACK_THEMES),
+        "fieldLabels": FIELD_LABELS,
+        "layouts": [
+            {
+                "id": layout_id,
+                "label": LAYOUT_LABELS.get(layout_id, layout_id),
+                "required": list(LAYOUT_SPECS[layout_id].get("required", ())),
+                "maxChars": LAYOUT_SPECS[layout_id].get("max", {}),
+                "itemMaxChars": LAYOUT_SPECS[layout_id].get("item_max", {}),
+                "usesPhoto": layout_id in PHOTO_LAYOUTS,
+                "comfort": list(LAYOUT_COMFORT_RANGE.get(layout_id, (60, 260))),
+                "editableFields": list(LAYOUT_EDITABLE_FIELDS.get(layout_id, ())),
+            }
+            for layout_id in PACK_LAYOUTS
+        ],
+    }
+
+
 @app.get("/api/packs/photo-assets")
 def list_pack_photo_assets() -> dict:
     return {"ok": True, "assets": _pack_photo_assets()}
@@ -16601,8 +16769,10 @@ def generate_pack(payload: PackIn) -> dict:
             if validation_errors:
                 pack = None
             else:
+                _snapshot_visual_pack(script_id, "geracao-completa")
                 _save_visual_pack(script_id, pack)
                 cached["pack"] = pack
+                cached["clarity"] = pack_clarity(pack)
                 return cached
         elif pack is None:
             pass
@@ -16765,8 +16935,9 @@ def generate_pack(payload: PackIn) -> dict:
         family=payload.family,
         theme_id=payload.themeId,
     )
+    _snapshot_visual_pack(script_id, "geracao-completa")
     _save_visual_pack(script_id, pack)
-    response = {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
+    response = _pack_envelope(pack)
     _ai_cache_put("packs.generate", cache_payload, response)
     return response
 
@@ -16821,6 +16992,9 @@ def get_pack(script_id: str) -> dict:
     return {
         "ok": True,
         "pack": pack,
+        "compliance": _pack_compliance(pack) if pack else None,
+        "clarity": pack_clarity(pack) if pack else None,
+        "versions": _list_visual_pack_versions(script_id),
         "productionProfile": profile,
         "outdatedAvatar": outdated,
         "outdatedIdentity": outdated,
@@ -16828,6 +17002,338 @@ def get_pack(script_id: str) -> dict:
         "outdatedEducationalFlow": outdated_educational_flow,
         "requiredSlideCount": PACK_SLIDE_COUNT,
     }
+
+
+def _pack_envelope(pack: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """Resposta padrao do Pack, com os sinais locais de clareza ja calculados.
+
+    ``clarity`` e determinístico e roda em memoria: ele nao consome tokens e
+    permite que a interface mostre densidade e alertas por slide sem precisar
+    de nenhuma chamada de IA.
+    """
+    return {
+        "ok": True,
+        "pack": pack,
+        "compliance": _pack_compliance(pack),
+        "clarity": pack_clarity(pack),
+        **extra,
+    }
+
+
+def _pack_slide_at(pack: dict[str, Any] | None, slide_index: int) -> tuple[list[Any], dict[str, Any]]:
+    if not pack:
+        raise HTTPException(status_code=404, detail="Pack visual nao encontrado para este roteiro.")
+    carousel = pack.get("carousel")
+    if not isinstance(carousel, list) or not 0 <= slide_index < len(carousel):
+        raise HTTPException(status_code=404, detail="Slide do carrossel nao encontrado.")
+    slide = carousel[slide_index]
+    if not isinstance(slide, dict):
+        raise HTTPException(status_code=422, detail="Slide do carrossel invalido.")
+    return carousel, slide
+
+
+# Campos travados por compliance no slide final. O editor pode reescrever a
+# mensagem, mas nao pode apagar o aviso educativo nem a identificacao do CRM.
+_PACK_LOCKED_FINAL_FIELDS = ("disclaimer", "footer")
+
+
+@app.get("/api/packs/{script_id}/slides/{slide_index}/preview", response_class=HTMLResponse)
+def get_pack_slide_preview(script_id: str, slide_index: int) -> HTMLResponse:
+    """Devolve o HTML exato que vira PNG, para pre-visualizacao na interface.
+
+    E o mesmo ``slide_html`` usado na exportacao: o que aparece na tela e
+    literalmente o arquivo que sera publicado. Nenhuma chamada de IA.
+    """
+    from api.slides import slide_html
+
+    _find_script(script_id)
+    pack = _get_visual_pack(script_id)
+    if pack:
+        pack = _normalize_pack_design(pack)
+    carousel, slide = _pack_slide_at(pack, slide_index)
+    assert pack is not None
+    document = slide_html(
+        slide,
+        index=slide_index + 1,
+        total=len(carousel),
+        family=str(pack.get("family") or DEFAULT_PACK_FAMILY),
+        theme_id=str(pack.get("themeId") or DEFAULT_PACK_THEME),
+    )
+    return HTMLResponse(document, headers={"Cache-Control": "no-store"})
+
+
+@app.put("/api/packs/{script_id}/carousel/{slide_index}/fields")
+def update_pack_carousel_fields(
+    script_id: str,
+    slide_index: int,
+    payload: PackSlideFieldsIn,
+) -> dict:
+    """Edita o texto de um slide localmente, sem regenerar nada com IA.
+
+    Este endpoint existe porque, antes, corrigir uma unica palavra exigia
+    regerar os 7 slides com o Claude — caro e destrutivo para as outras telas
+    que ja estavam aprovadas.
+    """
+    _find_script(script_id)
+    pack = _get_visual_pack(script_id)
+    carousel, slide = _pack_slide_at(pack, slide_index)
+    assert pack is not None
+
+    normalized_slide = normalize_slide(slide, slide_index)
+    layout_id = normalized_slide["layoutId"]
+    spec = LAYOUT_SPECS[layout_id]
+    fields = dict(normalized_slide["fields"])
+    is_final_slide = slide_index == len(carousel) - 1
+
+    updates = payload.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=422, detail="Envie ao menos um campo para editar.")
+
+    max_chars = spec.get("max", {})
+    item_max = spec.get("item_max", {})
+    for name, value in updates.items():
+        if is_final_slide and name in _PACK_LOCKED_FINAL_FIELDS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"O campo {FIELD_LABELS.get(name, name)} do ultimo slide e travado por compliance.",
+            )
+        if name.startswith("item"):
+            title = re.sub(r"\s+", " ", str(value.get("title") or "")).strip()
+            text = re.sub(r"\s+", " ", str(value.get("text") or "")).strip()
+            for part, part_value in (("title", title), ("text", text)):
+                limit = item_max.get(part)
+                if limit and len(part_value) > limit:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"{FIELD_LABELS.get(name, name)} ({part}) tem {len(part_value)} caracteres; "
+                            f"o layout {LAYOUT_LABELS.get(layout_id, layout_id)} comporta {limit}."
+                        ),
+                    )
+            fields[name] = {"title": title, "text": text}
+            continue
+        text = re.sub(r"\s+", " ", str(value)).strip()
+        limit = max_chars.get(name)
+        if limit and len(text) > limit:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{FIELD_LABELS.get(name, name)} tem {len(text)} caracteres; "
+                    f"o layout {LAYOUT_LABELS.get(layout_id, layout_id)} comporta {limit}."
+                ),
+            )
+        if name == "cta" and has_prohibited_editorial_cta(text):
+            raise HTTPException(
+                status_code=422,
+                detail="A chamada nao pode ser comercial ou de captacao de pacientes.",
+            )
+        fields[name] = text
+
+    candidate_slide = {**normalized_slide, "fields": normalize_fields(fields)}
+    candidate_pack = deepcopy(pack)
+    candidate_carousel = list(candidate_pack.get("carousel") or [])
+    candidate_carousel[slide_index] = candidate_slide
+    candidate_pack["carousel"] = candidate_carousel
+    candidate_pack["slides"] = candidate_carousel
+
+    compliance = _pack_compliance(candidate_pack)
+    if compliance["blocked"]:
+        raise HTTPException(
+            status_code=422,
+            detail="O texto precisa respeitar as regras medicas: " + "; ".join(compliance["issues"]),
+        )
+    slide_errors = [
+        error
+        for error in validate_pack_contract(candidate_pack)
+        if error.startswith(f"slide {slide_index + 1}:")
+    ]
+    if slide_errors:
+        raise HTTPException(status_code=422, detail="; ".join(slide_errors))
+
+    # Uma unica versao de seguranca por ciclo de geracao: assim o editor pode
+    # voltar ao texto original sem transformar cada salvamento em um snapshot.
+    history = _list_visual_pack_versions(script_id)
+    if not history or history[0]["origin"] != "edicao-manual":
+        _snapshot_visual_pack(script_id, "edicao-manual")
+
+    candidate_pack["designPlan"] = _pack_design_plan(candidate_pack)
+    saved = _save_visual_pack(script_id, candidate_pack)
+    return _pack_envelope(saved)
+
+
+_PACK_SLIDE_REPAIR_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"fields": _PACK_FIELDS_SCHEMA},
+    "required": ["fields"],
+}
+
+_PACK_SLIDE_SYSTEM = """Voce e o editor de carrosseis do Instituto Guilherme Martins.
+Reescreva APENAS um slide, em portugues do Brasil, devolvendo somente o objeto ``fields``.
+
+- Mantenha o mesmo assunto e a mesma etapa educativa do slide.
+- Uma unica ideia, frase completa, linguagem cotidiana e tom acolhedor.
+- Explique termos tecnicos; se citar um numero, diga o que ele significa.
+- Nao prescreva medicamento, dose ou conduta; nao prometa resultado; sem alarmismo.
+- Nao invente dado, estudo, estatistica ou comparacao que nao esteja no contexto enviado.
+- Sem emoji, markdown ou referencia ao design.
+- Respeite os limites de caracteres do layout informado.
+- Campos que o layout nao usa devem voltar como string vazia ou item vazio.
+"""
+
+
+@app.post("/api/packs/{script_id}/carousel/{slide_index}/regenerate")
+def regenerate_pack_slide(
+    script_id: str,
+    slide_index: int,
+    payload: PackSlideRegenerateIn,
+) -> dict:
+    """Reescreve um unico slide com o menor contexto possivel.
+
+    Regerar o Pack inteiro reescreve 7 slides e descarta telas ja aprovadas.
+    Aqui o pedido leva apenas: a etapa educativa daquela posicao, o texto atual
+    do slide, os limites do layout e as regras de compliance — nada de
+    historico, nem dos outros slides, nem do design system completo.
+    """
+    script = _find_script(script_id)
+    pack = _get_visual_pack(script_id)
+    carousel, slide = _pack_slide_at(pack, slide_index)
+    assert pack is not None
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="Defina ANTHROPIC_API_KEY no arquivo .env para reescrever com o Claude.",
+        )
+
+    pack_context, _profile = _pack_generation_context(script_id, script)
+    brief = pack_context.get("narrativeBrief") if isinstance(pack_context.get("narrativeBrief"), dict) else {}
+    slide_plan = next(
+        (
+            step
+            for step in brief.get("slidePlan", [])
+            if isinstance(step, dict) and int(step.get("slide") or 0) == slide_index + 1
+        ),
+        {},
+    )
+    normalized_slide = normalize_slide(slide, slide_index)
+    layout_id = normalized_slide["layoutId"]
+    spec = LAYOUT_SPECS[layout_id]
+
+    compact_context = {
+        "slide": slide_index + 1,
+        "layoutId": layout_id,
+        "layoutLabel": LAYOUT_LABELS.get(layout_id, layout_id),
+        "stage": slide_plan.get("stage"),
+        "purpose": slide_plan.get("purpose"),
+        "writingDirection": slide_plan.get("writingDirection"),
+        "sourceText": slide_plan.get("sourceText"),
+        "currentFields": {
+            name: value
+            for name, value in normalized_slide["fields"].items()
+            if value and value != {"title": "", "text": ""}
+        },
+        "requiredFields": list(spec.get("required", ())),
+        "maxChars": spec.get("max", {}),
+        "itemMaxChars": spec.get("item_max", {}),
+        "editorRequest": payload.instruction.strip(),
+        # Somente a orientacao legivel de cada regra: os padroes regex sao
+        # aplicados localmente e nao precisam ir para o prompt.
+        "compliance": [rule["detalhe"] for rule in MEDICAL_COMPLIANCE_RULES],
+    }
+    cache_payload = {"context": compact_context, "schemaVersion": PACK_SCHEMA_VERSION}
+    cached = _ai_cache_get("packs.slide.regenerate", cache_payload)
+    new_fields = cached.get("fields") if isinstance(cached, dict) else None
+
+    if not isinstance(new_fields, dict):
+        import anthropic
+
+        try:
+            client = anthropic.Anthropic()
+            model = os.getenv("ANTHROPIC_PACK_MODEL", "claude-haiku-4-5")
+            message = client.messages.create(
+                model=model,
+                max_tokens=700,
+                system=[{"type": "text", "text": _PACK_SLIDE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                output_config={"format": {"type": "json_schema", "schema": _PACK_SLIDE_REPAIR_SCHEMA}},
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "CONTEXTO DO SLIDE:\n"
+                        + json.dumps(compact_context, ensure_ascii=False, indent=2),
+                    }
+                ],
+            )
+            _record_anthropic_usage("packs.slide.regenerate", model, message)
+            parsed = json.loads("".join(getattr(block, "text", "") for block in message.content))
+            new_fields = parsed.get("fields")
+        except anthropic.APIStatusError as exc:
+            raise HTTPException(status_code=502, detail=f"Claude respondeu {exc.status_code}: {exc.message}")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Falha ao chamar o Claude: {exc}")
+        if not isinstance(new_fields, dict):
+            raise HTTPException(status_code=502, detail="O Claude nao devolveu os campos do slide.")
+        _ai_cache_put("packs.slide.regenerate", cache_payload, {"fields": new_fields})
+
+    candidate_slide = {**normalized_slide, "fields": normalize_fields(new_fields)}
+    if slide_index == len(carousel) - 1:
+        # O ultimo slide mantem os campos travados de compliance.
+        for name in _PACK_LOCKED_FINAL_FIELDS:
+            candidate_slide["fields"][name] = normalized_slide["fields"].get(name, "")
+
+    candidate_pack = deepcopy(pack)
+    candidate_carousel = list(candidate_pack.get("carousel") or [])
+    candidate_carousel[slide_index] = candidate_slide
+    candidate_pack["carousel"] = candidate_carousel
+    candidate_pack["slides"] = candidate_carousel
+    candidate_pack = repair_pack_copy(candidate_pack)
+    candidate_pack = _attach_pack_metadata(candidate_pack, script_id=script_id, pack_context=pack_context)
+    candidate_pack = _apply_pack_presentation(
+        candidate_pack,
+        family=pack.get("family"),
+        theme_id=pack.get("themeId"),
+    )
+    candidate_pack["sourceAvatarId"] = pack.get("sourceAvatarId")
+    candidate_pack["avatarAsset"] = pack.get("avatarAsset")
+
+    compliance = _pack_compliance(candidate_pack)
+    if compliance["blocked"]:
+        raise HTTPException(
+            status_code=422,
+            detail="O slide reescrito nao passou no compliance: " + "; ".join(compliance["issues"]),
+        )
+    slide_errors = [
+        error
+        for error in validate_pack_contract(candidate_pack)
+        if error.startswith(f"slide {slide_index + 1}:")
+    ]
+    if slide_errors:
+        raise HTTPException(status_code=502, detail="; ".join(slide_errors))
+
+    _snapshot_visual_pack(script_id, "regeneracao-do-slide")
+    saved = _save_visual_pack(script_id, candidate_pack)
+    return _pack_envelope(saved, regeneratedSlide=slide_index + 1)
+
+
+@app.get("/api/packs/{script_id}/versions")
+def list_pack_versions(script_id: str) -> dict:
+    _find_script(script_id)
+    return {"ok": True, "versions": _list_visual_pack_versions(script_id)}
+
+
+@app.post("/api/packs/{script_id}/versions/{version_id}/restore")
+def restore_pack_version(script_id: str, version_id: int) -> dict:
+    """Volta para uma versao anterior do conteudo sem gastar tokens."""
+    _find_script(script_id)
+    previous = _get_visual_pack_version(script_id, version_id)
+    if not previous:
+        raise HTTPException(status_code=404, detail="Versao do Pack nao encontrada.")
+    _snapshot_visual_pack(script_id, "antes-da-restauracao")
+    restored = _normalize_pack_design(previous)
+    restored["designPlan"] = _pack_design_plan(restored)
+    saved = _save_visual_pack(script_id, restored)
+    return _pack_envelope(saved, restoredFrom=version_id)
 
 
 @app.put("/api/packs/{script_id}/carousel/{slide_index}/layout")
@@ -16856,8 +17362,8 @@ def update_pack_carousel_layout(
     # recupere o layout anterior.
     pack["slides"] = carousel
     pack["designPlan"] = _pack_design_plan(pack)
-    _save_visual_pack(script_id, pack)
-    return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
+    saved = _save_visual_pack(script_id, pack)
+    return _pack_envelope(saved)
 
 
 @app.put("/api/packs/{script_id}/presentation")
@@ -16876,8 +17382,8 @@ def update_pack_presentation(
         family=payload.family,
         theme_id=payload.themeId,
     )
-    _save_visual_pack(script_id, pack)
-    return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
+    saved = _save_visual_pack(script_id, pack)
+    return _pack_envelope(saved)
 
 
 @app.put("/api/packs/{script_id}/carousel/{slide_index}/photo")
@@ -16920,8 +17426,8 @@ def update_pack_carousel_photo(
     # existe para compatibilidade com Packs antigos e precisa refletir a troca.
     pack["slides"] = carousel
     pack["designPlan"] = _pack_design_plan(pack)
-    _save_visual_pack(script_id, pack)
-    return {"ok": True, "pack": pack, "compliance": _pack_compliance(pack)}
+    saved = _save_visual_pack(script_id, pack)
+    return _pack_envelope(saved)
 
 
 @app.put("/api/packs/{script_id}/carousel/cover-note")
@@ -16952,8 +17458,8 @@ def update_pack_cover_note(
             detail="A mensagem da capa precisa respeitar as regras médicas: "
             + "; ".join(compliance["issues"]),
         )
-    _save_visual_pack(script_id, pack)
-    return {"ok": True, "pack": pack, "compliance": compliance}
+    saved = _save_visual_pack(script_id, pack)
+    return _pack_envelope(saved)
 
 
 @app.post("/api/packs/{script_id}/refresh-avatar")
@@ -16969,6 +17475,7 @@ def refresh_pack_avatar(script_id: str) -> dict:
             "ok": True,
             "pack": pack,
             "compliance": _pack_compliance(pack),
+            "clarity": pack_clarity(pack),
             "productionProfile": _profile,
             "outdatedAvatar": False,
             "outdatedIdentity": False,
@@ -16980,15 +17487,13 @@ def refresh_pack_avatar(script_id: str) -> dict:
         avatar_asset=avatar_asset,
         pack_context=pack_context,
     )
-    _save_visual_pack(script_id, refreshed)
-    return {
-        "ok": True,
-        "pack": refreshed,
-        "compliance": _pack_compliance(refreshed),
-        "productionProfile": _profile,
-        "outdatedAvatar": False,
-        "outdatedIdentity": False,
-    }
+    saved = _save_visual_pack(script_id, refreshed)
+    return _pack_envelope(
+        saved,
+        productionProfile=_profile,
+        outdatedAvatar=False,
+        outdatedIdentity=False,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -17113,13 +17618,8 @@ def export_pack(payload: PackExportIn) -> dict:
 
         # --- 2-textos: um arquivo por peca, sem repeticao ---
         carrossel_txt = "\n\n".join(
-            f"── SLIDE {i:02d} · {slide['layoutId']} ──\n{slide_headline(slide)}\n\n"
-            f"{slide['fields'].get('body') or slide['fields'].get('subheadline') or ''}"
-            + (
-                f"\n\nMensagem na capa: {slide['fields'].get('coverNote')}"
-                if slide['fields'].get('coverNote')
-                else ""
-            )
+            f"── SLIDE {i:02d} · {LAYOUT_LABELS.get(slide['layoutId'], slide['layoutId'])} ──\n"
+            + slide_export_text(slide)
             for i, slide in enumerate(carousel_rows, start=1)
         )
         (txt_root / "carrossel.txt").write_text(carrossel_txt + "\n", encoding="utf-8")

@@ -101,6 +101,25 @@ def strip_prohibited_editorial_ctas(value: Any) -> str:
     return "\n\n".join(clean_blocks).strip()
 
 
+_ORPHAN_SEPARATORS = r"|–—·•"
+
+
+def _drop_orphan_separators(value: str) -> str:
+    """Remove separadores que sobraram ao retirar o aviso do meio da copy.
+
+    Sem esta limpeza, uma legenda escrita como ``"... individual. | Dr. ..."``
+    volta do saneamento terminando em ``"| "``, e esse resto aparece
+    literalmente no arquivo ``legenda.txt`` entregue para publicacao.
+    """
+    lines: list[str] = []
+    for line in value.split("\n"):
+        cleaned = re.sub(rf"^[\s{_ORPHAN_SEPARATORS}]+", "", line)
+        cleaned = re.sub(rf"[\s{_ORPHAN_SEPARATORS}]+$", "", cleaned)
+        cleaned = re.sub(rf"\s*[{_ORPHAN_SEPARATORS}]\s*(?=[{_ORPHAN_SEPARATORS}])", "", cleaned)
+        lines.append(cleaned.rstrip())
+    return "\n".join(lines)
+
+
 def _without_existing_publication_notice(value: Any) -> str:
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     text = re.sub(re.escape(MEDICAL_PUBLICATION_NOTICE), "", text, flags=re.I)
@@ -108,6 +127,7 @@ def _without_existing_publication_notice(value: Any) -> str:
     text = re.sub(re.escape(MEDICAL_PROFESSIONAL_IDENTIFICATION), "", text, flags=re.I)
     for notice in _LEGACY_PUBLICATION_NOTICES:
         text = re.sub(re.escape(notice), "", text, flags=re.I)
+    text = _drop_orphan_separators(text)
     return re.sub(r"\n{3,}", "\n\n", strip_prohibited_editorial_ctas(text)).strip()
 
 
@@ -116,6 +136,12 @@ def ensure_medical_publication_notice(value: Any) -> str:
     sanitized = strip_prohibited_editorial_ctas(value)
     if has_medical_publication_notice(sanitized):
         text = sanitized.replace("\r\n", "\n").replace("\r", "\n").strip()
+        # O aviso ja esta presente, mas a copy pode ter sido escrita como
+        # "... individual. | Dr. ...". Sem esta limpeza o separador orfao
+        # continua visivel na legenda entregue para publicacao.
+        head, separator, tail = text.partition(MEDICAL_EDUCATIONAL_DISCLAIMER)
+        if separator:
+            text = f"{_drop_orphan_separators(head).rstrip()}\n\n{separator}{tail}".lstrip()
         return re.sub(r"\n{3,}", "\n\n", text)
     text = _without_existing_publication_notice(sanitized)
     text = re.sub(r"\n{3,}", "\n\n", text)

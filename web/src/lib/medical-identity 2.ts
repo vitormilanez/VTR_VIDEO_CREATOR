@@ -70,6 +70,27 @@ export function stripProhibitedEditorialCtas(value: string): string {
     .trim();
 }
 
+/**
+ * Separadores que sobram quando o aviso e removido do meio da copy.
+ *
+ * Uma legenda escrita como "... individual. | Dr. Guilherme ..." voltava do
+ * saneamento terminando em "| ", e esse resto aparecia literalmente na legenda
+ * copiada para publicacao.
+ */
+const orphanSeparators = "|\u2013\u2014\u00b7\u2022";
+
+function dropOrphanSeparators(value: string): string {
+  return value
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(new RegExp(`^[\\s${orphanSeparators}]+`), "")
+        .replace(new RegExp(`[\\s${orphanSeparators}]+$`), "")
+        .trimEnd(),
+    )
+    .join("\n");
+}
+
 function withoutExistingPublicationNotice(value: string): string {
   let clean = value.replace(/\r\n?/g, "\n").trim();
   for (const notice of [
@@ -80,7 +101,9 @@ function withoutExistingPublicationNotice(value: string): string {
   ]) {
     clean = clean.replace(new RegExp(notice.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "");
   }
-  return stripProhibitedEditorialCtas(clean).replace(/\n{3,}/g, "\n\n").trim();
+  return stripProhibitedEditorialCtas(dropOrphanSeparators(clean))
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export function ensureMedicalPublicationNotice(value: string, maximum?: number): string {
@@ -88,7 +111,16 @@ export function ensureMedicalPublicationNotice(value: string, maximum?: number):
     .replace(/\r\n?/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  if (hasMedicalPublicationNotice(clean)) return clean;
+  if (hasMedicalPublicationNotice(clean)) {
+    // O aviso ja esta presente, mas a copy pode ter sido escrita com o
+    // separador colado nele. Limpa apenas o trecho antes do aviso.
+    const cut = clean.indexOf(MEDICAL_EDUCATIONAL_DISCLAIMER);
+    if (cut > 0) {
+      const head = dropOrphanSeparators(clean.slice(0, cut)).trimEnd();
+      return `${head}\n\n${clean.slice(cut)}`.replace(/\n{3,}/g, "\n\n").trim();
+    }
+    return clean;
+  }
 
   const body = withoutExistingPublicationNotice(clean);
   const content =

@@ -1,11 +1,13 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
+import { ConfirmAction } from "@/components/confirm-action";
 import { EmptyState } from "@/components/empty-state";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -21,33 +23,46 @@ import { useStore } from "@/lib/store";
 import {
   exportPack,
   fetchPack,
+  fetchPackDesignSystem,
   fetchPackPhotoAssets,
+  fetchPackVersions,
   generatePack,
+  packSlidePreviewUrl,
   refreshPackAvatar,
-  updatePackCoverNote,
+  regeneratePackSlide,
+  restorePackVersion,
+  updatePackCarouselLayout,
   updatePackCarouselPhoto,
   updatePackPresentation,
+  updatePackSlideFields,
   type GeneratedPack,
+  type PackClarity,
+  type PackDesignSystem,
   type PackFamily,
   type PackLayout,
+  type PackLayoutSpec,
   type PackPhotoAsset,
   type PackSlide,
+  type PackSlideFields,
+  type PackSlideItem,
   type PackTheme,
+  type PackVersion,
 } from "@/lib/api/local";
 import {
-  CalendarPlus,
+  AlertTriangle,
   CheckCircle2,
   Copy,
   FileText,
   FolderDown,
+  History,
   Image as ImageIcon,
-  Layers3,
   Loader2,
   MessageSquareText,
   Palette,
   PanelsTopLeft,
   RefreshCw,
-  Video,
+  RotateCcw,
+  Sparkles,
   Wand2,
 } from "lucide-react";
 
@@ -57,15 +72,16 @@ export const Route = createFileRoute("/_app/packs")({
   }),
   head: () => ({
     meta: [
-      { title: "Pack de conteudo | AI Video Creator" },
+      { title: "Estúdio de Pack | AI Video Creator" },
       {
         name: "description",
-        content: "Carrossel editorial de 7 slides criado a partir de um roteiro.",
+        content:
+          "Carrossel educativo de 7 slides com preview real, edição por slide e exportação em 1080 × 1350.",
       },
-      { property: "og:title", content: "Pack de conteudo | AI Video Creator" },
+      { property: "og:title", content: "Estúdio de Pack | AI Video Creator" },
       {
         property: "og:description",
-        content: "Sete slides, legenda pronta e identidade visual consistente.",
+        content: "Veja o slide exatamente como ele vai ser publicado antes de exportar.",
       },
     ],
   }),
@@ -76,50 +92,15 @@ type Pack = GeneratedPack;
 
 const REQUIRED_CAROUSEL_SLIDES = 7;
 
-const layoutLabels: Record<PackLayout, string> = {
-  hero_photo: "Abertura com foto",
-  photo_split: "Explicação com foto",
-  big_statement: "Ideia-chave",
-  question: "Dúvida comum",
-  myth_fact: "Mito e fato",
-  number_stat: "Dado explicado",
-  three_points: "Pontos para entender",
-  explainer: "Explicação simples",
-  doctor_quote: "Orientação profissional",
-  photo_overlay: "Tema com foto",
-  do_dont: "Evite e prefira",
-  cta_photo: "Resumo e próximo passo",
-};
-
+/** Etapas da trilha educativa. Espelham EDUCATIONAL_SLIDE_STEPS no backend. */
 const educationalSteps = [
-  {
-    title: "Tema e objetivo",
-    description: "Apresenta o assunto e o que será explicado.",
-  },
-  {
-    title: "Contexto",
-    description: "Organiza a dúvida de forma neutra.",
-  },
-  {
-    title: "Conceito-chave",
-    description: "Define o ponto central em linguagem simples.",
-  },
-  {
-    title: "Como funciona",
-    description: "Conecta a explicação em etapas curtas.",
-  },
-  {
-    title: "O que a fonte mostra",
-    description: "Traduz o dado ou a evidência com contexto.",
-  },
-  {
-    title: "Cuidados e limites",
-    description: "Mostra a ressalva necessária com clareza.",
-  },
-  {
-    title: "Resumo e próximo passo",
-    description: "Retoma o aprendizado e orienta com segurança.",
-  },
+  { title: "Tema e objetivo", description: "Apresenta o assunto e o que será explicado." },
+  { title: "Contexto", description: "Organiza a dúvida de forma neutra." },
+  { title: "Conceito-chave", description: "Define o ponto central em linguagem simples." },
+  { title: "Como funciona", description: "Conecta a explicação em etapas curtas." },
+  { title: "O que a fonte mostra", description: "Traduz o dado ou a evidência com contexto." },
+  { title: "Cuidados e limites", description: "Mostra a ressalva necessária com clareza." },
+  { title: "Resumo e próximo passo", description: "Retoma o aprendizado e orienta com segurança." },
 ] as const;
 
 const familyOptions: Array<{
@@ -192,6 +173,34 @@ const themeOptions: Array<{
   },
 ];
 
+const versionOriginLabels: Record<string, string> = {
+  "geracao-completa": "Antes de gerar nova versão",
+  "regeneracao-do-slide": "Antes de reescrever um slide",
+  "edicao-manual": "Antes da primeira edição manual",
+  "antes-da-restauracao": "Antes de restaurar",
+};
+
+const densityTone: Record<string, { label: string; className: string; dot: string }> = {
+  vazio: {
+    label: "Pouco texto",
+    className: "text-status-warn",
+    dot: "bg-status-warn",
+  },
+  equilibrado: {
+    label: "Equilibrado",
+    className: "text-status-success",
+    dot: "bg-status-success",
+  },
+  denso: {
+    label: "Texto denso",
+    className: "text-status-warn",
+    dot: "bg-status-warn",
+  },
+};
+
+/** Campos longos ganham textarea; o resto usa input de uma linha. */
+const longFields = new Set<string>(["body", "coverNote", "quote", "disclaimer", "caption"]);
+
 function familyOf(pack: Pack): PackFamily {
   return pack.family ?? "didatico";
 }
@@ -200,20 +209,12 @@ function themeOf(pack: Pack): PackTheme {
   return pack.themeId ?? "ocean-deep";
 }
 
-function educationalStepOf(index: number) {
-  return educationalSteps[index] ?? educationalSteps[educationalSteps.length - 1];
-}
-
-const photoLayouts = new Set<PackLayout>([
-  "hero_photo",
-  "photo_split",
-  "doctor_quote",
-  "photo_overlay",
-  "cta_photo",
-]);
-
 function layoutOf(slide: PackSlide): PackLayout {
   return slide.layoutId ?? slide.layout ?? "explainer";
+}
+
+function fieldsOf(slide: PackSlide): PackSlideFields | undefined {
+  return slide.fields;
 }
 
 function headlineOf(slide: PackSlide): string {
@@ -232,32 +233,62 @@ function photoIdOf(slide: PackSlide): string {
   return slide.fields?.photoId || slide.photoAsset?.id || "";
 }
 
-function detailLines(slide: PackSlide): string[] {
-  const fields = slide.fields;
-  if (!fields) return slide.highlight ? [slide.highlight] : [];
-  const lines: string[] = [];
-  if (fields.statistic) lines.push(fields.statistic);
-  for (const item of [fields.item1, fields.item2, fields.item3]) {
-    const line = [item?.title, item?.text].filter(Boolean).join(": ");
-    if (line) lines.push(line);
+function isItemField(name: string): boolean {
+  return name === "item1" || name === "item2" || name === "item3";
+}
+
+function itemValue(fields: PackSlideFields | undefined, name: string): PackSlideItem {
+  const raw = fields ? (fields as unknown as Record<string, unknown>)[name] : undefined;
+  if (raw && typeof raw === "object") {
+    const item = raw as Partial<PackSlideItem>;
+    return { title: item.title ?? "", text: item.text ?? "" };
   }
-  if (fields.caption && fields.caption !== bodyOf(slide)) lines.push(fields.caption);
-  if (fields.coverNote) lines.push(`Mensagem na capa: ${fields.coverNote}`);
-  if (fields.cta) lines.push(fields.cta);
-  if (fields.disclaimer) lines.push(fields.disclaimer);
-  if (layoutOf(slide) === "cta_photo" && fields.footer) lines.push(fields.footer);
-  return lines;
+  return { title: "", text: "" };
+}
+
+function textValue(fields: PackSlideFields | undefined, name: string): string {
+  const raw = fields ? (fields as unknown as Record<string, unknown>)[name] : undefined;
+  return typeof raw === "string" ? raw : "";
+}
+
+type SlideDraft = Record<string, string | PackSlideItem>;
+
+function draftFromSlide(slide: PackSlide, spec: PackLayoutSpec | undefined): SlideDraft {
+  const fields = fieldsOf(slide);
+  const draft: SlideDraft = {};
+  for (const name of spec?.editableFields ?? []) {
+    draft[name] = isItemField(name) ? itemValue(fields, name) : textValue(fields, name);
+  }
+  return draft;
+}
+
+function draftsEqual(a: SlideDraft, b: SlideDraft): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function captionOf(pack: Pack): string {
   return formatPublicationCaption(pack.caption, pack.hashtags ?? []);
 }
 
-function formatCarousel(slides: Pack["carousel"]): string {
+function detailLines(slide: PackSlide): string[] {
+  const fields = slide.fields;
+  if (!fields) return [];
+  const lines: string[] = [];
+  if (fields.statistic) lines.push(fields.statistic);
+  for (const item of [fields.item1, fields.item2, fields.item3]) {
+    const line = [item?.title, item?.text].filter(Boolean).join(": ");
+    if (line) lines.push(line);
+  }
+  if (fields.quote) lines.push(fields.quote);
+  if (fields.cta) lines.push(fields.cta);
+  return lines;
+}
+
+function formatCarousel(slides: Pack["carousel"], labelOf: (layout: PackLayout) => string): string {
   return slides
     .map((slide, index) => {
       const content = [headlineOf(slide), bodyOf(slide), ...detailLines(slide)].filter(Boolean);
-      return `Slide ${index + 1} — ${layoutLabels[layoutOf(slide)]}\n${content.join("\n")}`;
+      return `Slide ${index + 1} — ${labelOf(layoutOf(slide))}\n${content.join("\n")}`;
     })
     .join("\n\n");
 }
@@ -269,76 +300,128 @@ function copyText(label: string, text: string) {
     .catch(() => toast.error("Nao consegui copiar automaticamente."));
 }
 
+/**
+ * Preview do slide.
+ *
+ * O iframe carrega exatamente o HTML que o renderer transforma em PNG, então o
+ * que aparece aqui é o arquivo que será publicado. É local e determinístico:
+ * navegar entre slides, trocar tema, família ou foto não consome tokens.
+ */
+function SlidePreview({
+  scriptId,
+  slideIndex,
+  nonce,
+  width,
+}: {
+  scriptId: string;
+  slideIndex: number;
+  nonce: number;
+  width: number;
+}) {
+  const scale = width / 1080;
+  return (
+    <div
+      className="overflow-hidden rounded-xl border bg-muted shadow-sm"
+      style={{ width, height: Math.round(1350 * scale) }}
+    >
+      <iframe
+        key={`${scriptId}-${slideIndex}-${nonce}`}
+        title={`Preview do slide ${slideIndex + 1}`}
+        src={`${packSlidePreviewUrl(scriptId, slideIndex)}?v=${nonce}`}
+        width={1080}
+        height={1350}
+        loading="lazy"
+        sandbox="allow-scripts"
+        className="origin-top-left border-0"
+        style={{ transform: `scale(${scale})` }}
+      />
+    </div>
+  );
+}
+
+function ClarityChip({ density }: { density: string }) {
+  const tone = densityTone[density] ?? densityTone.equilibrado;
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${tone.className}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} aria-hidden="true" />
+      {tone.label}
+    </span>
+  );
+}
+
 function PacksPage() {
   const scripts = useStore((state) => state.scripts);
-  const jobs = useStore((state) => state.videoJobs);
-  const posts = useStore((state) => state.calendarPosts);
   const search = Route.useSearch();
   const navigate = useNavigate();
+
   const [selectedId, setSelectedId] = useState(search.scriptId ?? scripts[0]?.id ?? "");
   const [pack, setPack] = useState<Pack | null>(null);
+  const [clarity, setClarity] = useState<PackClarity | null>(null);
+  const [versions, setVersions] = useState<PackVersion[]>([]);
+  const [designSystem, setDesignSystem] = useState<PackDesignSystem | null>(null);
   const [photoAssets, setPhotoAssets] = useState<PackPhotoAsset[]>([]);
+
+  const [activeSlide, setActiveSlide] = useState(0);
+  const [draft, setDraft] = useState<SlideDraft>({});
+  const [previewNonce, setPreviewNonce] = useState(0);
+
   const [loadingPack, setLoadingPack] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [savingPhotoIndex, setSavingPhotoIndex] = useState<number | null>(null);
-  const [coverNoteDraft, setCoverNoteDraft] = useState("");
-  const [savingCoverNote, setSavingCoverNote] = useState(false);
+  const [savingSlide, setSavingSlide] = useState(false);
+  const [regeneratingSlide, setRegeneratingSlide] = useState(false);
+  const [savingLayout, setSavingLayout] = useState(false);
+  const [savingPhoto, setSavingPhoto] = useState(false);
   const [savingPresentation, setSavingPresentation] = useState(false);
-  const [presentationStatus, setPresentationStatus] = useState("");
+  const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [regenerateNote, setRegenerateNote] = useState("");
+  const [localStatus, setLocalStatus] = useState("");
+
   const [outdatedAvatar, setOutdatedAvatar] = useState(false);
   const [outdatedPackSchema, setOutdatedPackSchema] = useState(false);
   const [outdatedEducationalFlow, setOutdatedEducationalFlow] = useState(false);
 
   const script = scripts.find((item) => item.id === selectedId);
-  const videoJob = script ? jobs.find((job) => job.scriptId === script.id) : undefined;
-  const scheduledPost = script ? posts.find((post) => post.scriptId === script.id) : undefined;
   const packIsLegacy =
     pack !== null && (pack.carousel.length !== REQUIRED_CAROUSEL_SLIDES || outdatedPackSchema);
-  const savedCoverNote = pack?.carousel[0]?.fields?.coverNote ?? "";
-  const coverNoteDirty = coverNoteDraft.trim().replace(/\s+/g, " ") !== savedCoverNote;
+
+  const layoutSpecs = useMemo(() => {
+    const map = new Map<PackLayout, PackLayoutSpec>();
+    for (const layout of designSystem?.layouts ?? []) map.set(layout.id, layout);
+    return map;
+  }, [designSystem]);
+
+  const labelOf = useCallback(
+    (layout: PackLayout) => layoutSpecs.get(layout)?.label ?? layout,
+    [layoutSpecs],
+  );
+
+  const slide = pack?.carousel[activeSlide];
+  const slideLayout = slide ? layoutOf(slide) : undefined;
+  const slideSpec = slideLayout ? layoutSpecs.get(slideLayout) : undefined;
+  const slideClarity = clarity?.slides.find((entry) => entry.slide === activeSlide + 1);
+  const savedDraft = useMemo(
+    () => (slide ? draftFromSlide(slide, slideSpec) : {}),
+    [slide, slideSpec],
+  );
+  const dirty = !draftsEqual(draft, savedDraft);
+
+  /** Recebe o resultado de qualquer mutação local e sincroniza a tela. */
+  const applyMutation = useCallback((next: { pack: Pack; clarity: PackClarity }) => {
+    setPack(next.pack);
+    setClarity(next.clarity);
+    setPreviewNonce((value) => value + 1);
+  }, []);
 
   useEffect(() => {
-    setCoverNoteDraft(savedCoverNote);
-  }, [savedCoverNote]);
-
-  useEffect(() => {
-    if (!script) {
-      setPack(null);
-      setOutdatedAvatar(false);
-      setOutdatedPackSchema(false);
-      setOutdatedEducationalFlow(false);
-      return;
-    }
     let cancelled = false;
-    setLoadingPack(true);
-    fetchPack(script.id)
+    fetchPackDesignSystem()
       .then((data) => {
-        if (!cancelled) {
-          setPack(data.pack);
-          setOutdatedAvatar(
-            Boolean((data.outdatedIdentity ?? data.outdatedAvatar) && !data.outdatedPackSchema),
-          );
-          setOutdatedPackSchema(data.outdatedPackSchema ?? false);
-          setOutdatedEducationalFlow(data.outdatedEducationalFlow ?? false);
-        }
+        if (!cancelled) setDesignSystem(data);
       })
-      .catch((error) => {
-        if (!cancelled) {
-          setPack(null);
-          toast.error(error instanceof Error ? error.message : "Nao foi possivel carregar o Pack.");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingPack(false);
+      .catch(() => {
+        if (!cancelled) setDesignSystem(null);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [script]);
-
-  useEffect(() => {
-    let cancelled = false;
     fetchPackPhotoAssets()
       .then((assets) => {
         if (!cancelled) setPhotoAssets(assets);
@@ -351,6 +434,59 @@ function PacksPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!script) {
+      setPack(null);
+      setClarity(null);
+      setVersions([]);
+      setOutdatedAvatar(false);
+      setOutdatedPackSchema(false);
+      setOutdatedEducationalFlow(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingPack(true);
+    setActiveSlide(0);
+    fetchPack(script.id)
+      .then((data) => {
+        if (cancelled) return;
+        setPack(data.pack);
+        setClarity(data.clarity);
+        setVersions(data.versions);
+        setPreviewNonce((value) => value + 1);
+        setOutdatedAvatar(
+          Boolean((data.outdatedIdentity ?? data.outdatedAvatar) && !data.outdatedPackSchema),
+        );
+        setOutdatedPackSchema(data.outdatedPackSchema ?? false);
+        setOutdatedEducationalFlow(data.outdatedEducationalFlow ?? false);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setPack(null);
+        toast.error(error instanceof Error ? error.message : "Nao foi possivel carregar o Pack.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingPack(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [script]);
+
+  // O rascunho acompanha o slide selecionado e o conteúdo salvo. Trocar de
+  // slide, de tema ou de foto nunca descarta texto: o rascunho é reconstruído
+  // a partir do que está persistido.
+  useEffect(() => {
+    setDraft(savedDraft);
+  }, [savedDraft]);
+
+  const refreshVersions = useCallback(() => {
+    if (!script) return;
+    fetchPackVersions(script.id)
+      .then(setVersions)
+      .catch(() => undefined);
+  }, [script]);
+
   function selectScript(scriptId: string) {
     setSelectedId(scriptId);
     navigate({ to: "/packs", search: { scriptId }, replace: true });
@@ -359,16 +495,20 @@ function PacksPage() {
   async function generateVisualPack() {
     if (!script) return;
     setGenerating(true);
-    const notice = toast.loading("Criando carrossel com texto direto e design editorial...");
+    const notice = toast.loading("Criando os 7 slides com o Claude...");
     try {
       const response = await generatePack(
         script,
         pack ? { family: familyOf(pack), themeId: themeOf(pack) } : undefined,
       );
       setPack(response.pack);
+      setClarity(response.clarity);
+      setPreviewNonce((value) => value + 1);
+      setActiveSlide(0);
       setOutdatedAvatar(false);
       setOutdatedPackSchema(false);
       setOutdatedEducationalFlow(false);
+      refreshVersions();
       toast.success("Carrossel educativo de 7 slides criado.", { id: notice });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Nao foi possivel gerar o Pack.", {
@@ -379,25 +519,107 @@ function PacksPage() {
     }
   }
 
+  async function saveSlideText() {
+    if (!script || !pack || !dirty || savingSlide) return;
+    setSavingSlide(true);
+    try {
+      const response = await updatePackSlideFields(
+        script.id,
+        activeSlide,
+        draft as Parameters<typeof updatePackSlideFields>[2],
+      );
+      applyMutation(response);
+      refreshVersions();
+      setLocalStatus("Texto salvo. Nenhum token do Claude usado.");
+      toast.success(`Slide ${activeSlide + 1} atualizado sem chamar o Claude.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel salvar o slide.");
+    } finally {
+      setSavingSlide(false);
+    }
+  }
+
+  async function regenerateSlide() {
+    if (!script || !pack || regeneratingSlide) return;
+    setRegeneratingSlide(true);
+    const notice = toast.loading(`Reescrevendo apenas o slide ${activeSlide + 1}...`);
+    try {
+      const response = await regeneratePackSlide(script.id, activeSlide, regenerateNote.trim());
+      applyMutation(response);
+      refreshVersions();
+      setRegenerateNote("");
+      setLocalStatus("Slide reescrito. Os outros 6 slides foram preservados.");
+      toast.success(`Slide ${activeSlide + 1} reescrito. Os outros slides não mudaram.`, {
+        id: notice,
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel reescrever o slide.", {
+        id: notice,
+      });
+    } finally {
+      setRegeneratingSlide(false);
+    }
+  }
+
+  async function changeLayout(layout: PackLayout) {
+    if (!script || !pack || savingLayout || slideLayout === layout) return;
+    setSavingLayout(true);
+    try {
+      const response = await updatePackCarouselLayout(script.id, activeSlide, layout);
+      applyMutation(response);
+      setLocalStatus("Layout trocado localmente, sem regenerar o texto.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel trocar o layout.");
+    } finally {
+      setSavingLayout(false);
+    }
+  }
+
+  async function choosePhoto(photoAssetId: string) {
+    if (!script || !pack || savingPhoto || !slide || photoIdOf(slide) === photoAssetId) return;
+    setSavingPhoto(true);
+    try {
+      const response = await updatePackCarouselPhoto(script.id, activeSlide, photoAssetId);
+      applyMutation(response);
+      setLocalStatus("Foto trocada localmente. Exporte quando quiser gerar os PNGs.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a foto.");
+    } finally {
+      setSavingPhoto(false);
+    }
+  }
+
   async function choosePresentation(next: { family: PackFamily; themeId: PackTheme }) {
     if (!script || !pack || savingPresentation) return;
     if (familyOf(pack) === next.family && themeOf(pack) === next.themeId) return;
-
     const previousPack = pack;
     setSavingPresentation(true);
-    setPresentationStatus("Salvando preferência visual…");
     setPack({ ...pack, ...next });
     try {
       const response = await updatePackPresentation(script.id, next);
-      setPack(response.pack);
-      setPresentationStatus("Estilo salvo sem usar tokens do Claude.");
-      toast.success("Estilo do Pack atualizado sem regenerar o texto.");
+      applyMutation(response);
+      setLocalStatus("Estilo salvo sem usar tokens do Claude.");
     } catch (error) {
       setPack(previousPack);
-      setPresentationStatus("");
       toast.error(error instanceof Error ? error.message : "Nao foi possivel salvar o estilo.");
     } finally {
       setSavingPresentation(false);
+    }
+  }
+
+  async function restoreVersion(versionId: number) {
+    if (!script || restoringVersion !== null) return;
+    setRestoringVersion(versionId);
+    try {
+      const response = await restorePackVersion(script.id, versionId);
+      applyMutation(response);
+      refreshVersions();
+      setLocalStatus("Versão restaurada sem usar tokens do Claude.");
+      toast.success("Versão restaurada. Nenhuma chamada ao Claude foi feita.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nao foi possivel restaurar a versao.");
+    } finally {
+      setRestoringVersion(null);
     }
   }
 
@@ -407,7 +629,7 @@ function PacksPage() {
     const notice = toast.loading("Atualizando a identidade visual sem regenerar a copy...");
     try {
       const response = await refreshPackAvatar(script.id);
-      setPack(response.pack);
+      applyMutation(response);
       setOutdatedAvatar(false);
       setOutdatedPackSchema(false);
       toast.success("Identidade do Pack atualizada sem nova chamada ao Claude.", { id: notice });
@@ -429,7 +651,7 @@ function PacksPage() {
       );
       return;
     }
-    setSaving(true);
+    setExporting(true);
     const notice = toast.loading("Renderizando os slides em alta resolucao...");
     try {
       const response = await exportPack(script, pack);
@@ -442,114 +664,78 @@ function PacksPage() {
         id: notice,
       });
     } finally {
-      setSaving(false);
+      setExporting(false);
     }
   }
 
-  async function choosePhoto(slideIndex: number, photoAssetId: string) {
-    if (
-      !script ||
-      !pack ||
-      savingPhotoIndex !== null ||
-      photoIdOf(pack.carousel[slideIndex]) === photoAssetId
-    )
-      return;
-    const previousPack = pack;
-    const selectedAsset = photoAssets.find((asset) => asset.id === photoAssetId);
-    if (!selectedAsset) return;
-    setSavingPhotoIndex(slideIndex);
-    const notice = toast.loading(`Atualizando a foto do slide ${slideIndex + 1}...`);
-    setPack({
-      ...pack,
-      carousel: pack.carousel.map((slide, index) =>
-        index === slideIndex
-          ? {
-              ...slide,
-              fields: slide.fields ? { ...slide.fields, photoId: photoAssetId } : slide.fields,
-              photoAsset: {
-                id: selectedAsset.id,
-                name: selectedAsset.name,
-                description: selectedAsset.description,
-                cachedAssetPath: selectedAsset.cachedAssetPath,
-                facePointX: selectedAsset.facePointX,
-                facePointY: selectedAsset.facePointY,
-                brightness: selectedAsset.brightness,
-              },
-            }
-          : slide,
-      ),
+  function updateDraftText(name: string, value: string) {
+    setDraft((current) => ({ ...current, [name]: value }));
+  }
+
+  function updateDraftItem(name: string, part: "title" | "text", value: string) {
+    setDraft((current) => {
+      const item = current[name];
+      const base: PackSlideItem = item && typeof item === "object" ? item : { title: "", text: "" };
+      return { ...current, [name]: { ...base, [part]: value } };
     });
-    try {
-      const response = await updatePackCarouselPhoto(script.id, slideIndex, photoAssetId);
-      setPack(response.pack);
-      try {
-        const exported = await exportPack(script, response.pack);
-        toast.success(
-          `Foto do slide ${slideIndex + 1} atualizada e ${exported.images} PNGs regenerados.`,
-          { id: notice },
-        );
-      } catch (error) {
-        toast.error(
-          `A foto foi salva, mas os PNGs não foram regenerados: ${
-            error instanceof Error ? error.message : "erro na exportação"
-          }`,
-          { id: notice, duration: 9000 },
-        );
-      }
-    } catch (error) {
-      setPack(previousPack);
-      toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a foto.", {
-        id: notice,
-      });
-    } finally {
-      setSavingPhotoIndex(null);
-    }
   }
 
-  async function saveCoverNote() {
-    if (!script || !pack || savingCoverNote || !coverNoteDirty) return;
-    setSavingCoverNote(true);
-    const notice = toast.loading("Salvando a mensagem da capa...");
-    try {
-      const response = await updatePackCoverNote(script.id, coverNoteDraft);
-      const saved = response.pack.carousel[0]?.fields?.coverNote ?? "";
-      setPack(response.pack);
-      setCoverNoteDraft(saved);
-      toast.success(
-        saved
-          ? "Mensagem da capa salva. A fonte se ajusta automaticamente no PNG."
-          : "Caixa de texto removida da capa.",
-        { id: notice },
-      );
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Nao foi possivel salvar a mensagem da capa.",
-        { id: notice },
-      );
-    } finally {
-      setSavingCoverNote(false);
-    }
-  }
+  const generateLabel = packIsLegacy
+    ? "Gerar 7 slides agora"
+    : outdatedEducationalFlow
+      ? "Gerar versão educativa"
+      : pack
+        ? "Gerar nova versão"
+        : "Gerar Pack";
 
   return (
     <AppShell
-      title="Pack de conteudo"
+      title="Estúdio de Pack"
       actions={
         <>
-          <Button size="sm" onClick={generateVisualPack} disabled={!script || generating}>
-            {generating ? (
-              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Wand2 className="mr-1 h-3.5 w-3.5" />
-            )}
-            {packIsLegacy
-              ? "Gerar 7 slides agora"
-              : outdatedEducationalFlow
-                ? "Gerar versao educativa"
-                : pack
-                  ? "Gerar nova versao"
-                  : "Gerar Pack"}
-          </Button>
+          {pack ? (
+            <ConfirmAction
+              trigger={
+                <Button size="sm" disabled={!script || generating}>
+                  {generating ? (
+                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Wand2 className="mr-1 h-3.5 w-3.5" />
+                  )}
+                  {generateLabel}
+                </Button>
+              }
+              title="Gerar uma nova versão de conteúdo?"
+              description={
+                <div className="space-y-2 text-sm">
+                  <p>
+                    Isso reescreve os <strong>7 slides</strong> com o Claude e consome tokens. As
+                    edições manuais que você fez neste Pack serão substituídas.
+                  </p>
+                  <p>
+                    A versão atual fica salva no histórico e pode ser restaurada depois sem custo.
+                    Se você só quer corrigir uma tela, use <strong>Reescrever este slide</strong> —
+                    o pedido leva bem menos contexto.
+                  </p>
+                </div>
+              }
+              confirmLabel="Gerar nova versão"
+              onConfirm={() => void generateVisualPack()}
+            />
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => void generateVisualPack()}
+              disabled={!script || generating}
+            >
+              {generating ? (
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Wand2 className="mr-1 h-3.5 w-3.5" />
+              )}
+              {generateLabel}
+            </Button>
+          )}
           {outdatedAvatar && pack ? (
             <Button
               size="sm"
@@ -564,9 +750,9 @@ function PacksPage() {
             size="sm"
             variant="secondary"
             onClick={saveLocal}
-            disabled={!script || !pack || saving || packIsLegacy}
+            disabled={!script || !pack || exporting || packIsLegacy}
           >
-            {saving ? (
+            {exporting ? (
               <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
             ) : (
               <FolderDown className="mr-1 h-3.5 w-3.5" />
@@ -585,7 +771,7 @@ function PacksPage() {
         <EmptyState
           icon={<PanelsTopLeft className="h-4 w-4" />}
           title="Nenhum roteiro para transformar"
-          description="Crie um roteiro para gerar o carrossel editorial de 7 slides."
+          description="Crie um roteiro para gerar o carrossel educativo de 7 slides."
           action={
             <Button asChild size="sm" variant="secondary">
               <Link to="/ideias">Ir para Ideias</Link>
@@ -610,8 +796,11 @@ function PacksPage() {
                   />
                   {script ? <StatusBadge {...riskLabel[script.risco]} /> : null}
                   {script ? <StatusBadge {...prioridadeLabel[script.prioridade]} /> : null}
-                  {pack?.schemaVersion ? (
-                    <StatusBadge label="Sistema Instituto" tone="success" />
+                  {clarity ? (
+                    <StatusBadge
+                      label={`${clarity.balanced}/${clarity.slides.length} slides equilibrados`}
+                      tone={clarity.warnings === 0 ? "success" : "warn"}
+                    />
                   ) : null}
                   {outdatedEducationalFlow ? (
                     <StatusBadge label="Trilha educativa anterior" tone="warn" />
@@ -622,10 +811,8 @@ function PacksPage() {
                 </h2>
                 <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
                   {packIsLegacy
-                    ? `Este Pack salvo ainda tem ${pack.carousel.length} slides. Gere a versao nova para adicionar o slide de contexto e liberar os PNGs.`
-                    : outdatedEducationalFlow
-                      ? "Este Pack foi criado antes da trilha educativa atual. Gere uma nova versão para reorganizar a copy sem tom de confronto."
-                      : "7 slides em uma sequência educativa: contexto, explicação, evidência, cuidado e próximo passo."}
+                    ? `Este Pack salvo ainda tem ${pack.carousel.length} slides. Gere a versão nova para liberar os PNGs.`
+                    : "O preview mostra exatamente o PNG que será publicado. Editar texto, trocar layout, foto ou tema é local e não consome tokens."}
                 </p>
               </div>
               <Select value={selectedId} onValueChange={selectScript}>
@@ -659,7 +846,11 @@ function PacksPage() {
                   : "Gere 7 slides com copy curta, contexto explicado e identidade visual consistente."
               }
               action={
-                <Button size="sm" onClick={generateVisualPack} disabled={generating || loadingPack}>
+                <Button
+                  size="sm"
+                  onClick={() => void generateVisualPack()}
+                  disabled={generating || loadingPack}
+                >
                   {generating ? (
                     <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
                   ) : (
@@ -681,394 +872,392 @@ function PacksPage() {
                     </div>
                     <p className="mt-1">
                       O arquivo salvo tem {pack.carousel.length} de {REQUIRED_CAROUSEL_SLIDES}{" "}
-                      slides. Por isso o app bloqueia “Salvar PNGs” até gerar a nova versão com o
-                      slide de contexto.
+                      slides. Por isso o app bloqueia “Salvar PNGs” até gerar a nova versão.
                     </p>
                   </div>
-                  <Button size="sm" onClick={generateVisualPack} disabled={generating}>
-                    {generating ? (
-                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Wand2 className="mr-1 h-3.5 w-3.5" />
-                    )}
-                    Gerar 7 slides agora
-                  </Button>
                 </section>
               ) : null}
-              {outdatedEducationalFlow && !packIsLegacy ? (
-                <section className="flex flex-col gap-3 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-950 shadow-sm md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <div className="font-semibold">Este Pack usa a organização anterior.</div>
-                    <p className="mt-1">
-                      Gere uma nova versão para aplicar a trilha educativa completa em todos os
-                      slides: tema, contexto, explicação, evidência, cuidados e resumo.
-                    </p>
-                  </div>
-                  <Button size="sm" onClick={generateVisualPack} disabled={generating}>
-                    {generating ? (
-                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Wand2 className="mr-1 h-3.5 w-3.5" />
-                    )}
-                    Gerar versão educativa
-                  </Button>
-                </section>
-              ) : null}
-              <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center gap-2 text-sm">
-                      <Video className="h-4 w-4 text-status-info" /> Video
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="text-sm text-muted-foreground">
-                    {videoJob ? `Status: ${videoJob.status}` : "Ainda nao enviado ao HeyGen"}
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center gap-2 text-sm">
-                      <Layers3 className="h-4 w-4 text-status-info" /> Carrossel
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="text-sm text-muted-foreground">
-                    {packIsLegacy
-                      ? `${pack.carousel.length} de ${REQUIRED_CAROUSEL_SLIDES} slides — gere nova versao`
-                      : `${pack.carousel.length} slides editoriais`}
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center gap-2 text-sm">
-                      <ImageIcon className="h-4 w-4 text-status-info" /> Qualidade
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="text-sm text-muted-foreground">
-                    PNG 1080 × 1350
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="flex items-center gap-2 text-sm">
-                      <CalendarPlus className="h-4 w-4 text-status-info" /> Calendario
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="text-sm text-muted-foreground">
-                    {scheduledPost ? "Ja agendado" : "Pronto para agendar"}
-                  </CardContent>
-                </Card>
-              </section>
 
-              <section className="rounded-xl border bg-card p-4 shadow-sm">
-                <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <h2 className="flex items-center gap-2 text-sm font-semibold">
-                      <Palette className="h-4 w-4 text-status-info" /> Estilo do Pack
-                    </h2>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      Escolha a composição e o tema visual. A troca é local e preserva o texto.
-                    </p>
-                  </div>
-                  <StatusBadge label="Sem tokens do Claude" tone="success" />
-                </div>
-
-                <div className="grid gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,1fr)]">
-                  <fieldset>
-                    <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                      Composição
-                    </legend>
-                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-                      {familyOptions.map((option) => {
-                        const selected = familyOf(pack) === option.id;
-                        return (
-                          <label
-                            key={option.id}
-                            className={`cursor-pointer rounded-lg border p-3 transition-colors duration-200 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${
-                              selected
-                                ? "border-primary bg-primary/5"
-                                : "bg-background hover:border-primary/40 hover:bg-muted/40"
-                            } ${savingPresentation ? "cursor-wait opacity-70" : ""}`}
-                          >
-                            <input
-                              className="sr-only"
-                              type="radio"
-                              name="pack-family"
-                              value={option.id}
-                              checked={selected}
-                              disabled={savingPresentation}
-                              onChange={() =>
-                                void choosePresentation({
-                                  family: option.id,
-                                  themeId: themeOf(pack),
-                                })
-                              }
-                            />
-                            <span className="flex items-center justify-between gap-2">
-                              <span className="text-sm font-semibold">{option.label}</span>
-                              {selected ? (
-                                <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success" />
-                              ) : null}
-                            </span>
-                            <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
-                              {option.description}
-                            </span>
-                            <span className="mt-2 block text-[11px] font-medium text-foreground/75">
-                              {option.whenToUse}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </fieldset>
-
-                  <fieldset>
-                    <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                      Tema
-                    </legend>
-                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
-                      {themeOptions.map((option) => {
-                        const selected = themeOf(pack) === option.id;
-                        return (
-                          <label
-                            key={option.id}
-                            className={`cursor-pointer rounded-lg border p-3 transition-colors duration-200 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${
-                              selected
-                                ? "border-primary bg-primary/5"
-                                : "bg-background hover:border-primary/40 hover:bg-muted/40"
-                            } ${savingPresentation ? "cursor-wait opacity-70" : ""}`}
-                          >
-                            <input
-                              className="sr-only"
-                              type="radio"
-                              name="pack-theme"
-                              value={option.id}
-                              checked={selected}
-                              disabled={savingPresentation}
-                              onChange={() =>
-                                void choosePresentation({
-                                  family: familyOf(pack),
-                                  themeId: option.id,
-                                })
-                              }
-                            />
-                            <span className="flex items-center gap-3">
-                              <span
-                                className="flex shrink-0 overflow-hidden rounded border"
-                                aria-hidden="true"
-                              >
-                                {option.swatches.map((color) => (
-                                  <span
-                                    key={color}
-                                    className="h-8 w-4"
-                                    style={{ backgroundColor: color }}
-                                  />
-                                ))}
-                              </span>
-                              <span className="min-w-0 flex-1">
-                                <span className="flex items-center justify-between gap-2 text-sm font-semibold">
-                                  {option.label}
-                                  {selected ? (
-                                    <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success" />
-                                  ) : null}
-                                </span>
-                                <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
-                                  {option.description}
-                                </span>
-                              </span>
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </fieldset>
-                </div>
-
-                <p className="mt-3 min-h-4 text-xs text-muted-foreground" aria-live="polite">
-                  {presentationStatus}
-                </p>
-              </section>
-
-              <Tabs defaultValue="carousel" className="space-y-3">
-                <TabsList className="grid w-full grid-cols-3 md:w-auto">
-                  <TabsTrigger value="carousel">Carrossel</TabsTrigger>
-                  <TabsTrigger value="caption">Legenda</TabsTrigger>
-                  <TabsTrigger value="briefing">Briefing</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="carousel">
-                  <section
-                    className="mb-3 rounded-xl border bg-card p-3"
-                    aria-label="Trilha educativa do carrossel"
-                  >
-                    <div className="flex flex-wrap items-baseline justify-between gap-2">
-                      <h3 className="text-sm font-semibold">Trilha educativa</h3>
-                      <p className="text-xs text-muted-foreground">
-                        Cada slide prepara a leitura do próximo.
-                      </p>
-                    </div>
-                    <ol className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-7">
-                      {educationalSteps.map((step, index) => (
-                        <li
-                          key={step.title}
-                          className="rounded-lg border bg-background px-2.5 py-2"
-                        >
-                          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-status-info">
-                            {String(index + 1).padStart(2, "0")}
-                          </span>
-                          <p className="mt-0.5 text-xs font-medium leading-snug">{step.title}</p>
-                        </li>
-                      ))}
-                    </ol>
-                  </section>
-                  <div className="grid items-start gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {pack.carousel.map((slide, index) => {
-                      const layout = layoutOf(slide);
-                      const educationalStep = educationalStepOf(index);
-                      const hasPhoto = photoLayouts.has(layout);
-                      const details = detailLines(slide);
-                      const selectedPhoto = photoAssets.find(
-                        (asset) => asset.id === photoIdOf(slide),
-                      );
+              <div className="grid items-start gap-4 xl:grid-cols-[196px_minmax(0,392px)_minmax(0,1fr)]">
+                {/* Trilha: cada slide mostra a etapa educativa e o sinal de clareza. */}
+                <nav aria-label="Slides do carrossel" className="rounded-xl border bg-card p-2">
+                  <ol className="space-y-1">
+                    {pack.carousel.map((item, index) => {
+                      const entry = clarity?.slides.find((row) => row.slide === index + 1);
+                      const step =
+                        educationalSteps[index] ?? educationalSteps[educationalSteps.length - 1];
+                      const selected = index === activeSlide;
                       return (
-                        <div
-                          key={`${layout}-${headlineOf(slide)}-${index}`}
-                          className="flex min-h-[260px] self-start flex-col rounded-lg border bg-card p-4 shadow-sm"
-                        >
-                          <div className="mb-3 flex items-center justify-between gap-2">
-                            <div>
-                              <span className="text-xs font-semibold uppercase text-muted-foreground">
-                                Slide {index + 1}
+                        <li key={`${layoutOf(item)}-${index}`}>
+                          <button
+                            type="button"
+                            onClick={() => setActiveSlide(index)}
+                            aria-current={selected ? "true" : undefined}
+                            className={`w-full rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                              selected
+                                ? "border-primary bg-primary/5"
+                                : "border-transparent hover:border-primary/40 hover:bg-muted/50"
+                            }`}
+                          >
+                            <span className="flex items-center justify-between gap-2">
+                              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                                {String(index + 1).padStart(2, "0")}
                               </span>
-                              <p className="mt-0.5 text-[11px] font-medium text-status-info">
-                                {educationalStep.title}
-                              </p>
-                            </div>
-                            <span className="rounded-md bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">
-                              {layoutLabels[layout]}
+                              {entry?.warnings.length ? (
+                                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-warn" />
+                              ) : (
+                                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-status-success" />
+                              )}
                             </span>
-                          </div>
-
-                          {hasPhoto ? (
-                            <div className="mb-4 flex items-center gap-2">
-                              <Select
-                                value={photoIdOf(slide)}
-                                onValueChange={(value) => choosePhoto(index, value)}
-                                disabled={savingPhotoIndex !== null || photoAssets.length === 0}
-                              >
-                                <SelectTrigger
-                                  className="h-9 min-w-0 flex-1 text-xs"
-                                  aria-label={`Foto do slide ${index + 1}`}
-                                >
-                                  <SelectValue placeholder="Foto do acervo" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {photoAssets.map((asset) => (
-                                    <SelectItem key={asset.id} value={asset.id}>
-                                      {asset.name}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                              {selectedPhoto?.url ? (
-                                <img
-                                  src={selectedPhoto.url}
-                                  alt={selectedPhoto.name}
-                                  className="h-9 w-9 rounded object-cover"
-                                />
-                              ) : null}
-                              {savingPhotoIndex === index ? (
-                                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                              ) : null}
-                            </div>
-                          ) : null}
-
-                          {index === 0 ? (
-                            <div className="mb-4 rounded-lg border border-dashed border-primary/35 bg-primary/5 p-3">
-                              <label
-                                htmlFor="pack-cover-note"
-                                className="text-xs font-semibold text-foreground"
-                              >
-                                Mensagem opcional na capa
-                              </label>
-                              <p
-                                id="pack-cover-note-help"
-                                className="mt-1 text-[11px] leading-relaxed text-muted-foreground"
-                              >
-                                Ela aparece em uma caixa no Slide 1. A fonte diminui automaticamente
-                                para caber no PNG.
-                              </p>
-                              <Textarea
-                                id="pack-cover-note"
-                                className="mt-2 min-h-20 resize-y text-sm"
-                                rows={3}
-                                maxLength={180}
-                                value={coverNoteDraft}
-                                onChange={(event) => setCoverNoteDraft(event.target.value)}
-                                placeholder="Ex.: Atendimento individual, com escuta e estratégia."
-                                aria-describedby="pack-cover-note-help pack-cover-note-count"
-                              />
-                              <div className="mt-2 flex items-center justify-between gap-2">
-                                <span
-                                  id="pack-cover-note-count"
-                                  className="text-[11px] tabular-nums text-muted-foreground"
-                                >
-                                  {coverNoteDraft.length}/180
-                                </span>
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="secondary"
-                                  onClick={() => void saveCoverNote()}
-                                  disabled={!coverNoteDirty || savingCoverNote}
-                                >
-                                  {savingCoverNote ? (
-                                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                                  ) : null}
-                                  {savingCoverNote ? "Salvando..." : "Salvar mensagem"}
-                                </Button>
-                              </div>
-                            </div>
-                          ) : null}
-
-                          {slide.fields?.eyebrow ? (
-                            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-status-info">
-                              {slide.fields.eyebrow}
-                            </p>
-                          ) : null}
-                          <h3 className="font-display text-lg font-semibold leading-tight">
-                            {headlineOf(slide)}
-                          </h3>
-                          {bodyOf(slide) ? (
-                            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                              {bodyOf(slide)}
-                            </p>
-                          ) : null}
-                          {details.length ? (
-                            <div className="mt-4 space-y-2 border-t pt-3">
-                              {details.map((detail, detailIndex) => (
-                                <p
-                                  key={`${detail}-${detailIndex}`}
-                                  className="text-xs leading-relaxed"
-                                >
-                                  {detail}
-                                </p>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
+                            <span className="mt-0.5 block text-xs font-medium leading-snug">
+                              {step.title}
+                            </span>
+                            <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                              {headlineOf(item)}
+                            </span>
+                            {entry ? (
+                              <span className="mt-1 block">
+                                <ClarityChip density={entry.density} />
+                              </span>
+                            ) : null}
+                          </button>
+                        </li>
                       );
                     })}
+                  </ol>
+                </nav>
+
+                {/* Preview: o mesmo HTML que vira PNG. */}
+                <section className="rounded-xl border bg-card p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold">
+                      Slide {activeSlide + 1} · {slideLayout ? labelOf(slideLayout) : ""}
+                    </h3>
+                    <StatusBadge label="Preview real do PNG" tone="info" />
                   </div>
-                  <div className="mt-3">
+                  <SlidePreview
+                    scriptId={script.id}
+                    slideIndex={activeSlide}
+                    nonce={previewNonce}
+                    width={368}
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-2">
                     <Button
                       size="sm"
-                      variant="secondary"
-                      onClick={() => copyText("Carrossel", formatCarousel(pack.carousel))}
+                      variant="ghost"
+                      onClick={() => setActiveSlide((index) => Math.max(0, index - 1))}
+                      disabled={activeSlide === 0}
                     >
-                      <Copy className="mr-1 h-3.5 w-3.5" /> Copiar carrossel
+                      Anterior
+                    </Button>
+                    <span className="text-xs tabular-nums text-muted-foreground">
+                      {activeSlide + 1} / {pack.carousel.length}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() =>
+                        setActiveSlide((index) => Math.min(pack.carousel.length - 1, index + 1))
+                      }
+                      disabled={activeSlide >= pack.carousel.length - 1}
+                    >
+                      Próximo
                     </Button>
                   </div>
-                </TabsContent>
+                </section>
+
+                {/* Inspetor: clareza, texto, layout e foto do slide selecionado. */}
+                <section className="space-y-3">
+                  {slideClarity ? (
+                    <div className="rounded-xl border bg-card p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold">Clareza deste slide</h3>
+                        <ClarityChip density={slideClarity.density} />
+                      </div>
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className={`h-full rounded-full ${
+                            slideClarity.density === "equilibrado"
+                              ? "bg-status-success"
+                              : "bg-status-warn"
+                          }`}
+                          style={{
+                            width: `${Math.min(
+                              100,
+                              Math.round((slideClarity.characters / slideClarity.comfortMax) * 100),
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                      <p className="mt-1.5 text-[11px] tabular-nums text-muted-foreground">
+                        {slideClarity.characters} caracteres · faixa confortável{" "}
+                        {slideClarity.comfortMin}–{slideClarity.comfortMax} · frase mais longa{" "}
+                        {slideClarity.longestSentenceWords} palavras
+                      </p>
+                      {slideClarity.warnings.length ? (
+                        <ul className="mt-2 space-y-1">
+                          {slideClarity.warnings.map((warning) => (
+                            <li
+                              key={warning}
+                              className="flex items-start gap-1.5 text-[11px] leading-relaxed text-status-warn"
+                            >
+                              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                              <span>{warning}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-[11px] text-status-success">
+                          Sem alertas de clareza nesta tela.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-xl border bg-card p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-sm font-semibold">Texto do slide</h3>
+                      <StatusBadge label="Edição sem tokens" tone="success" />
+                    </div>
+                    {slideSpec ? (
+                      <div className="space-y-3">
+                        {slideSpec.editableFields.map((name) => {
+                          const label = designSystem?.fieldLabels[name] ?? name;
+                          if (isItemField(name)) {
+                            const item = (draft[name] as PackSlideItem | undefined) ?? {
+                              title: "",
+                              text: "",
+                            };
+                            const titleMax = slideSpec.itemMaxChars.title;
+                            const textMax = slideSpec.itemMaxChars.text;
+                            return (
+                              <fieldset key={name} className="rounded-lg border p-2.5">
+                                <legend className="px-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+                                  {label}
+                                </legend>
+                                <Input
+                                  className="h-8 text-sm"
+                                  value={item.title}
+                                  aria-label={`${label} — título`}
+                                  placeholder="Título curto"
+                                  onChange={(event) =>
+                                    updateDraftItem(name, "title", event.target.value)
+                                  }
+                                />
+                                {titleMax ? (
+                                  <span className="mt-1 block text-right text-[10px] tabular-nums text-muted-foreground">
+                                    {item.title.length}/{titleMax}
+                                  </span>
+                                ) : null}
+                                <Textarea
+                                  className="mt-1.5 min-h-14 resize-y text-sm"
+                                  value={item.text}
+                                  aria-label={`${label} — texto`}
+                                  placeholder="Frase completa"
+                                  onChange={(event) =>
+                                    updateDraftItem(name, "text", event.target.value)
+                                  }
+                                />
+                                {textMax ? (
+                                  <span
+                                    className={`mt-1 block text-right text-[10px] tabular-nums ${
+                                      item.text.length > textMax
+                                        ? "text-status-danger"
+                                        : "text-muted-foreground"
+                                    }`}
+                                  >
+                                    {item.text.length}/{textMax}
+                                  </span>
+                                ) : null}
+                              </fieldset>
+                            );
+                          }
+                          const value = (draft[name] as string | undefined) ?? "";
+                          const max = slideSpec.maxChars[name];
+                          const over = Boolean(max && value.length > max);
+                          return (
+                            <div key={name}>
+                              <label
+                                htmlFor={`pack-field-${name}`}
+                                className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
+                              >
+                                {label}
+                              </label>
+                              {longFields.has(name) ? (
+                                <Textarea
+                                  id={`pack-field-${name}`}
+                                  className="mt-1 min-h-20 resize-y text-sm"
+                                  value={value}
+                                  onChange={(event) => updateDraftText(name, event.target.value)}
+                                />
+                              ) : (
+                                <Input
+                                  id={`pack-field-${name}`}
+                                  className="mt-1 h-9 text-sm"
+                                  value={value}
+                                  onChange={(event) => updateDraftText(name, event.target.value)}
+                                />
+                              )}
+                              {max ? (
+                                <span
+                                  className={`mt-0.5 block text-right text-[10px] tabular-nums ${
+                                    over ? "text-status-danger" : "text-muted-foreground"
+                                  }`}
+                                >
+                                  {value.length}/{max}
+                                </span>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            size="sm"
+                            onClick={() => void saveSlideText()}
+                            disabled={!dirty || savingSlide}
+                          >
+                            {savingSlide ? (
+                              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                            ) : null}
+                            Salvar texto do slide
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setDraft(savedDraft)}
+                            disabled={!dirty || savingSlide}
+                          >
+                            <RotateCcw className="mr-1 h-3.5 w-3.5" /> Descartar
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Carregando os limites deste layout…
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border bg-card p-3">
+                    <h3 className="mb-2 text-sm font-semibold">Composição deste slide</h3>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div>
+                        <label
+                          htmlFor="pack-slide-layout"
+                          className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
+                        >
+                          Layout
+                        </label>
+                        <Select
+                          value={slideLayout}
+                          onValueChange={(value) => void changeLayout(value as PackLayout)}
+                          disabled={savingLayout || !designSystem}
+                        >
+                          <SelectTrigger id="pack-slide-layout" className="mt-1 h-9 text-sm">
+                            <SelectValue placeholder="Escolher layout" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {(designSystem?.layouts ?? []).map((option) => (
+                              <SelectItem key={option.id} value={option.id}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      {slideSpec?.usesPhoto ? (
+                        <div>
+                          <label
+                            htmlFor="pack-slide-photo"
+                            className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
+                          >
+                            Foto
+                          </label>
+                          <Select
+                            value={slide ? photoIdOf(slide) : ""}
+                            onValueChange={(value) => void choosePhoto(value)}
+                            disabled={savingPhoto || photoAssets.length === 0}
+                          >
+                            <SelectTrigger id="pack-slide-photo" className="mt-1 h-9 text-sm">
+                              <SelectValue placeholder="Foto do acervo" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {photoAssets.map((asset) => (
+                                <SelectItem key={asset.id} value={asset.id}>
+                                  {asset.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ) : null}
+                    </div>
+                    <p className="mt-2 text-[11px] text-muted-foreground">
+                      Layout, foto e tema são decisões locais: o texto aprovado é preservado e
+                      nenhuma chamada ao Claude é feita.
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border bg-card p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="flex items-center gap-2 text-sm font-semibold">
+                        <Sparkles className="h-4 w-4 text-status-info" /> Reescrever só este slide
+                      </h3>
+                      <StatusBadge label="1 chamada, contexto mínimo" tone="warn" />
+                    </div>
+                    <Textarea
+                      className="min-h-16 resize-y text-sm"
+                      maxLength={400}
+                      value={regenerateNote}
+                      placeholder="O que melhorar? Ex.: explique o número em linguagem simples."
+                      onChange={(event) => setRegenerateNote(event.target.value)}
+                      aria-label="Instrução para reescrever o slide"
+                    />
+                    <ConfirmAction
+                      trigger={
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="mt-2"
+                          disabled={regeneratingSlide}
+                        >
+                          {regeneratingSlide ? (
+                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Sparkles className="mr-1 h-3.5 w-3.5" />
+                          )}
+                          Reescrever slide {activeSlide + 1}
+                        </Button>
+                      }
+                      title={`Reescrever apenas o slide ${activeSlide + 1}?`}
+                      description={
+                        <div className="space-y-2 text-sm">
+                          <p>
+                            O pedido leva só a etapa educativa desta posição, o texto atual do slide
+                            e os limites do layout. Os outros seis slides não são reenviados nem
+                            alterados.
+                          </p>
+                          <p>A versão atual fica salva no histórico e pode voltar sem custo.</p>
+                        </div>
+                      }
+                      confirmLabel="Reescrever este slide"
+                      onConfirm={() => void regenerateSlide()}
+                    />
+                  </div>
+
+                  <p className="min-h-4 text-xs text-muted-foreground" aria-live="polite">
+                    {localStatus}
+                  </p>
+                </section>
+              </div>
+
+              <Tabs defaultValue="caption" className="space-y-3">
+                <TabsList className="grid w-full grid-cols-4 md:w-auto">
+                  <TabsTrigger value="caption">Legenda</TabsTrigger>
+                  <TabsTrigger value="style">Estilo</TabsTrigger>
+                  <TabsTrigger value="versions">Versões</TabsTrigger>
+                  <TabsTrigger value="briefing">Qualidade</TabsTrigger>
+                </TabsList>
 
                 <TabsContent value="caption">
                   <Card>
@@ -1079,13 +1268,214 @@ function PacksPage() {
                     </CardHeader>
                     <CardContent className="space-y-3">
                       <Textarea readOnly className="min-h-[280px]" value={captionOf(pack)} />
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => copyText("Legenda", captionOf(pack))}
-                      >
-                        <Copy className="mr-1 h-3.5 w-3.5" /> Copiar legenda
-                      </Button>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => copyText("Legenda", captionOf(pack))}
+                        >
+                          <Copy className="mr-1 h-3.5 w-3.5" /> Copiar legenda
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            copyText("Carrossel", formatCarousel(pack.carousel, labelOf))
+                          }
+                        >
+                          <Copy className="mr-1 h-3.5 w-3.5" /> Copiar texto dos 7 slides
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </TabsContent>
+
+                <TabsContent value="style">
+                  <section className="rounded-xl border bg-card p-4 shadow-sm">
+                    <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <h2 className="flex items-center gap-2 text-sm font-semibold">
+                          <Palette className="h-4 w-4 text-status-info" /> Estilo do Pack
+                        </h2>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Composição e tema valem para os 7 slides. A troca é local e preserva o
+                          texto.
+                        </p>
+                      </div>
+                      <StatusBadge label="Sem tokens do Claude" tone="success" />
+                    </div>
+
+                    <div className="grid gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,1fr)]">
+                      <fieldset>
+                        <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                          Composição
+                        </legend>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                          {familyOptions.map((option) => {
+                            const selected = familyOf(pack) === option.id;
+                            return (
+                              <label
+                                key={option.id}
+                                className={`cursor-pointer rounded-lg border p-3 transition-colors duration-200 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${
+                                  selected
+                                    ? "border-primary bg-primary/5"
+                                    : "bg-background hover:border-primary/40 hover:bg-muted/40"
+                                } ${savingPresentation ? "cursor-wait opacity-70" : ""}`}
+                              >
+                                <input
+                                  className="sr-only"
+                                  type="radio"
+                                  name="pack-family"
+                                  value={option.id}
+                                  checked={selected}
+                                  disabled={savingPresentation}
+                                  onChange={() =>
+                                    void choosePresentation({
+                                      family: option.id,
+                                      themeId: themeOf(pack),
+                                    })
+                                  }
+                                />
+                                <span className="flex items-center justify-between gap-2">
+                                  <span className="text-sm font-semibold">{option.label}</span>
+                                  {selected ? (
+                                    <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success" />
+                                  ) : null}
+                                </span>
+                                <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+                                  {option.description}
+                                </span>
+                                <span className="mt-2 block text-[11px] font-medium text-foreground/75">
+                                  {option.whenToUse}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </fieldset>
+
+                      <fieldset>
+                        <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                          Tema
+                        </legend>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+                          {themeOptions.map((option) => {
+                            const selected = themeOf(pack) === option.id;
+                            return (
+                              <label
+                                key={option.id}
+                                className={`cursor-pointer rounded-lg border p-3 transition-colors duration-200 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${
+                                  selected
+                                    ? "border-primary bg-primary/5"
+                                    : "bg-background hover:border-primary/40 hover:bg-muted/40"
+                                } ${savingPresentation ? "cursor-wait opacity-70" : ""}`}
+                              >
+                                <input
+                                  className="sr-only"
+                                  type="radio"
+                                  name="pack-theme"
+                                  value={option.id}
+                                  checked={selected}
+                                  disabled={savingPresentation}
+                                  onChange={() =>
+                                    void choosePresentation({
+                                      family: familyOf(pack),
+                                      themeId: option.id,
+                                    })
+                                  }
+                                />
+                                <span className="flex items-center gap-3">
+                                  <span
+                                    className="flex shrink-0 overflow-hidden rounded border"
+                                    aria-hidden="true"
+                                  >
+                                    {option.swatches.map((color) => (
+                                      <span
+                                        key={color}
+                                        className="h-8 w-4"
+                                        style={{ backgroundColor: color }}
+                                      />
+                                    ))}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="flex items-center justify-between gap-2 text-sm font-semibold">
+                                      {option.label}
+                                      {selected ? (
+                                        <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success" />
+                                      ) : null}
+                                    </span>
+                                    <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                                      {option.description}
+                                    </span>
+                                  </span>
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </fieldset>
+                    </div>
+                  </section>
+                </TabsContent>
+
+                <TabsContent value="versions">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <History className="h-4 w-4" /> Histórico de conteúdo
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="mb-3 text-sm text-muted-foreground">
+                        Cada geração e cada reescrita guarda a versão anterior. Restaurar é uma
+                        operação local: não consome tokens do Claude.
+                      </p>
+                      {versions.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">
+                          Ainda não há versões anteriores para este Pack.
+                        </p>
+                      ) : (
+                        <ul className="space-y-2">
+                          {versions.map((version) => (
+                            <li
+                              key={version.id}
+                              className="flex flex-col gap-2 rounded-lg border bg-background p-3 sm:flex-row sm:items-center sm:justify-between"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium">
+                                  {versionOriginLabels[version.origin] ?? version.origin}
+                                </div>
+                                <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                  {version.summary}
+                                </p>
+                                <p className="text-[11px] text-muted-foreground">
+                                  {new Date(version.createdAt).toLocaleString("pt-BR")}
+                                </p>
+                              </div>
+                              <ConfirmAction
+                                trigger={
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={restoringVersion !== null}
+                                  >
+                                    {restoringVersion === version.id ? (
+                                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <RotateCcw className="mr-1 h-3.5 w-3.5" />
+                                    )}
+                                    Restaurar
+                                  </Button>
+                                }
+                                title="Restaurar esta versão?"
+                                description="O conteúdo atual será guardado no histórico antes da troca. Nenhuma chamada ao Claude é feita."
+                                confirmLabel="Restaurar"
+                                onConfirm={() => void restoreVersion(version.id)}
+                              />
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </CardContent>
                   </Card>
                 </TabsContent>
@@ -1096,7 +1486,7 @@ function PacksPage() {
                       <CardTitle className="text-sm">Controle de qualidade do pacote</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <div className="mb-4 grid gap-2 text-sm md:grid-cols-3">
+                      <div className="mb-4 grid gap-2 text-sm md:grid-cols-4">
                         <div className="rounded-lg border bg-background p-3">
                           <div className="text-xs text-muted-foreground">Sistema visual</div>
                           <div className="mt-1 font-medium">Instituto Guilherme Martins</div>
@@ -1106,12 +1496,36 @@ function PacksPage() {
                           <div className="mt-1 font-medium">1080 × 1350 px</div>
                         </div>
                         <div className="rounded-lg border bg-background p-3">
-                          <div className="text-xs text-muted-foreground">Layouts usados</div>
+                          <div className="text-xs text-muted-foreground">Layouts distintos</div>
                           <div className="mt-1 font-medium">
-                            {new Set(pack.carousel.map(layoutOf)).size} de {pack.carousel.length}
+                            {clarity?.distinctLayouts ?? new Set(pack.carousel.map(layoutOf)).size}{" "}
+                            de {pack.carousel.length}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border bg-background p-3">
+                          <div className="text-xs text-muted-foreground">Alertas de clareza</div>
+                          <div className="mt-1 flex items-center gap-2 font-medium">
+                            <ImageIcon className="h-4 w-4 text-status-info" />
+                            {clarity?.warnings ?? 0}
                           </div>
                         </div>
                       </div>
+                      {clarity && clarity.warnings > 0 ? (
+                        <div className="mb-4 space-y-1 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                          {clarity.slides
+                            .filter((entry) => entry.warnings.length)
+                            .map((entry) => (
+                              <button
+                                type="button"
+                                key={entry.slide}
+                                onClick={() => setActiveSlide(entry.slide - 1)}
+                                className="block w-full text-left text-xs text-amber-900 hover:underline"
+                              >
+                                <strong>Slide {entry.slide}:</strong> {entry.warnings.join(" · ")}
+                              </button>
+                            ))}
+                        </div>
+                      ) : null}
                       <div className="grid gap-2 md:grid-cols-2">
                         {(pack.checklist.length
                           ? pack.checklist

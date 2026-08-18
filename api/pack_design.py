@@ -735,6 +735,384 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
         }
 
 
+# Rotulos em portugues de cada layout. Ficam aqui para que interface, arquivo
+# exportado e API falem exatamente a mesma lingua sobre o mesmo componente.
+LAYOUT_LABELS: dict[str, str] = {
+    "hero_photo": "Abertura com foto",
+    "photo_split": "Explicação com foto",
+    "big_statement": "Ideia-chave",
+    "question": "Dúvida comum",
+    "myth_fact": "Mito e fato",
+    "number_stat": "Dado explicado",
+    "three_points": "Pontos para entender",
+    "explainer": "Explicação simples",
+    "doctor_quote": "Orientação profissional",
+    "photo_overlay": "Tema com foto",
+    "do_dont": "Evite e prefira",
+    "cta_photo": "Resumo e próximo passo",
+}
+
+# Rotulo legivel de cada campo, usado no editor por slide e no texto exportado.
+FIELD_LABELS: dict[str, str] = {
+    "eyebrow": "Chapéu",
+    "headline": "Título",
+    "subheadline": "Apoio",
+    "coverNote": "Mensagem na capa",
+    "body": "Texto",
+    "statistic": "Número",
+    "item1": "Bloco 1",
+    "item2": "Bloco 2",
+    "item3": "Bloco 3",
+    "quote": "Citação",
+    "cta": "Chamada",
+    "footer": "Rodapé",
+    "caption": "Legenda do slide",
+    "disclaimer": "Aviso",
+    "photoId": "Foto",
+}
+
+
+def slide_export_text(slide: dict[str, Any]) -> str:
+    """Texto completo do slide para o arquivo entregue ao time.
+
+    A versao anterior exportava apenas ``headline`` e ``body``. Slides de
+    ``three_points``, ``myth_fact``, ``do_dont``, ``number_stat`` e
+    ``doctor_quote`` guardam o conteudo em ``item1..3``, ``statistic`` ou
+    ``quote``, entao o arquivo saia praticamente vazio justamente nas telas com
+    mais informacao.
+    """
+    normalized = normalize_slide(slide)
+    fields = normalized["fields"]
+    lines: list[str] = []
+
+    def add(label: str, value: Any) -> None:
+        text = _text(value)
+        if text:
+            lines.append(f"{label}: {text}" if label else text)
+
+    add("", fields.get("eyebrow"))
+    add("", fields.get("headline") or fields.get("quote"))
+    if _text(fields.get("statistic")):
+        add("Número", fields.get("statistic"))
+    add("", fields.get("subheadline"))
+    add("", fields.get("body"))
+    for name in ("item1", "item2", "item3"):
+        item = fields.get(name)
+        if not isinstance(item, dict):
+            continue
+        title = _text(item.get("title"))
+        text = _text(item.get("text"))
+        if title and text:
+            lines.append(f"- {title}: {text}")
+        elif title or text:
+            lines.append(f"- {title or text}")
+    add("Legenda", fields.get("caption"))
+    add("Mensagem na capa", fields.get("coverNote"))
+    add("Chamada", fields.get("cta"))
+    add("Rodapé", fields.get("footer"))
+    add("Aviso", fields.get("disclaimer"))
+    return "\n".join(lines)
+
+
+def _strip_accents(value: str) -> str:
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFKD", str(value or "").casefold())
+        if not unicodedata.combining(char)
+    )
+
+
+_ORDINAL_STEP_MARKERS = (
+    (("primeiro", "primeira"), "Primeiro"),
+    (("segundo", "segunda"), "Segundo"),
+    (("terceiro", "terceira"), "Terceiro"),
+)
+_ORDINAL_STEP_RE = re.compile(
+    r"^(?:o|a|no|na)?\s*(primeir[oa]|segund[oa]|terceir[oa])\b[\s,:–—-]*",
+    re.I,
+)
+_NUMBERED_STEP_RE = re.compile(r"^([1-3])\s*[.)°º-]\s+")
+
+
+def _sentences(value: Any) -> list[str]:
+    text = _text(value)
+    if not text:
+        return []
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+
+
+def _capitalize_first(value: str) -> str:
+    text = _text(value)
+    return text[:1].upper() + text[1:] if text else text
+
+
+def explainer_steps_from_body(body: Any) -> tuple[str, list[dict[str, str]]]:
+    """Separa uma enumeracao ja escrita no body em passos, sem inventar texto.
+
+    O layout ``explainer`` renderiza tres cartoes de etapa. Quando o Claude
+    escreve a explicacao como um paragrafo enumerado ("O primeiro... O
+    segundo... O terceiro...") e deixa ``item1..item3`` vazios, a grade de
+    etapas sai em branco e o slide exportado fica com metade da tela vazia.
+
+    Esta funcao reaproveita exatamente as frases ja aprovadas: nada e criado,
+    reescrito ou pedido ao Claude. Se a enumeracao nao existir, devolve o body
+    intacto e nenhuma etapa, e o renderer usa o estado de paragrafo.
+    """
+    sentences = _sentences(body)
+    if len(sentences) < 3:
+        return _text(body), []
+
+    lead: list[str] = []
+    tail: list[str] = []
+    steps: list[dict[str, str]] = []
+    expected = 0
+    for sentence in sentences:
+        if len(steps) >= 3:
+            tail.append(sentence)
+            continue
+        title = ""
+        remainder = ""
+        ordinal = _ORDINAL_STEP_RE.match(sentence)
+        if ordinal:
+            word = ordinal.group(1).casefold()
+            for variants, label in _ORDINAL_STEP_MARKERS:
+                if word in variants:
+                    title = label
+                    break
+            remainder = sentence[ordinal.end() :]
+        else:
+            numbered = _NUMBERED_STEP_RE.match(sentence)
+            if numbered:
+                title = _ORDINAL_STEP_MARKERS[int(numbered.group(1)) - 1][1]
+                remainder = sentence[numbered.end() :]
+        if not title or _ORDINAL_STEP_MARKERS[expected][1] != title:
+            (tail if steps else lead).append(sentence)
+            continue
+        remainder = _capitalize_first(remainder)
+        if not remainder:
+            (tail if steps else lead).append(sentence)
+            continue
+        steps.append({"title": title, "text": remainder})
+        expected += 1
+
+    if len(steps) < 2:
+        return _text(body), []
+    return _text(" ".join(lead + tail)), steps
+
+
+def _repair_explainer_steps(fields: dict[str, Any], spec: dict[str, Any]) -> None:
+    """Preenche as etapas do explainer a partir de uma enumeracao ja escrita."""
+    if any(_has_item_content(fields.get(name)) for name in ("item1", "item2", "item3")):
+        return
+    remaining_body, steps = explainer_steps_from_body(fields.get("body"))
+    if not steps:
+        return
+    item_limits = spec.get("item_max", {})
+    for index, step in enumerate(steps, start=1):
+        fields[f"item{index}"] = {
+            "title": _fit_copy(step["title"], item_limits.get("title", 24)),
+            "text": _fit_copy(step["text"], item_limits.get("text", 54)),
+        }
+    fields["body"] = _fit_copy(remaining_body, spec.get("max", {}).get("body", 320))
+
+
+# Sinais locais de clareza. Eles nao chamam o Claude: apenas medem o que ja
+# esta salvo, para que o editor veja antes de exportar quando um slide ficou
+# denso demais, vazio demais ou com um numero sem explicacao.
+_CLARITY_JARGON = (
+    "agonista",
+    "incretina",
+    "farmacocinética",
+    "farmacocinetica",
+    "hipoglicemiante",
+    "termogênese",
+    "termogenese",
+    "lipólise",
+    "lipolise",
+    "resistência insulínica",
+    "resistencia insulinica",
+    "comorbidade",
+    "adiposidade",
+    "metanálise",
+    "metanalise",
+    "randomizado",
+    "placebo-controlado",
+    "biodisponibilidade",
+    "receptor gip",
+    "glp-1",
+)
+_NUMERIC_CLAIM_RE = re.compile(r"\d+(?:[.,]\d+)?\s*%|\b\d{2,}\b")
+
+# Quantidade de texto que cada layout comporta com leitura confortavel. O
+# renderer preenche a tela com esses volumes; muito abaixo disso o PNG sai com
+# area vazia, muito acima ele fica denso para leitura em celular.
+LAYOUT_COMFORT_RANGE: dict[str, tuple[int, int]] = {
+    "hero_photo": (24, 200),
+    "photo_split": (90, 260),
+    "big_statement": (30, 150),
+    "question": (60, 220),
+    "myth_fact": (70, 250),
+    "number_stat": (60, 220),
+    "three_points": (140, 400),
+    "explainer": (140, 480),
+    "doctor_quote": (50, 170),
+    "photo_overlay": (24, 180),
+    "do_dont": (60, 220),
+    "cta_photo": (60, 200),
+}
+
+
+# Campos que cada layout realmente desenha no PNG. Medir densidade sobre o
+# dicionario inteiro contava texto invisivel (por exemplo o ``caption`` do
+# cta_photo, que o renderer troca pelo aviso fixo) e acusava slides densos que
+# na pratica estavam vazios.
+LAYOUT_READER_FIELDS: dict[str, tuple[str, ...]] = {
+    "hero_photo": ("eyebrow", "headline", "coverNote", "footer"),
+    "photo_split": ("eyebrow", "headline", "body", "footer"),
+    "big_statement": ("eyebrow", "headline", "footer"),
+    "question": ("eyebrow", "headline", "body", "footer"),
+    "myth_fact": ("item1", "item2", "body"),
+    "number_stat": ("eyebrow", "statistic", "headline", "body", "caption"),
+    "three_points": ("eyebrow", "headline", "item1", "item2", "item3"),
+    "explainer": ("eyebrow", "headline", "body", "item1", "item2", "item3"),
+    "doctor_quote": ("quote", "caption"),
+    "photo_overlay": ("eyebrow", "headline", "coverNote", "footer"),
+    "do_dont": ("item1", "item2", "item3"),
+    # O disclaimer e o footer do slide final sao textos fixos de compliance:
+    # eles ocupam espaco, mas o editor nao os controla, entao ficam fora da
+    # medida de densidade editavel.
+    "cta_photo": ("headline", "body", "cta"),
+}
+
+
+# Campos que o editor pode alterar em cada layout, na ordem em que aparecem no
+# slide. Sao os campos de ``LAYOUT_READER_FIELDS`` mais os textos de apoio que
+# o renderer desenha mas nao contam para a densidade de leitura.
+LAYOUT_EDITABLE_FIELDS: dict[str, tuple[str, ...]] = {
+    "hero_photo": ("eyebrow", "headline", "coverNote", "footer"),
+    "photo_split": ("eyebrow", "headline", "body", "footer"),
+    "big_statement": ("eyebrow", "headline", "footer"),
+    "question": ("eyebrow", "headline", "body", "footer"),
+    "myth_fact": ("item1", "item2", "body"),
+    "number_stat": ("eyebrow", "statistic", "headline", "body", "caption"),
+    "three_points": ("eyebrow", "headline", "item1", "item2", "item3"),
+    "explainer": ("eyebrow", "headline", "body", "item1", "item2", "item3", "disclaimer"),
+    "doctor_quote": ("quote", "caption"),
+    "photo_overlay": ("eyebrow", "headline", "coverNote", "footer"),
+    "do_dont": ("item1", "item2", "item3", "disclaimer"),
+    # ``disclaimer`` e ``footer`` do slide final sao travados por compliance.
+    "cta_photo": ("headline", "body", "cta"),
+}
+
+
+def slide_reader_text(slide: dict[str, Any]) -> str:
+    """Somente o texto editavel que a pessoa le no PNG deste layout."""
+    fields = slide.get("fields") if isinstance(slide.get("fields"), dict) else {}
+    layout_id = str(slide.get("layoutId") or slide.get("layout") or "")
+    names = LAYOUT_READER_FIELDS.get(
+        layout_id,
+        ("eyebrow", "headline", "subheadline", "body", "statistic", "quote", "caption", "cta"),
+    )
+    parts: list[str] = []
+    for name in names:
+        value = fields.get(name)
+        if isinstance(value, dict):
+            parts.extend(part for part in (_text(value.get("title")), _text(value.get("text"))) if part)
+        elif _text(value):
+            parts.append(_text(value))
+    return " ".join(parts)
+
+
+def slide_clarity(slide: dict[str, Any], index: int = 0) -> dict[str, Any]:
+    """Mede densidade e clareza de um slide de forma local e deterministica."""
+    normalized = normalize_slide(slide, index)
+    layout_id = normalized["layoutId"]
+    fields = normalized["fields"]
+    text = slide_reader_text(normalized)
+    characters = len(text)
+    words = len([word for word in re.split(r"\s+", text) if word])
+    minimum, maximum = LAYOUT_COMFORT_RANGE.get(layout_id, (60, 260))
+
+    if characters < minimum:
+        density = "vazio"
+    elif characters > maximum:
+        density = "denso"
+    else:
+        density = "equilibrado"
+
+    warnings: list[str] = []
+    if density == "vazio":
+        warnings.append("pouco texto para o layout; o PNG sai com area vazia")
+    if density == "denso":
+        warnings.append("texto acima do confortavel para leitura no celular")
+
+    if layout_id == "explainer" and not any(
+        _has_item_content(fields.get(name)) for name in ("item1", "item2", "item3")
+    ):
+        warnings.append("explainer sem etapas: a grade de cartoes fica em branco")
+
+    lowered = _strip_accents(text.casefold()) if text else ""
+    jargon = sorted(
+        {
+            term
+            for term in _CLARITY_JARGON
+            if _strip_accents(term) in lowered
+        }
+    )
+    if jargon:
+        warnings.append("termo tecnico presente: confirme se ele foi explicado")
+
+    # Um numero precisa de uma frase que diga o que ele significa. A checagem
+    # olha o texto que sobra fora da frase onde o numero aparece: se quase nada
+    # sobra, o dado esta isolado na tela.
+    sentences = _sentences(text)
+    numeric_sentences = [sentence for sentence in sentences if _NUMERIC_CLAIM_RE.search(sentence)]
+    if numeric_sentences:
+        context = " ".join(sentence for sentence in sentences if sentence not in numeric_sentences)
+        if len(context) < 45:
+            warnings.append("dado numerico sem explicacao do que ele significa")
+
+    longest_sentence = max((len(sentence.split()) for sentence in _sentences(text)), default=0)
+    if longest_sentence > 28:
+        warnings.append("frase longa demais para leitura rapida")
+
+    return {
+        "slide": index + 1,
+        "layoutId": layout_id,
+        "characters": characters,
+        "words": words,
+        "comfortMin": minimum,
+        "comfortMax": maximum,
+        "density": density,
+        "longestSentenceWords": longest_sentence,
+        "jargon": jargon,
+        "warnings": warnings,
+    }
+
+
+def pack_clarity(pack: dict[str, Any]) -> dict[str, Any]:
+    """Relatorio de clareza do carrossel inteiro. Nenhuma chamada de IA."""
+    slides = [slide for slide in pack_slides(pack) if isinstance(slide, dict)]
+    per_slide = [slide_clarity(slide, index) for index, slide in enumerate(slides)]
+    layouts = [entry["layoutId"] for entry in per_slide]
+    repeated = sorted(
+        {
+            layouts[index]
+            for index in range(1, len(layouts))
+            if layouts[index] == layouts[index - 1]
+        }
+    )
+    return {
+        "slides": per_slide,
+        "balanced": sum(1 for entry in per_slide if entry["density"] == "equilibrado"),
+        "empty": [entry["slide"] for entry in per_slide if entry["density"] == "vazio"],
+        "dense": [entry["slide"] for entry in per_slide if entry["density"] == "denso"],
+        "repeatedAdjacentLayouts": repeated,
+        "distinctLayouts": len(set(layouts)),
+        "warnings": sum(len(entry["warnings"]) for entry in per_slide),
+    }
+
+
 def _legacy_context_slide(raw_slides: list[Any]) -> dict[str, Any]:
     """Cria o slide de contexto para Packs antigos de seis telas.
 
@@ -829,6 +1207,10 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
         _repair_layout_semantics(slide)
         spec = LAYOUT_SPECS[slide["layoutId"]]
         fields = slide["fields"]
+        if slide["layoutId"] == "explainer":
+            # Reaproveita a enumeracao que ja existe no body antes de qualquer
+            # fallback: nenhuma chamada de IA e nenhum texto inventado.
+            _repair_explainer_steps(fields, spec)
         _repair_required_items(fields, slide["layoutId"], spec)
         for name, maximum in spec.get("max", {}).items():
             fields[name] = _fit_copy(fields.get(name), maximum)
