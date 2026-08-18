@@ -482,6 +482,62 @@ def test_slide_html_applies_modernist_theme_without_changing_copy() -> None:
     assert "Por que o peso volta depois da dieta" in html
 
 
+def test_editorial_teal_uses_closed_tokens_and_grayscale_prop() -> None:
+    slide = deepcopy(sample_pack()["slides"][0])
+    slide["fields"]["photoId"] = ""
+    slide.pop("photoAsset", None)
+
+    grayscale = slide_html(
+        slide,
+        index=1,
+        total=7,
+        family="manifesto",
+        theme_id="modernist-teal",
+    )
+    color = slide_html(
+        sample_pack()["slides"][0],
+        index=1,
+        total=7,
+        family="manifesto",
+        theme_id="modernist-teal",
+        grayscale_photos=False,
+    )
+
+    assert "data-theme='modernist-teal'" in grayscale
+    assert "data-grayscale-photos='true'" in grayscale
+    assert "data-grayscale-photos='false'" in color
+    assert "class=\"slide hero-photo bg-dark no-photo\"" in grayscale
+    assert "<img" not in grayscale
+    for token in (
+        "--navy:#0B2135",
+        "--teal:#17A697",
+        "--teal-dark:#0E7C71",
+        "--teal-deep:#04322D",
+        "--bone:#F3F1EC",
+        "--sand:#E7E3D9",
+        "--ink-soft:#3D4C58",
+        "--muted:#5A6A76",
+        "--radius:0",
+    ):
+        assert token in grayscale
+
+
+def test_photo_layouts_remain_valid_without_photos() -> None:
+    pack = sample_pack()
+    for slide in pack["slides"]:
+        slide["fields"]["photoId"] = ""
+        slide.pop("photoAsset", None)
+
+    repaired = repair_pack_copy(pack)
+
+    assert validate_pack_contract(repaired) == []
+    assert all(not slide["fields"]["photoId"] for slide in repaired["slides"])
+    split = deepcopy(repaired["slides"][1])
+    split["layoutId"] = "photo_split"
+    split["layout"] = "photo_split"
+    assert "photo-split bg-light no-photo" in slide_html(split, index=2, total=7)
+
+
 def test_slide_html_applies_soft_themes_without_changing_copy() -> None:
     slide = sample_pack()["slides"][0]
 

@@ -373,13 +373,15 @@ export async function saveCalendarPost(post: CalendarPost): Promise<CalendarPost
 }
 
 export type PackFamily = "editorial" | "didatico" | "storytelling" | "manifesto" | "clinico";
-export type PackTheme = "modernist-red" | "ocean-deep" | "soft-sage" | "soft-rose";
+export type PackTheme =
+  "modernist-red" | "modernist-teal" | "ocean-deep" | "soft-sage" | "soft-rose";
 
 export interface GeneratedPack {
   schemaVersion?: "institute-carousel-v1" | string;
   designDirection?: "institute_carousel_v1" | string;
   family?: PackFamily;
   themeId?: PackTheme;
+  grayscalePhotos?: boolean;
   carousel: PackSlide[];
   slides?: PackSlide[];
   staticPost: {
@@ -1026,7 +1028,7 @@ export interface PackCompliance {
 /** Gera o pack de conteudo real via Claude (server-side) a partir de um roteiro. */
 export async function generatePack(
   script: Script,
-  presentation?: { family: PackFamily; themeId: PackTheme },
+  presentation?: { family: PackFamily; themeId: PackTheme; grayscalePhotos: boolean },
 ): Promise<PackMutationResult> {
   const res = await fetch(`${BASE}/api/packs/generate`, {
     method: "POST",
@@ -1040,7 +1042,7 @@ export async function generatePack(
 /** Salva composição e tema do Pack localmente. Não chama Claude nem altera a copy. */
 export async function updatePackPresentation(
   scriptId: string,
-  presentation: { family: PackFamily; themeId: PackTheme },
+  presentation: { family: PackFamily; themeId: PackTheme; grayscalePhotos: boolean },
 ): Promise<PackMutationResult> {
   const response = await requestJson<{
     ok: boolean;
@@ -1206,6 +1208,7 @@ export interface PackLayoutSpec {
   maxChars: Record<string, number>;
   itemMaxChars: Record<string, number>;
   usesPhoto: boolean;
+  photoOptional: boolean;
   comfort: [number, number];
   editableFields: Array<keyof PackSlideFields>;
 }
@@ -1215,6 +1218,8 @@ export interface PackDesignSystem {
   schemaVersion: string;
   families: PackFamily[];
   themes: PackTheme[];
+  photoOptional: boolean;
+  grayscalePhotosDefault: boolean;
   fieldLabels: Record<string, string>;
   layouts: PackLayoutSpec[];
 }
@@ -1243,9 +1248,14 @@ export function packSlidePreviewUrl(scriptId: string, slideIndex: number): strin
 export function packSlideThumbnailUrl(
   scriptId: string,
   slideIndex: number,
-  pack: Pick<GeneratedPack, "updatedAt" | "family" | "themeId">,
+  pack: Pick<GeneratedPack, "updatedAt" | "family" | "themeId" | "grayscalePhotos">,
 ): string {
-  const version = [pack.updatedAt ?? "legacy", pack.family ?? "", pack.themeId ?? ""].join("|");
+  const version = [
+    pack.updatedAt ?? "legacy",
+    pack.family ?? "",
+    pack.themeId ?? "",
+    pack.grayscalePhotos === false ? "color" : "grayscale",
+  ].join("|");
   return `${BASE}/api/packs/${encodeURIComponent(scriptId)}/slides/${slideIndex}/thumb.png?v=${encodeURIComponent(version)}`;
 }
 

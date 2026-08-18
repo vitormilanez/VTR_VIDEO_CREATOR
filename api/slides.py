@@ -64,6 +64,21 @@ MODERNIST_COLORS = {
     "subtle": "#74685D",
 }
 
+MODERNIST_TEAL_COLORS = {
+    "dark": "#0B2135",
+    "deep": "#04322D",
+    "light": "#F3F1EC",
+    "warm": "#E7E3D9",
+    "white": "#FFFFFF",
+    "teal": "#17A697",
+    "sand": "#0E7C71",
+    "body_dark": "#3D4C58",
+    "body_light": "#F3F1EC",
+    "muted": "#5A6A76",
+    "footer_dark": "#5A6A76",
+    "subtle": "#5A6A76",
+}
+
 SOFT_SAGE_COLORS = {
     "dark": "#28443E",
     "deep": "#1B322D",
@@ -96,6 +111,7 @@ SOFT_ROSE_COLORS = {
 
 THEME_COLOR_SETS = {
     "modernist-red": MODERNIST_COLORS,
+    "modernist-teal": MODERNIST_TEAL_COLORS,
     "soft-sage": SOFT_SAGE_COLORS,
     "soft-rose": SOFT_ROSE_COLORS,
 }
@@ -226,7 +242,7 @@ def _hero_photo(slide: dict[str, Any], index: int, total: int) -> str:
     uri, meta = _photo(slide)
     size = _headline_size("hero_photo", f["headline"], 98)
     return f"""
-    <section class="slide hero-photo bg-dark">
+    <section class="slide hero-photo bg-dark {'has-photo' if uri else 'no-photo'}">
       {_photo_markup(uri, meta)}<div class="hero-top-fade"></div><div class="hero-bottom-fade"></div>
       {_brand(dark=True)}
       <div class="hero-copy"><div class="accent-bar"></div><div class="eyebrow">{_esc(f['eyebrow'])}</div>
@@ -245,7 +261,8 @@ def _photo_split(slide: dict[str, Any], index: int, total: int) -> str:
     copy = f"""<div class="split-copy">{_brand(dark=False)}<div class="split-spacer"></div><div class="accent-bar small"></div>
       <div class="eyebrow">{_esc(f['eyebrow'])}</div><h1 style="font-size:{size}px">{_esc(f['headline'])}</h1>
       <p>{_esc(f['body'])}</p><div class="split-footer"><span>{_esc(f['footer'] or 'Dr. Guilherme Martins')}</span>{_counter(index,total)}</div></div>"""
-    return f'<section class="slide photo-split bg-light">{copy + photo if right else photo + copy}</section>'
+    photo_state = "has-photo" if uri else "no-photo"
+    return f'<section class="slide photo-split bg-light {photo_state}">{copy + photo if right else photo + copy}</section>'
 
 
 def _big_statement(slide: dict[str, Any], index: int, total: int) -> str:
@@ -360,7 +377,8 @@ def _doctor_quote(slide: dict[str, Any], index: int, total: int) -> str:
     caption = _esc(f["caption"])
     if caption.casefold().replace(".", "") in {"dr guilherme martins", "guilherme martins"}:
         caption = MEDICAL_ROLE_AND_REGISTERED_SPECIALTY
-    return f"""<section class="slide doctor-quote {'bg-dark light-text' if dark else 'bg-warm'}">{_brand(dark=dark)}
+    photo_state = "has-photo" if uri else "no-photo"
+    return f"""<section class="slide doctor-quote {photo_state} {'bg-dark light-text' if dark else 'bg-warm'}">{_brand(dark=dark)}
       <div class="quote-copy"><div class="opening-quote">“</div><blockquote>{_esc(f['quote'])}</blockquote></div>
       <div class="quote-footer">{_photo_markup(uri, meta, 'quote-photo')}<div><strong>Dr. Guilherme Martins</strong><span>{caption}</span></div>
       <div class="quote-counter">{_counter(index,total,light=dark)}</div></div></section>"""
@@ -375,7 +393,8 @@ def _photo_overlay(slide: dict[str, Any], index: int, total: int) -> str:
     copy_classes = "overlay-copy" + (" overlay-copy-top" if top else "") + (
         " overlay-copy-with-note" if top and has_cover_note else ""
     )
-    return f"""<section class="slide photo-overlay bg-deep">{_photo_markup(uri, meta)}<div class="photo-gradient"></div>{_brand(dark=True)}
+    photo_state = "has-photo" if uri else "no-photo"
+    return f"""<section class="slide photo-overlay bg-deep {photo_state}">{_photo_markup(uri, meta)}<div class="photo-gradient"></div>{_brand(dark=True)}
       <div class="{copy_classes}"><div class="accent-bar"></div><div class="eyebrow">{_esc(f['eyebrow'])}</div>
       <h1 style="font-size:{size}px">{_esc(f['headline'])}</h1></div>{_cover_note(f.get('coverNote'), overlay=True)}<div class="footer-row"><span>{_esc(f['footer'])}</span>{_counter(index,total,light=True)}</div></section>"""
 
@@ -397,7 +416,8 @@ def _cta_photo(slide: dict[str, Any], index: int, total: int) -> str:
     left = slide.get("variant") == "photo-left"
     size = _headline_size("cta_photo", f["headline"], 82)
     body_size = _copy_size(str(f.get("body") or ""), base=32, medium=28, small=25, medium_at=52, small_at=66)
-    return f"""<section class="slide cta-photo bg-dark {'photo-left' if left else ''}">{_photo_markup(uri, meta)}<div class="cta-fade"></div>
+    photo_state = "has-photo" if uri else "no-photo"
+    return f"""<section class="slide cta-photo bg-dark {photo_state} {'photo-left' if left else ''}">{_photo_markup(uri, meta)}<div class="cta-fade"></div>
       {_brand(dark=True,cta=True)}<div class="cta-copy"><div class="accent-bar"></div><h1 style="font-size:{size}px">{_esc(f['headline'])}</h1>
       <p style="font-size:{body_size}px">{_esc(f['body'])}</p><div class="cta-pill">{_esc(safe_editorial_cta(f['cta']))}</div></div>
       <div class="cta-footer"><div class="cta-compliance"><span>{_esc(MEDICAL_EDUCATIONAL_DISCLAIMER)}</span><strong>{_esc(MEDICAL_PROFESSIONAL_IDENTIFICATION)}</strong></div>{_counter(index,total,light=True)}</div></section>"""
@@ -483,6 +503,74 @@ def _css() -> str:
     .quote-copy{top:280px;bottom:300px;display:flex;flex-direction:column;justify-content:center}
     .myth-fact .fact-panel{justify-content:center}
     .do-dont .compare-list{flex:1;justify-content:center}
+    /* Fotos sao uma decisao editorial, nao uma exigencia do layout. */
+    .hero-photo.no-photo .hero-top-fade,.hero-photo.no-photo .hero-bottom-fade,.photo-overlay.no-photo .photo-gradient,.cta-photo.no-photo .cta-fade{display:none}
+    .photo-split.no-photo .split-photo{display:none}.photo-split.no-photo .split-copy{width:100%;padding-left:80px}.cta-photo.no-photo .cta-copy,.cta-photo.no-photo.photo-left .cta-copy{left:80px;width:920px}
+    html[data-grayscale-photos='true'] .hero-photo>.photo,html[data-grayscale-photos='true'] .photo-overlay>.photo,html[data-grayscale-photos='true'] .cta-photo>.photo,html[data-grayscale-photos='true'] .split-photo img,html[data-grayscale-photos='true'] .quote-photo{filter:grayscale(1) contrast(1.08)!important}
+    html[data-grayscale-photos='false'] .hero-photo>.photo,html[data-grayscale-photos='false'] .photo-overlay>.photo,html[data-grayscale-photos='false'] .cta-photo>.photo,html[data-grayscale-photos='false'] .split-photo img,html[data-grayscale-photos='false'] .quote-photo{filter:none!important}
+
+    /* Editorial Teal: tokens fechados do modelo modernista. O conteudo segue
+       vindo do roteiro e os layouts continuam variando conforme o tema. */
+    html[data-theme='modernist-teal']{{--navy:#0B2135;--teal:#17A697;--teal-dark:#0E7C71;--teal-deep:#04322D;--bone:#F3F1EC;--sand:#E7E3D9;--ink-soft:#3D4C58;--muted:#5A6A76;--rule:#0B2135;--radius:0}}
+    html[data-theme='modernist-teal'] .slide,html[data-theme='modernist-teal'] .slide *{{border-radius:var(--radius)!important;box-shadow:none!important;text-align:left}}
+    html[data-theme='modernist-teal'] .brand{{left:80px;top:80px;gap:7px}}
+    html[data-theme='modernist-teal'] .brand div{{padding:0;background:transparent;color:var(--teal);font-size:22px!important;font-weight:700;line-height:1;letter-spacing:.34em}}
+    html[data-theme='modernist-teal'] .brand strong{{padding:0;color:inherit;font-size:30px!important;font-weight:800;line-height:1;letter-spacing:.10em}}
+    html[data-theme='modernist-teal'] .bg-light{{background:var(--bone);color:var(--navy)}}html[data-theme='modernist-teal'] .bg-warm{{background:var(--sand);color:var(--navy)}}html[data-theme='modernist-teal'] .bg-dark{{background:var(--navy)}}html[data-theme='modernist-teal'] .bg-deep{{background:var(--teal-deep)}}
+    html[data-theme='modernist-teal'] .eyebrow{{font-size:26px;font-weight:700;line-height:1.2;letter-spacing:.30em;color:var(--teal)}}
+    html[data-theme='modernist-teal'] .accent-bar{{width:132px;height:6px;background:var(--teal)}}
+    html[data-theme='modernist-teal'] .counter{{font-size:26px;font-weight:700;letter-spacing:.22em}}
+    html[data-theme='modernist-teal'] .footer-row,html[data-theme='modernist-teal'] .statement-footer,html[data-theme='modernist-teal'] .split-footer,html[data-theme='modernist-teal'] .explainer-footer,html[data-theme='modernist-teal'] .quote-footer,html[data-theme='modernist-teal'] .cta-footer{{left:80px;right:80px;bottom:80px;border-top:2px solid var(--rule);padding-top:26px;font-size:26px}}
+    html[data-theme='modernist-teal'] .light-text .footer-row,html[data-theme='modernist-teal'] .big-statement.light-text .statement-footer,html[data-theme='modernist-teal'] .doctor-quote.light-text .quote-footer,html[data-theme='modernist-teal'] .cta-footer{{border-color:var(--bone)}}
+    html[data-theme='modernist-teal'] .hero-photo>.photo{{inset:0;width:100%;height:100%;object-fit:cover}}
+    html[data-theme='modernist-teal'] .hero-top-fade{{inset:0;width:100%;height:100%;background:linear-gradient(180deg,rgba(11,33,53,.94) 0%,rgba(11,33,53,.42) 52%,rgba(11,33,53,.86) 100%)}}
+    html[data-theme='modernist-teal'] .hero-bottom-fade{{display:none}}
+    html[data-theme='modernist-teal'] .hero-copy{{top:300px;bottom:210px;width:920px;justify-content:center;gap:26px}}
+    html[data-theme='modernist-teal'] .hero-copy h1{{font-size:118px!important;font-weight:800;line-height:.95;letter-spacing:-.03em}}
+    html[data-theme='modernist-teal'] .cover-note{{left:80px;bottom:180px;width:780px;height:auto;min-height:132px;padding:24px 30px 24px 38px;border:0;border-left:6px solid var(--teal);background:rgba(11,33,53,.82)}}
+    html[data-theme='modernist-teal'] .cover-note-text{{height:auto;min-height:72px;font-size:34px!important;font-weight:400;line-height:1.4}}
+    html[data-theme='modernist-teal'] .photo-split{{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:42px;padding:80px}}
+    html[data-theme='modernist-teal'] .photo-split.no-photo{{display:block}}
+    html[data-theme='modernist-teal'] .split-photo{{order:2;width:300px;height:460px;align-self:center}}
+    html[data-theme='modernist-teal'] .split-copy{{order:1;padding:0;min-width:0;display:flex;flex-direction:column}}
+    html[data-theme='modernist-teal'] .split-copy .brand{{position:static}}
+    html[data-theme='modernist-teal'] .split-spacer{{height:150px}}
+    html[data-theme='modernist-teal'] .split-copy h1{{font-size:104px!important;line-height:.95;letter-spacing:-.03em}}
+    html[data-theme='modernist-teal'] .split-copy p{{font-size:34px;line-height:1.4;color:var(--ink-soft);border-left:6px solid var(--teal);padding-left:30px}}
+    html[data-theme='modernist-teal'] .split-footer{{position:absolute;margin:0}}
+    html[data-theme='modernist-teal'] .question-guide{{display:none}}
+    html[data-theme='modernist-teal'] .question-label>span{{width:54px;height:54px;background:var(--navy);color:var(--bone);font-size:18px;border-radius:0}}
+    html[data-theme='modernist-teal'] .question-copy{{left:80px;right:80px;top:260px;bottom:190px;justify-content:center}}
+    html[data-theme='modernist-teal'] .question-copy h1{{font-size:104px!important;line-height:.95;letter-spacing:-.03em}}
+    html[data-theme='modernist-teal'] .question-answer{{max-width:920px;padding:30px 0 0 32px;border-left:6px solid var(--teal);border-top:2px solid var(--rule);background:transparent}}
+    html[data-theme='modernist-teal'] .question-copy .question-answer p{{font-size:34px;line-height:1.4;color:var(--ink-soft)}}
+    html[data-theme='modernist-teal'] .explainer-copy h1{{font-size:88px;line-height:.95;letter-spacing:-.03em}}
+    html[data-theme='modernist-teal'] .explainer-copy>p{{font-size:34px;line-height:1.4;color:var(--ink-soft)}}
+    html[data-theme='modernist-teal'] .step{{height:250px;padding:28px;border:2px solid var(--rule);background:transparent;color:var(--navy)}}html[data-theme='modernist-teal'] .step-final{{background:var(--navy);color:var(--bone)}}
+    html[data-theme='modernist-teal'] .step span{{color:var(--teal);font-weight:700}}
+    html[data-theme='modernist-teal'] .three-copy>h1{{font-size:92px;line-height:.95;letter-spacing:-.03em}}
+    html[data-theme='modernist-teal'] .point-row{{display:grid;grid-template-columns:130px 1fr;gap:0;border-top:2px solid currentColor;padding-top:28px}}
+    html[data-theme='modernist-teal'] .point-number{{width:130px;font-size:62px;color:var(--teal)}}html[data-theme='modernist-teal'] .point-row h3{{font-size:44px;font-weight:800}}html[data-theme='modernist-teal'] .point-row p{{font-size:32px;line-height:1.4}}
+    html[data-theme='modernist-teal'] .number-stat{{background:var(--teal);color:white}}
+    html[data-theme='modernist-teal'] .number-stat .brand div{{color:var(--teal-deep)}}html[data-theme='modernist-teal'] .number-stat .brand strong{{color:white}}
+    html[data-theme='modernist-teal'] .stat-copy{{top:270px;bottom:190px;gap:18px}}
+    html[data-theme='modernist-teal'] .statistic{{font-size:400px;line-height:.82;color:white}}
+    html[data-theme='modernist-teal'] .stat-guide{{height:6px;background:var(--teal-deep)}}
+    html[data-theme='modernist-teal'] .stat-reading{{border-top:0;padding-top:8px}}
+    html[data-theme='modernist-teal'] .stat-copy h1{{font-size:74px;color:var(--teal-deep);font-weight:800}}
+    html[data-theme='modernist-teal'] .stat-reading p{{font-size:32px;line-height:1.4;color:var(--teal-deep)}}
+    html[data-theme='modernist-teal'] .number-stat .footer-row{{border-color:var(--teal-deep);color:var(--teal-deep)}}
+    html[data-theme='modernist-teal'] .opening-quote{{font-family:Archivo,Arial,sans-serif;font-size:180px;color:var(--teal)}}
+    html[data-theme='modernist-teal'] blockquote{{font-family:Archivo,Arial,sans-serif;font-style:normal;font-size:82px;font-weight:800;line-height:.98;letter-spacing:-.03em}}
+    html[data-theme='modernist-teal'] .quote-photo{{width:122px;height:122px;border-radius:0}}
+    html[data-theme='modernist-teal'] .photo-gradient{{background:linear-gradient(180deg,rgba(11,33,53,.94) 0%,rgba(11,33,53,.42) 52%,rgba(11,33,53,.86) 100%)}}
+    html[data-theme='modernist-teal'] .overlay-copy h1,html[data-theme='modernist-teal'] .cta-copy h1{{font-size:104px!important;line-height:.95;letter-spacing:-.03em}}
+    html[data-theme='modernist-teal'] .cta-copy{{top:330px;bottom:270px;justify-content:center}}
+    html[data-theme='modernist-teal'] .cta-copy p{{font-size:34px;line-height:1.4}}
+    html[data-theme='modernist-teal'] .cta-pill{{padding:26px 44px;border-radius:0;background:var(--teal);color:var(--teal-deep);font-size:34px;font-weight:800}}
+    html[data-theme='modernist-teal'] .cta-compliance span{{font-size:24px}}html[data-theme='modernist-teal'] .cta-compliance strong{{font-size:24px}}
+    html[data-theme='modernist-teal'] .fact-counter,html[data-theme='modernist-teal'] .bottom-counter{{left:80px;right:80px;bottom:80px;border-top:2px solid var(--rule);padding-top:26px;display:flex;justify-content:flex-end}}
+    html[data-theme='modernist-teal'] .three-points.light-text .bottom-counter{{border-color:var(--bone)}}
     """
     for name, value in COLORS.items():
         template = template.replace("{COLORS['" + name + "']}", value)
@@ -514,6 +602,7 @@ def slide_html(
     total: int,
     family: str = "didatico",
     theme_id: str = "ocean-deep",
+    grayscale_photos: bool = True,
 ) -> str:
     normalized = normalize_slide(slide, index - 1)
     layout_id = normalized["layoutId"]
@@ -524,7 +613,8 @@ def slide_html(
     body = RENDERERS[layout_id](normalized, index, total)
     document = (
         "<!doctype html>"
-        f"<html lang='pt-BR' data-family='{resolved_family}' data-theme='{resolved_theme}'>"
+        f"<html lang='pt-BR' data-family='{resolved_family}' data-theme='{resolved_theme}' "
+        f"data-grayscale-photos='{'true' if grayscale_photos else 'false'}'>"
         f"<head><meta charset='utf-8'><style>{_css()}</style></head><body>{body}<script>"
         "(function(){const fit=()=>document.querySelectorAll('.auto-fit').forEach((node)=>{"
         "const max=Number(node.dataset.maxFontSize||44);const min=Number(node.dataset.minFontSize||24);"
@@ -564,6 +654,7 @@ def render_pack_images(
     avatar_asset: dict[str, Any] | None = None,
     family: str = "didatico",
     theme_id: str = "ocean-deep",
+    grayscale_photos: bool = True,
     render_extras: bool = True,
 ) -> dict[str, Any]:
     """Renderiza carrossel 1080x1350 e, apenas para Packs legados, post/stories."""
@@ -591,6 +682,7 @@ def render_pack_images(
                         total=len(slides),
                         family=family,
                         theme_id=theme_id,
+                        grayscale_photos=grayscale_photos,
                     ),
                     wait_until="networkidle",
                 )
@@ -644,6 +736,7 @@ def render_pack_images(
         "scale": 1,
         "family": family,
         "themeId": theme_id,
+        "grayscalePhotos": grayscale_photos,
     }
 
 
@@ -653,6 +746,7 @@ def render_pack_thumbnails(
     *,
     family: str = "didatico",
     theme_id: str = "ocean-deep",
+    grayscale_photos: bool = True,
 ) -> dict[str, Any]:
     """Renderiza a trilha inteira em um único Chromium, sem IA ou iframes.
 
@@ -682,6 +776,7 @@ def render_pack_thumbnails(
                         total=len(slides),
                         family=family,
                         theme_id=theme_id,
+                        grayscale_photos=grayscale_photos,
                     ),
                     wait_until="networkidle",
                 )
@@ -710,4 +805,5 @@ def render_pack_thumbnails(
         "images": len(slides),
         "width": PACK_THUMBNAIL_WIDTH,
         "height": PACK_THUMBNAIL_HEIGHT,
+        "grayscalePhotos": grayscale_photos,
     }

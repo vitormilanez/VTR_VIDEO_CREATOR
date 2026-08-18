@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import { formatPublicationCaption } from "@/lib/medical-identity";
 import { prioridadeLabel, riskLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
@@ -92,6 +93,7 @@ export const Route = createFileRoute("/_app/packs")({
 type Pack = GeneratedPack;
 
 const REQUIRED_CAROUSEL_SLIDES = 7;
+const NO_PHOTO_VALUE = "__no_photo__";
 
 /** Etapas da trilha educativa. Espelham EDUCATIONAL_SLIDE_STEPS no backend. */
 const educationalSteps = [
@@ -155,6 +157,12 @@ const themeOptions: Array<{
     swatches: ["#c8392b", "#171717", "#f4efe6"],
   },
   {
+    id: "modernist-teal",
+    label: "Editorial Teal",
+    description: "Navy, teal e estrutura modernista sem cantos arredondados.",
+    swatches: ["#17a697", "#0b2135", "#f3f1ec"],
+  },
+  {
     id: "ocean-deep",
     label: "Ocean Deep",
     description: "Azul profundo, teal e linguagem clínica.",
@@ -208,6 +216,10 @@ function familyOf(pack: Pack): PackFamily {
 
 function themeOf(pack: Pack): PackTheme {
   return pack.themeId ?? "ocean-deep";
+}
+
+function grayscalePhotosOf(pack: Pack): boolean {
+  return pack.grayscalePhotos !== false;
 }
 
 function layoutOf(slide: PackSlide): PackLayout {
@@ -500,7 +512,13 @@ function PacksPage() {
     try {
       const response = await generatePack(
         script,
-        pack ? { family: familyOf(pack), themeId: themeOf(pack) } : undefined,
+        pack
+          ? {
+              family: familyOf(pack),
+              themeId: themeOf(pack),
+              grayscalePhotos: grayscalePhotosOf(pack),
+            }
+          : undefined,
       );
       setPack(response.pack);
       setClarity(response.clarity);
@@ -576,13 +594,18 @@ function PacksPage() {
     }
   }
 
-  async function choosePhoto(photoAssetId: string) {
-    if (!script || !pack || savingPhoto || !slide || photoIdOf(slide) === photoAssetId) return;
+  async function choosePhoto(photoAssetId: string | null) {
+    if (!script || !pack || savingPhoto || !slide || photoIdOf(slide) === (photoAssetId ?? ""))
+      return;
     setSavingPhoto(true);
     try {
       const response = await updatePackCarouselPhoto(script.id, activeSlide, photoAssetId);
       applyMutation(response);
-      setLocalStatus("Foto trocada localmente. Exporte quando quiser gerar os PNGs.");
+      setLocalStatus(
+        photoAssetId
+          ? "Foto trocada localmente. Exporte quando quiser gerar os PNGs."
+          : "Foto removida. O layout e o texto foram preservados.",
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Nao foi possivel atualizar a foto.");
     } finally {
@@ -590,9 +613,18 @@ function PacksPage() {
     }
   }
 
-  async function choosePresentation(next: { family: PackFamily; themeId: PackTheme }) {
+  async function choosePresentation(next: {
+    family: PackFamily;
+    themeId: PackTheme;
+    grayscalePhotos: boolean;
+  }) {
     if (!script || !pack || savingPresentation) return;
-    if (familyOf(pack) === next.family && themeOf(pack) === next.themeId) return;
+    if (
+      familyOf(pack) === next.family &&
+      themeOf(pack) === next.themeId &&
+      grayscalePhotosOf(pack) === next.grayscalePhotos
+    )
+      return;
     const previousPack = pack;
     setSavingPresentation(true);
     setPack({ ...pack, ...next });
@@ -808,7 +840,9 @@ function PacksPage() {
                   ) : null}
                 </div>
                 <h2 className="font-display text-xl font-semibold tracking-tight">
-                  {script?.titulo ?? "Selecione um roteiro"}
+                  {pack?.carousel[0]
+                    ? headlineOf(pack.carousel[0])
+                    : (script?.titulo ?? "Selecione um roteiro")}
                 </h2>
                 <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
                   {packIsLegacy
@@ -1187,17 +1221,20 @@ function PacksPage() {
                             htmlFor="pack-slide-photo"
                             className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
                           >
-                            Foto
+                            Foto (opcional)
                           </label>
                           <Select
-                            value={slide ? photoIdOf(slide) : ""}
-                            onValueChange={(value) => void choosePhoto(value)}
+                            value={slide && photoIdOf(slide) ? photoIdOf(slide) : NO_PHOTO_VALUE}
+                            onValueChange={(value) =>
+                              void choosePhoto(value === NO_PHOTO_VALUE ? null : value)
+                            }
                             disabled={savingPhoto || photoAssets.length === 0}
                           >
                             <SelectTrigger id="pack-slide-photo" className="mt-1 h-9 text-sm">
                               <SelectValue placeholder="Foto do acervo" />
                             </SelectTrigger>
                             <SelectContent>
+                              <SelectItem value={NO_PHOTO_VALUE}>Sem foto</SelectItem>
                               {photoAssets.map((asset) => (
                                 <SelectItem key={asset.id} value={asset.id}>
                                   {asset.name}
@@ -1209,8 +1246,8 @@ function PacksPage() {
                       ) : null}
                     </div>
                     <p className="mt-2 text-[11px] text-muted-foreground">
-                      Layout, foto e tema são decisões locais: o texto aprovado é preservado e
-                      nenhuma chamada ao Claude é feita.
+                      Layout, foto opcional e tema são decisões locais: o texto aprovado é
+                      preservado e nenhuma chamada ao Claude é feita.
                     </p>
                   </div>
 
@@ -1349,6 +1386,7 @@ function PacksPage() {
                                     void choosePresentation({
                                       family: option.id,
                                       themeId: themeOf(pack),
+                                      grayscalePhotos: grayscalePhotosOf(pack),
                                     })
                                   }
                                 />
@@ -1397,6 +1435,7 @@ function PacksPage() {
                                     void choosePresentation({
                                       family: familyOf(pack),
                                       themeId: option.id,
+                                      grayscalePhotos: grayscalePhotosOf(pack),
                                     })
                                   }
                                 />
@@ -1430,6 +1469,31 @@ function PacksPage() {
                           })}
                         </div>
                       </fieldset>
+                    </div>
+
+                    <div className="mt-5 flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <label htmlFor="pack-grayscale-photos" className="text-sm font-semibold">
+                          Fotos em preto e branco
+                        </label>
+                        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                          Ativado por padrão. Desative para preservar as cores originais em todos os
+                          slides deste Pack.
+                        </p>
+                      </div>
+                      <Switch
+                        id="pack-grayscale-photos"
+                        checked={grayscalePhotosOf(pack)}
+                        disabled={savingPresentation}
+                        onCheckedChange={(checked) =>
+                          void choosePresentation({
+                            family: familyOf(pack),
+                            themeId: themeOf(pack),
+                            grayscalePhotos: checked,
+                          })
+                        }
+                        aria-label="Usar fotos em preto e branco"
+                      />
                     </div>
                   </section>
                 </TabsContent>
@@ -1549,7 +1613,7 @@ function PacksPage() {
                               "7 slides em sequencia narrativa",
                               "Conceito explicado antes de dados e cuidados",
                               "Uma ideia principal por tela, sem jargao ou confronto",
-                              "No maximo 3 slides com foto",
+                              "Fotos opcionais, com no máximo 3 slides usando imagem",
                               "Texto curto, didático e fácil de entender",
                               "Resumo e próximo passo no slide final",
                               "Legenda pronta para publicar",
