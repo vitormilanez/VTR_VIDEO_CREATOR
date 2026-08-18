@@ -170,8 +170,7 @@ export function ProductionReadinessCard({
   speechIssue?: string;
   saved: boolean;
 }) {
-  const blockingReady =
-    !catalogLoading && avatarReady && voiceReady && speechReady && saved;
+  const blockingReady = !catalogLoading && avatarReady && voiceReady && speechReady && saved;
   const checks = [
     {
       label: "Avatar",
