@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "medical-editorial-profile-v2-evidence",
+  "professional": {
+    "name": "Dr. Guilherme Martins",
+    "publicRole": "Médico",
+    "crm": "CRM-SP 182.364",
+    "registeredSpecialty": "Clínica Médica",
+    "rqe": "RQE 73.549",
+    "identification": "Dr. Guilherme Martins | Médico | CRM-SP 182.364 | Clínica Médica – RQE 73.549"
+  },
+  "publication": {
+    "disclaimer": "Conteúdo informativo e educativo. Não substitui consulta médica nem avaliação individualizada. Indicações, riscos e resultados variam conforme cada paciente.",
+    "minimumEndCardSeconds": 8
+  },
+  "editorial": {
+    "archetype": "Médico experiente falando diretamente para pessoas comuns, com clareza, precisão, sobriedade e linguagem natural. A autoridade vem da explicação responsável, nunca de jargão, promessa ou venda.",
+    "defaultSafeCta": "Salve para rever",
+    "rules": [
+      "Apresente e trate Guilherme Martins sempre como médico; não use a palavra especialista na comunicação editorial.",
+      "Produza somente conteúdo informativo e educativo, nunca anúncio, oferta ou argumento de venda.",
+      "Fundamente toda afirmação clínica em evidências verificáveis ou nas fontes fornecidas. Quando a evidência não estiver disponível, não invente e explicite a limitação.",
+      "Não crie chamadas comerciais ou de captação, incluindo pedido para seguir, acompanhar, inscrever-se, agendar, comprar, clicar em link, chamar no WhatsApp ou falar com a equipe.",
+      "Quando houver CTA, use apenas uma ação educativa neutra, como salvar para rever ou conversar com o médico responsável pelo cuidado.",
+      "Não invente fatos, números, estudos, experiência clínica, diagnóstico, prescrição, dose, benefício, risco ou resultado.",
+      "Todo material final deve exibir o aviso de publicação e a identificação profissional definidos neste perfil."
+    ],
+    "prohibitedCtaPatterns": [
+      "\\b(?:siga|me siga|acompanhe|me acompanhe|inscreva-se|se inscreva)\\b",
+      "\\bquer mais dicas\\b",
+      "(?:^|[.!?]\\s+|\\be\\s+)curta\\b|\\b(?:comente|compartilhe|envie para|marque (?:um amigo|uma amiga|alguém|alguem))\\b",
+      "\\b(?:agende|marque|reserve)\\b",
+      "\\b(?:compre|contrate|assine)\\b",
+      "\\b(?:promoção|promocao|desconto|oferta|vagas?)\\b",
+      "\\b(?:link na bio|clique no link|acesse o link)\\b",
+      "\\b(?:whatsapp|whats|chame no direct|fale com (?:a )?equipe)\\b"
+    ]
+  }
+}

@@ -1,6 +1,7 @@
 import { assessScriptDuration, type DurationPreset } from "./script-editor";
+import { MEDICAL_DEFAULT_SAFE_CTA } from "./medical-identity";
 
-export const DEFAULT_OUTRO = "Me siga para mais dicas, e obrigado.";
+export const DEFAULT_OUTRO = MEDICAL_DEFAULT_SAFE_CTA;
 const LEGACY_CAPTURE_OUTRO = "Veja o contexto no perfil.";
 
 const PLACEHOLDER_PATTERNS: Array<{ regex: RegExp; message: string }> = [
@@ -34,16 +35,6 @@ export function narrationQualityIssues(
 
   for (const pattern of PLACEHOLDER_PATTERNS) {
     if (pattern.regex.test(normalized)) issues.push(pattern.message);
-  }
-
-  const selectedOutro = durationSeconds === 10 ? "" : outro.replace(/\s+/g, " ").trim();
-  if (selectedOutro) {
-    const outroMatches = normalized.match(new RegExp(escapeRegExp(selectedOutro), "gi")) ?? [];
-    if (outroMatches.length !== 1) {
-      issues.push("A frase final deve aparecer exatamente uma vez.");
-    } else if (!normalized.toLowerCase().endsWith(selectedOutro.toLowerCase())) {
-      issues.push("A frase final precisa ser a última frase.");
-    }
   }
 
   const assessment = assessScriptDuration(text, durationSeconds as DurationPreset);

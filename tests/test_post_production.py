@@ -4,14 +4,28 @@ import sqlite3
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from api.job_store import JobStore
+from api.services.medical_identity import MEDICAL_MINIMUM_END_CARD_SECONDS
 from api.services.transcript_service import normalize_transcript
-from api.services.post_production import caption_cues, render_preview, save_event_updates
-from api.services.visual_planner import deterministic_visual_plan, normalize_visual_plan
+from api.services.post_production import (
+    analyze_post_production,
+    caption_cues,
+    render_preview,
+    save_event_updates,
+)
+from api.services.visual_planner import (
+    _anthropic_visual_plan,
+    deterministic_visual_plan,
+    normalize_visual_plan,
+)
 from api.services.visual_timeline import materialize_timeline, preflight_timeline, timeline_is_stale
 
 
@@ -149,6 +163,115 @@ class PostProductionContractTests(unittest.TestCase):
         self.assertEqual(event["visualText"], "cuidado importante")
         self.assertNotEqual(event["id"], "old-id")
 
+    def test_long_claude_range_is_capped_and_incomplete_copy_is_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            video = root / "source.mp4"
+            video.write_bytes(b"timed-plan")
+            spoken_words = "A próxima geração combina dois sinais de saciedade ao mesmo tempo com clareza".split()
+            transcript = normalize_transcript(
+                video_path=video,
+                language="pt",
+                duration_seconds=8,
+                model_version="fixture-v1",
+                raw_segments=[
+                    {
+                        "start": 0,
+                        "end": 8,
+                        "text": " ".join(spoken_words),
+                        "words": [
+                            {
+                                "start": index * 0.55,
+                                "end": (index + 1) * 0.55,
+                                "text": text,
+                            }
+                            for index, text in enumerate(spoken_words)
+                        ],
+                    }
+                ],
+            )
+            plan = {
+                "schemaVersion": "visual-plan-v1",
+                "modelVersion": "fixture",
+                "transcriptVersion": transcript["version"],
+                "videoFingerprint": transcript["videoFingerprint"],
+                "events": [
+                    {
+                        "id": "long",
+                        "startWordIndex": 0,
+                        "endWordIndex": len(spoken_words) - 1,
+                        "interactionType": "comparison_card",
+                        "visualText": "dois sinais de saciedade ao mesmo",
+                        "intensity": "medium",
+                        "reason": "fixture",
+                        "confidence": 0.95,
+                        "fallback": "caption_emphasis",
+                    }
+                ],
+            }
+            normalized = normalize_visual_plan(transcript, plan)
+            timeline = materialize_timeline(transcript, normalized)
+
+        event = timeline["events"][0]
+        self.assertLessEqual(event["endMs"] - event["startMs"], 5000)
+        self.assertEqual((event["startWordIndex"], event["endWordIndex"]), (4, 10))
+        self.assertEqual(event["visualText"], "dois sinais de saciedade ao mesmo tempo")
+        self.assertFalse(event["visualText"].endswith("ao mesmo"))
+
+    def test_number_card_starts_when_the_approved_number_is_spoken(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            video = root / "source.mp4"
+            video.write_bytes(b"number-timing")
+            words = "Na versão oral os participantes tiveram redução de cerca de 13 % do peso em 12 semanas".split()
+            transcript = normalize_transcript(
+                video_path=video,
+                language="pt",
+                duration_seconds=8,
+                model_version="fixture-v1",
+                raw_segments=[
+                    {
+                        "start": 0,
+                        "end": 8,
+                        "text": " ".join(words),
+                        "words": [
+                            {
+                                "start": index * 0.45,
+                                "end": (index + 1) * 0.45,
+                                "text": text,
+                            }
+                            for index, text in enumerate(words)
+                        ],
+                    }
+                ],
+            )
+            plan = {
+                "schemaVersion": "visual-plan-v1",
+                "modelVersion": "fixture",
+                "transcriptVersion": transcript["version"],
+                "videoFingerprint": transcript["videoFingerprint"],
+                "events": [
+                    {
+                        "id": "number",
+                        "startWordIndex": 0,
+                        "endWordIndex": len(words) - 1,
+                        "interactionType": "number_card",
+                        "visualText": "13% peso 12 semanas",
+                        "intensity": "high",
+                        "reason": "fixture",
+                        "confidence": 0.95,
+                        "fallback": "caption_emphasis",
+                    }
+                ],
+            }
+            timeline = materialize_timeline(transcript, normalize_visual_plan(transcript, plan))
+
+        event = timeline["events"][0]
+        self.assertEqual(event["startWordIndex"], words.index("13"))
+        self.assertEqual(event["startMs"], words.index("13") * 450)
+        self.assertEqual(event["visualText"], "13% peso 12 semanas")
+        self.assertLessEqual(event["endMs"] - event["startMs"], 5000)
+
     def test_supporting_visual_gets_generated_asset_and_incomplete_text_is_repaired(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             transcript = self._transcript(Path(temporary))
@@ -175,6 +298,17 @@ class PostProductionContractTests(unittest.TestCase):
         event = normalized["events"][0]
         self.assertFalse(event["visualText"].endswith(" o"))
         self.assertTrue(event["assetRef"].startswith("generated:"))
+
+    def test_low_confidence_visual_is_removed_and_zero_events_remains_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = self._transcript(Path(temporary))
+            plan = deterministic_visual_plan(transcript)
+            plan["events"][0]["confidence"] = 0.4
+            plan["events"][1]["confidence"] = 0.4
+            normalized = normalize_visual_plan(transcript, plan)
+
+        self.assertEqual(normalized["events"], [])
+        self.assertIn("Nenhuma intervenção", normalized["noVisualReason"])
 
     def test_caption_cues_are_short_word_timed_and_at_most_two_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -210,6 +344,77 @@ class PostProductionContractTests(unittest.TestCase):
             )
         )
 
+    def test_captions_are_ready_even_when_claude_planning_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "post-production"
+            job_id = "post-caption-first"
+            directory = output_root / job_id
+            directory.mkdir(parents=True)
+            source = directory / "source.mp4"
+            source.write_bytes(b"caption-first-video")
+            transcript = normalize_transcript(
+                video_path=source,
+                language="pt",
+                duration_seconds=2,
+                model_version="fixture-v1",
+                raw_segments=[
+                    {
+                        "start": 0.1,
+                        "end": 1.8,
+                        "text": "A legenda fica pronta antes do Claude.",
+                        "words": [
+                            {"start": 0.1, "end": 0.3, "text": "A"},
+                            {"start": 0.3, "end": 0.7, "text": "legenda"},
+                            {"start": 0.7, "end": 1.0, "text": "fica"},
+                            {"start": 1.0, "end": 1.3, "text": "pronta"},
+                            {"start": 1.3, "end": 1.5, "text": "antes"},
+                            {"start": 1.5, "end": 1.6, "text": "do"},
+                            {"start": 1.6, "end": 1.8, "text": "Claude."},
+                        ],
+                    }
+                ],
+            )
+            (directory / "transcript.json").write_text(
+                json.dumps(transcript),
+                encoding="utf-8",
+            )
+            store = JobStore(root / "jobs.sqlite3")
+            store.upsert(
+                "post_production",
+                {
+                    "id": job_id,
+                    "kind": "post_production",
+                    "status": "queued",
+                    "progresso": 2,
+                    "requireClaude": True,
+                    "criadoEm": "now",
+                    "atualizadoEm": "now",
+                },
+            )
+
+            with patch(
+                "api.services.post_production.plan_visuals",
+                side_effect=RuntimeError("Claude indisponível"),
+            ):
+                analyze_post_production(
+                    store=store,
+                    job_id=job_id,
+                    output_root=output_root,
+                    project_root=root,
+                )
+
+            current = store.get("post_production", job_id)
+            captions = directory / "captions.srt"
+            captions_exist = captions.is_file()
+            captions_text = captions.read_text(encoding="utf-8")
+
+        self.assertEqual(current["status"], "failed")
+        self.assertEqual(current["captionsStatus"], "ready")
+        self.assertGreater(current["captionCueCount"], 0)
+        self.assertTrue(captions_exist)
+        self.assertIn("legenda fica pronta", captions_text)
+
     def test_planner_uses_indices_and_backend_derives_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             transcript = self._transcript(Path(temporary))
@@ -219,6 +424,54 @@ class PostProductionContractTests(unittest.TestCase):
         self.assertEqual(timeline["events"][0]["startMs"], 100)
         self.assertEqual(timeline["events"][0]["spokenText"], "Entenda este cuidado importante")
         self.assertEqual(timeline["events"][-1]["interactionType"], "cta_card")
+
+    def test_claude_schema_uses_string_sentinel_and_receives_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = self._transcript(Path(temporary))
+        captured: dict = {}
+        response_payload = {
+            "contentType": "educacional",
+            "summary": "Resumo factual",
+            "strategy": "Usar apenas um apoio relevante.",
+            "noVisualReason": "",
+            "events": [
+                {
+                    "startWordIndex": 0,
+                    "endWordIndex": 3,
+                    "interactionType": "supporting_visual",
+                    "visualText": "cuidado importante",
+                    "intensity": "medium",
+                    "assetRef": "science",
+                    "reason": "Esclarece o trecho.",
+                    "confidence": 0.92,
+                    "fallback": "caption_emphasis",
+                }
+            ],
+        }
+
+        class FakeMessages:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    content=[SimpleNamespace(text=json.dumps(response_payload))]
+                )
+
+        fake_anthropic = types.ModuleType("anthropic")
+        fake_anthropic.Anthropic = lambda: SimpleNamespace(messages=FakeMessages())
+        with patch.dict(sys.modules, {"anthropic": fake_anthropic}):
+            plan, _message, _model = _anthropic_visual_plan(
+                transcript,
+                model_name="claude-test",
+            )
+
+        asset_schema = captured["output_config"]["format"]["schema"]["properties"][
+            "events"
+        ]["items"]["properties"]["assetRef"]
+        self.assertEqual(asset_schema["type"], "string")
+        self.assertIn("none", asset_schema["enum"])
+        self.assertNotIn(None, asset_schema["enum"])
+        self.assertIn("0 [0.10s–0.45s]: Entenda", captured["messages"][0]["content"])
+        self.assertEqual(plan["events"][0]["assetRef"], "generated:science")
 
     def test_stale_or_tampered_timeline_blocks_render(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -292,6 +545,204 @@ class PostProductionContractTests(unittest.TestCase):
 
         self.assertEqual(updated["events"][0]["interactionType"], "supporting_visual")
         self.assertTrue(updated["events"][0]["assetRef"].startswith("generated:"))
+
+    def test_individual_event_can_use_a_generic_visual_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "post-production"
+            directory = output_root / "post-1"
+            directory.mkdir(parents=True)
+            transcript = self._transcript(root)
+            timeline = materialize_timeline(
+                transcript,
+                normalize_visual_plan(transcript, deterministic_visual_plan(transcript)),
+            )
+            (directory / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+            (directory / "timeline.json").write_text(json.dumps(timeline), encoding="utf-8")
+
+            updated = save_event_updates(
+                output_root=output_root,
+                job_id="post-1",
+                updates=[
+                    {
+                        "id": timeline["events"][0]["id"],
+                        "interactionType": "definition_card",
+                    }
+                ],
+            )
+
+        self.assertEqual(updated["events"][0]["interactionType"], "definition_card")
+
+    def test_individual_event_appearance_is_saved_locally_without_replanning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "post-production"
+            directory = output_root / "post-appearance"
+            directory.mkdir(parents=True)
+            transcript = self._transcript(root)
+            timeline = materialize_timeline(
+                transcript,
+                normalize_visual_plan(transcript, deterministic_visual_plan(transcript)),
+            )
+            (directory / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+            (directory / "timeline.json").write_text(json.dumps(timeline), encoding="utf-8")
+
+            updated = save_event_updates(
+                output_root=output_root,
+                job_id="post-appearance",
+                updates=[
+                    {
+                        "id": timeline["events"][0]["id"],
+                        "screenPosition": "bottom_left",
+                        "backgroundColor": "#4A1F2B",
+                        "backgroundOpacity": 0.55,
+                    }
+                ],
+            )
+
+        event = updated["events"][0]
+        self.assertEqual(event["screenPosition"], "bottom_left")
+        self.assertEqual(event["backgroundColor"], "#4a1f2b")
+        self.assertEqual(event["backgroundOpacity"], 0.55)
+
+    def test_individual_event_can_use_exact_manual_entry_and_exit_times(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "post-production"
+            directory = output_root / "post-manual-time"
+            directory.mkdir(parents=True)
+            transcript = self._transcript(root)
+            timeline = materialize_timeline(
+                transcript,
+                normalize_visual_plan(transcript, deterministic_visual_plan(transcript)),
+            )
+            (directory / "source.mp4").write_bytes((root / "source.mp4").read_bytes())
+            (directory / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+            (directory / "timeline.json").write_text(json.dumps(timeline), encoding="utf-8")
+            selected = timeline["events"][0]
+            updates = [
+                {"id": event["id"], "enabled": event["id"] == selected["id"]}
+                for event in timeline["events"]
+            ]
+            updates[0].update(startMs=250, endMs=1850)
+
+            updated = save_event_updates(
+                output_root=output_root,
+                job_id="post-manual-time",
+                updates=updates,
+            )
+            report = preflight_timeline(
+                source_path=directory / "source.mp4",
+                transcript_payload=transcript,
+                timeline_payload=updated,
+                require_render_tools=False,
+            )
+
+        changed = updated["events"][0]
+        self.assertEqual((changed["startMs"], changed["endMs"]), (250, 1850))
+        self.assertEqual(changed["timingSource"], "manual")
+        self.assertFalse(any(item["code"] == "event.time_derivation" for item in report["findings"]))
+        self.assertTrue(report["ok"])
+
+    def test_manual_event_time_can_be_restored_from_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "post-production"
+            directory = output_root / "post-reset-time"
+            directory.mkdir(parents=True)
+            transcript = self._transcript(root)
+            timeline = materialize_timeline(
+                transcript,
+                normalize_visual_plan(transcript, deterministic_visual_plan(transcript)),
+            )
+            event = timeline["events"][0]
+            event.update(startMs=250, endMs=1850, timingSource="manual")
+            (directory / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+            (directory / "timeline.json").write_text(json.dumps(timeline), encoding="utf-8")
+
+            updated = save_event_updates(
+                output_root=output_root,
+                job_id="post-reset-time",
+                updates=[{"id": event["id"], "timingSource": "transcript"}],
+            )
+
+        restored = updated["events"][0]
+        self.assertEqual(restored["timingSource"], "transcript")
+        self.assertEqual(restored["startMs"], transcript["words"][event["startWordIndex"]]["startMs"])
+        self.assertEqual(restored["endMs"], transcript["words"][event["endWordIndex"]]["endMs"])
+
+    def test_manual_event_time_rejects_invalid_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "post-production"
+            directory = output_root / "post-invalid-time"
+            directory.mkdir(parents=True)
+            transcript = self._transcript(root)
+            timeline = materialize_timeline(
+                transcript,
+                normalize_visual_plan(transcript, deterministic_visual_plan(transcript)),
+            )
+            (directory / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+            (directory / "timeline.json").write_text(json.dumps(timeline), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "entre 1,5 e 5,5"):
+                save_event_updates(
+                    output_root=output_root,
+                    job_id="post-invalid-time",
+                    updates=[{"id": timeline["events"][0]["id"], "startMs": 900, "endMs": 1200}],
+                )
+
+    def test_duplicate_upload_reuses_analysis_for_new_upload_id_and_generates_pack(self) -> None:
+        from api import server
+
+        class DuplicateStore:
+            def __init__(self) -> None:
+                self.job = {
+                    "id": "post-1234567890abcdef",
+                    "kind": "post_production",
+                    "uploadId": "kit-upload-aaaaaaaaaaaaaaaa",
+                    "status": "needs_review",
+                    "plannerMode": "anthropic",
+                    "requireClaude": True,
+                    "packStatus": "failed",
+                }
+
+            def reserve(self, *_args, **_kwargs):
+                return self.job, "duplicate"
+
+            def upsert(self, _kind, job):
+                self.job = dict(job)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            uploads = root / "uploads"
+            outputs = root / "post-production"
+            uploads.mkdir()
+            new_upload_id = "kit-upload-bbbbbbbbbbbbbbbb"
+            (uploads / f"{new_upload_id}.mp4").write_bytes(b"same-video")
+            existing = outputs / "post-1234567890abcdef"
+            existing.mkdir(parents=True)
+            (existing / "source.mp4").write_bytes(b"same-video")
+            store = DuplicateStore()
+            with (
+                patch.object(server, "LOCAL_VIDEO_KIT_UPLOADS", uploads),
+                patch.object(server, "POST_PRODUCTION_OUTPUTS", outputs),
+                patch.object(server, "_job_store", return_value=store),
+                patch.object(server, "_launch_post_production_analysis") as launch,
+            ):
+                response = server.create_post_production(
+                    server.PostProductionCreateIn(
+                        uploadId=new_upload_id,
+                        sourceName="video.mp4",
+                        requireClaude=True,
+                        generatePack=True,
+                    )
+                )
+
+        self.assertTrue(response["duplicate"])
+        self.assertEqual(response["job"]["uploadId"], new_upload_id)
+        self.assertEqual(response["job"]["status"], "queued")
+        launch.assert_called_once_with("post-1234567890abcdef")
 
 
 class JobStorePostProductionMigrationTests(unittest.TestCase):
@@ -392,8 +843,14 @@ class PostProductionEndToEndTests(unittest.TestCase):
             self.assertEqual(job["status"], "preview_ready")
             self.assertEqual(source.read_bytes(), source_before)
             self.assertTrue((directory / "preview.mp4").is_file())
+            self.assertTrue((directory / "medical-end-card.png").is_file())
             manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["timelineVersion"], timeline["version"])
+            self.assertEqual(manifest["composition"]["segments"][-1]["kind"], "medical_end_card")
+            self.assertEqual(
+                manifest["composition"]["segments"][-1]["durationSeconds"],
+                MEDICAL_MINIMUM_END_CARD_SECONDS,
+            )
             probe = subprocess.run(
                 [
                     "ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
@@ -406,4 +863,8 @@ class PostProductionEndToEndTests(unittest.TestCase):
             )
             metadata = json.loads(probe.stdout)
             self.assertEqual({stream["codec_type"] for stream in metadata["streams"]}, {"video", "audio"})
-            self.assertAlmostEqual(float(metadata["format"]["duration"]), 2, delta=0.2)
+            self.assertAlmostEqual(
+                float(metadata["format"]["duration"]),
+                2 + MEDICAL_MINIMUM_END_CARD_SECONDS,
+                delta=0.2,
+            )

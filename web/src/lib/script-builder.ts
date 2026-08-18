@@ -1,4 +1,5 @@
 import type { Idea, Script } from "./mock-data";
+import { safeEditorialCta } from "./medical-identity";
 
 export function buildScriptFromIdea(
   idea: Idea,
@@ -116,7 +117,7 @@ function buildTurn(theme: string, medication: boolean, fromArticle: boolean): st
 
 function buildCta(idea: Idea, medication: boolean): string {
   const cta = idea.cta.trim();
-  if (cta && !/procure avaliacao individualizada/i.test(cta)) return cta;
+  if (cta && !/procure avaliacao individualizada/i.test(cta)) return safeEditorialCta(cta);
   return medication
     ? "Salve para lembrar: medicamento exige avaliação individual, não decisão por vídeo."
     : "Salve para rever quando aparecer uma explicação simplista sobre esse tema.";

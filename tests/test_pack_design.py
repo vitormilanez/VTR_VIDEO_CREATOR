@@ -3,16 +3,46 @@ from __future__ import annotations
 from copy import deepcopy
 
 from api.pack_design import (
+    LAYOUT_SPECS,
+    PACK_FAMILIES,
     PACK_LAYOUTS,
     PACK_SCHEMA_VERSION,
     PHOTO_LIBRARY,
+    educational_flow_issues,
     empty_fields,
     normalize_slide,
     pack_slides,
     repair_pack_copy,
     validate_pack_contract,
 )
+from api.services.medical_identity import (
+    MEDICAL_DEFAULT_SAFE_CTA,
+    MEDICAL_EDUCATIONAL_DISCLAIMER,
+    MEDICAL_PROFESSIONAL_IDENTIFICATION,
+    MEDICAL_PUBLICATION_NOTICE,
+    MEDICAL_ROLE_AND_REGISTERED_SPECIALTY,
+)
 from api.slides import slide_html
+
+
+EXPECTED_ADDED_PACK_PHOTOS = {
+    "institute-reading-front": "gui-instituto-leitura-frente.png",
+    "institute-reading-side": "gui-instituto-leitura-lateral.png",
+    "vivance-horizontal-portrait": "gui-vivance-retrato-horizontal.png",
+    "vivance-seated-sign": "gui-vivance-sentado-placa.png",
+    "vivance-seated-full-body": "gui-vivance-sentado-corpo-inteiro.png",
+    "vivance-standing-crossed-arms": "gui-vivance-em-pe-bracos-cruzados.png",
+    "vivance-seated-close": "gui-vivance-sentado-close.png",
+    "vivance-crossed-arms-close": "gui-vivance-bracos-cruzados-close.png",
+    "vivance-office-thoughtful": "gui-vivance-escritorio-pensativo.png",
+    "vivance-office-standing": "gui-vivance-escritorio-em-pe.png",
+    "vivance-outdoor-half-body": "gui-vivance-externo-meio-corpo.png",
+    "vivance-seated-portrait": "gui-vivance-sentado-retrato.png",
+    "vivance-seated-close-alt": "gui-vivance-sentado-close-alternativo.png",
+    "vivance-outdoor-hands-pockets": "gui-vivance-externo-maos-bolsos.png",
+    "vivance-crossed-arms-portrait": "gui-vivance-bracos-cruzados-retrato.png",
+    "vivance-outdoor-full-body": "gui-vivance-externo-corpo-inteiro.png",
+}
 
 
 def _fields(**values: object) -> dict[str, object]:
@@ -88,15 +118,19 @@ def sample_pack() -> dict[str, object]:
             "fields": _fields(
                 headline="Troque culpa por uma avaliacao individual",
                 body="Entender a causa e o primeiro passo para escolher um cuidado possivel.",
-                cta="Salve para rever",
-                disclaimer="Conteudo educativo. Nao substitui avaliacao medica.",
+                cta=MEDICAL_DEFAULT_SAFE_CTA,
+                disclaimer=MEDICAL_EDUCATIONAL_DISCLAIMER,
+                footer=MEDICAL_PROFESSIONAL_IDENTIFICATION,
                 photoId="seated-lean",
             ),
         },
     ]
     return {
         "schemaVersion": PACK_SCHEMA_VERSION,
-        "caption": "Peso nao depende de uma unica escolha. Observe o contexto e procure cuidado individual.",
+        "caption": (
+            "Peso nao depende de uma unica escolha. Observe o contexto e procure cuidado individual.\n\n"
+            + MEDICAL_PUBLICATION_NOTICE
+        ),
         "hashtags": ["#saudemetabolica", "#educacaoemsaude"],
         "slides": slides,
         "carousel": slides,
@@ -107,6 +141,31 @@ def test_sample_pack_follows_closed_contract() -> None:
     assert validate_pack_contract(sample_pack()) == []
 
 
+def test_sample_pack_follows_the_educational_flow() -> None:
+    assert educational_flow_issues(sample_pack()) == []
+
+
+def test_educational_flow_rejects_accusatory_copy_and_late_explanation() -> None:
+    pack = sample_pack()
+    pack["slides"][1]["layoutId"] = "big_statement"
+    pack["slides"][1]["layout"] = "big_statement"
+    pack["slides"][1]["fields"]["headline"] = "Você confunde estudo com medicamento aprovado"
+    pack["slides"][3]["layoutId"] = "three_points"
+    pack["slides"][3]["layout"] = "three_points"
+
+    issues = educational_flow_issues(pack)
+
+    assert any("tom acusatorio" in issue for issue in issues)
+    assert any("slides 3 ou 4" in issue for issue in issues)
+
+
+def test_doctor_quote_uses_the_registered_medical_identification() -> None:
+    html = slide_html(sample_pack()["slides"][5], index=6, total=7)
+
+    assert MEDICAL_ROLE_AND_REGISTERED_SPECIALTY in html
+    assert "Endocrinologia e Metabologia" not in html
+
+
 def test_photo_library_ids_point_to_their_visual_content() -> None:
     assert PHOTO_LIBRARY["wide-office"]["file"].endswith("vine8178.jpg")
     assert PHOTO_LIBRARY["seated-side"]["file"].endswith("vine8172.jpg")
@@ -114,6 +173,34 @@ def test_photo_library_ids_point_to_their_visual_content() -> None:
     assert PHOTO_LIBRARY["seated-arm"]["file"].endswith("vine8150.jpg")
     assert PHOTO_LIBRARY["seated-front"]["file"].endswith("vine8142.jpg")
     assert PHOTO_LIBRARY["portrait-closeup"]["file"].endswith("vine8121.jpg")
+    assert PHOTO_LIBRARY["institute-desk-pose"]["file"].endswith(
+        "gui-instituto-escritorio-pose.png"
+    )
+    assert PHOTO_LIBRARY["institute-reading-front"]["file"].endswith(
+        "gui-instituto-leitura-frente.png"
+    )
+    assert PHOTO_LIBRARY["institute-reading-side"]["file"].endswith(
+        "gui-instituto-leitura-lateral.png"
+    )
+    assert PHOTO_LIBRARY["white-polo-portrait"]["file"].endswith(
+        "gui-polo-retrato-escuro.jpeg"
+    )
+    for photo_id, filename in EXPECTED_ADDED_PACK_PHOTOS.items():
+        assert PHOTO_LIBRARY[photo_id]["file"].endswith(filename)
+
+
+def test_added_pack_photos_exist_and_have_complete_metadata() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for photo_id in EXPECTED_ADDED_PACK_PHOTOS:
+        photo = PHOTO_LIBRARY[photo_id]
+        assert (root / photo["file"]).is_file()
+        assert photo["name"]
+        assert photo["description"]
+        assert 0 <= photo["facePointX"] <= 1
+        assert 0 <= photo["facePointY"] <= 1
+        assert 0 <= photo["brightness"] <= 1
 
 
 def test_normalize_slide_refreshes_stale_photo_path_from_canonical_library() -> None:
@@ -168,6 +255,49 @@ def test_photo_update_synchronizes_carousel_and_legacy_alias(monkeypatch) -> Non
     assert response["pack"]["slides"] == response["pack"]["carousel"]
 
 
+def test_cover_note_update_is_saved_on_slide_one_without_regenerating_pack(monkeypatch) -> None:
+    from api import server
+
+    pack = sample_pack()
+    pack["carousel"] = deepcopy(pack["carousel"])
+    pack["slides"] = deepcopy(pack["slides"])
+    saved: dict[str, object] = {}
+    monkeypatch.setattr(server, "_find_script", lambda _script_id: {})
+    monkeypatch.setattr(server, "_get_visual_pack", lambda _script_id: pack)
+    monkeypatch.setattr(
+        server,
+        "_save_visual_pack",
+        lambda _script_id, value: saved.setdefault("pack", value) or value,
+    )
+
+    response = server.update_pack_cover_note(
+        "s-test",
+        server.PackCoverNoteIn(text="Atendimento individual, com escuta e estratégia."),
+    )
+
+    assert response["pack"]["carousel"][0]["fields"]["coverNote"] == (
+        "Atendimento individual, com escuta e estratégia."
+    )
+    assert response["pack"]["slides"] == response["pack"]["carousel"]
+    assert saved["pack"] == response["pack"]
+
+
+def test_cover_note_is_limited_by_contract_and_rendered_with_auto_fit_box() -> None:
+    pack = sample_pack()
+    cover_note = "Uma mensagem de capa mais longa para confirmar que a tipografia será ajustada " * 3
+    pack["slides"][0]["fields"]["coverNote"] = cover_note
+
+    repaired = repair_pack_copy(pack)
+    html = slide_html(repaired["slides"][0], index=1, total=7)
+
+    assert len(repaired["slides"][0]["fields"]["coverNote"]) <= 180
+    assert len(repaired["slides"][0]["fields"]["coverNote"]) < len(cover_note.strip())
+    assert validate_pack_contract(repaired) == []
+    assert "cover-note-text auto-fit" in html
+    assert 'data-min-font-size="24"' in html
+    assert "document.fonts.ready.then(fit)" in html
+
+
 def test_contract_rejects_extra_slide_and_long_headline() -> None:
     pack = sample_pack()
     pack["carousel"] = [*pack["carousel"], pack["carousel"][-1]]
@@ -177,6 +307,25 @@ def test_contract_rejects_extra_slide_and_long_headline() -> None:
 
     assert any("8 itens" in error for error in errors)
     assert any("headline" in error for error in errors)
+
+
+def test_contract_rejects_broken_myth_fact_fragments_before_truncation() -> None:
+    pack = sample_pack()
+    pack["slides"][2]["fields"]["item1"] = {
+        "title": "Se meu pai",
+        "text": "Predisposicao aumenta risco, mas nao",
+    }
+    pack["slides"][2]["fields"]["item2"] = {
+        "title": "Genes",
+        "text": "Setenta e nove por cento da influencia vem",
+    }
+
+    errors = validate_pack_contract(pack)
+
+    assert any("item1.title precisa ser Mito" in error for error in errors)
+    assert any("item1.text termina em frase incompleta" in error for error in errors)
+    assert any("item2.title precisa ser Fato" in error for error in errors)
+    assert any("item2.text termina em frase incompleta" in error for error in errors)
 
 
 def test_legacy_slide_keeps_saved_copy() -> None:
@@ -206,6 +355,18 @@ def test_repair_pack_copy_fits_layout_limits_before_validation() -> None:
     assert validate_pack_contract(repaired) == []
 
 
+def test_repair_pack_copy_removes_incomplete_tail_left_by_provider() -> None:
+    pack = sample_pack()
+    pack["slides"][1]["fields"]["body"] = "O contexto depende do ambiente, mas não"
+    pack["slides"][5]["fields"]["quote"] = "A melhor decisão para cada pessoa pode"
+
+    repaired = repair_pack_copy(pack)
+
+    assert repaired["slides"][1]["fields"]["body"] == "O contexto depende do ambiente"
+    assert repaired["slides"][5]["fields"]["quote"] == "A melhor decisão para cada pessoa"
+    assert validate_pack_contract(repaired) == []
+
+
 def test_repair_pack_copy_fills_missing_required_scalar_fields() -> None:
     pack = sample_pack()
     pack["slides"][6]["fields"]["cta"] = ""
@@ -214,13 +375,29 @@ def test_repair_pack_copy_fills_missing_required_scalar_fields() -> None:
 
     repaired = repair_pack_copy(pack)
 
-    assert repaired["slides"][6]["fields"]["cta"] == "Salve para revisar"
-    assert repaired["slides"][6]["fields"]["disclaimer"] == "Conteudo educativo. Nao substitui avaliacao medica."
+    assert repaired["slides"][6]["fields"]["cta"] == MEDICAL_DEFAULT_SAFE_CTA
+    assert repaired["slides"][6]["fields"]["disclaimer"] == MEDICAL_EDUCATIONAL_DISCLAIMER
     assert repaired["slides"][5]["fields"]["caption"] == "Dr. Guilherme Martins"
     assert validate_pack_contract(repaired) == []
     assert len(repaired["slides"][0]["fields"]["eyebrow"]) <= 22
-    assert len(repaired["slides"][2]["fields"]["item1"]["text"]) <= 42
+    assert len(repaired["slides"][2]["fields"]["item1"]["text"]) <= LAYOUT_SPECS["myth_fact"]["item_max"]["text"]
     assert len(repaired["slides"][6]["fields"]["body"]) <= 70
+
+
+def test_repair_pack_copy_locks_professional_identification_in_caption_and_last_slide() -> None:
+    pack = sample_pack()
+    pack["caption"] = "Copy editorial para publicação."
+    pack["slides"][6]["fields"]["footer"] = "Outro rodape"
+
+    repaired = repair_pack_copy(pack)
+    final_slide = repaired["slides"][6]
+    final_html = slide_html(final_slide, index=7, total=7)
+
+    assert repaired["caption"].endswith(MEDICAL_PUBLICATION_NOTICE)
+    assert final_slide["fields"]["footer"] == MEDICAL_PROFESSIONAL_IDENTIFICATION
+    assert MEDICAL_EDUCATIONAL_DISCLAIMER in final_html
+    assert MEDICAL_PROFESSIONAL_IDENTIFICATION in final_html
+    assert validate_pack_contract(repaired) == []
 
 
 def test_repair_pack_copy_migrates_legacy_six_slide_pack_without_ai() -> None:
@@ -273,7 +450,7 @@ def test_repair_pack_copy_fills_missing_myth_fact_items() -> None:
     assert validate_pack_contract(repaired) == []
     assert repaired["slides"][4]["fields"]["item1"]["title"] == "Mito"
     assert repaired["slides"][4]["fields"]["item2"]["title"] == "Fato"
-    assert len(repaired["slides"][4]["fields"]["item2"]["text"]) <= 38
+    assert len(repaired["slides"][4]["fields"]["item2"]["text"]) <= LAYOUT_SPECS["myth_fact"]["item_max"]["text"]
 
 
 def test_slide_html_embeds_brand_fonts_and_copy() -> None:
@@ -285,6 +462,76 @@ def test_slide_html_embeds_brand_fonts_and_copy() -> None:
     assert "Instrument Serif" in html
     assert "Instituto" in html
     assert "Por que o peso volta depois da dieta" in html
+
+
+def test_slide_html_applies_modernist_theme_without_changing_copy() -> None:
+    slide = sample_pack()["slides"][0]
+
+    html = slide_html(
+        slide,
+        index=1,
+        total=7,
+        family="storytelling",
+        theme_id="modernist-red",
+    )
+
+    assert "data-family='storytelling'" in html
+    assert "data-theme='modernist-red'" in html
+    assert "#C8392B" in html
+    assert "#12B2A6" not in html
+    assert "Por que o peso volta depois da dieta" in html
+
+
+def test_slide_html_applies_soft_themes_without_changing_copy() -> None:
+    slide = sample_pack()["slides"][0]
+
+    sage = slide_html(slide, index=1, total=7, theme_id="soft-sage")
+    rose = slide_html(slide, index=1, total=7, theme_id="soft-rose")
+
+    assert "data-theme='soft-sage'" in sage
+    assert "#86A996" in sage
+    assert "#12B2A6" not in sage
+    assert "data-theme='soft-rose'" in rose
+    assert "#C78B93" in rose
+    assert "#12B2A6" not in rose
+    assert "Por que o peso volta depois da dieta" in sage
+    assert "Por que o peso volta depois da dieta" in rose
+
+
+def test_light_slides_keep_footer_text_readable() -> None:
+    slide = sample_pack()["slides"][1]
+
+    html = slide_html(slide, index=2, total=7, theme_id="soft-sage")
+
+    assert ".question.bg-light .footer-row" in html
+    assert "color:#71877D" in html
+
+
+def test_didactic_slides_use_compact_question_and_explainer_cards() -> None:
+    pack = sample_pack()
+
+    question_html = slide_html(pack["slides"][1], index=2, total=7, family="didatico", theme_id="soft-sage")
+    explainer_html = slide_html(pack["slides"][3], index=4, total=7, family="didatico", theme_id="soft-sage")
+
+    assert "question-guide" in question_html
+    assert "question-answer" in question_html
+    assert "font-size:212px" in question_html
+    assert "font-size:760px" not in question_html
+    assert '<p>Sinais internos mudam.</p>' in explainer_html
+    assert 'class="step step-final"' in explainer_html
+
+
+def test_new_pack_templates_are_available_in_the_renderer() -> None:
+    slide = sample_pack()["slides"][0]
+
+    manifesto = slide_html(slide, index=1, total=7, family="manifesto")
+    clinico = slide_html(slide, index=1, total=7, family="clinico")
+
+    assert {"manifesto", "clinico"}.issubset(PACK_FAMILIES)
+    assert "data-family='manifesto'" in manifesto
+    assert "html[data-family='manifesto'] .accent-bar" in manifesto
+    assert "data-family='clinico'" in clinico
+    assert "html[data-family='clinico'] .bg-light" in clinico
 
 
 def test_every_closed_layout_has_a_renderer() -> None:

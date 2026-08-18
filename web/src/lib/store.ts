@@ -24,6 +24,7 @@ interface State {
   settings: AppSettings;
   complianceRules: ComplianceRule[];
   syncedAt: string | null;
+  dataBackend: "postgres" | "sheets" | null;
   // acoes basicas
   addTrend: (t: Trend) => void;
   updateTrend: (id: string, patch: Partial<Trend>) => void;
@@ -48,7 +49,7 @@ interface State {
   }) => string;
   marcarPublicado: (postId: string) => void;
   registrarMetricasFake: (postId: string) => void;
-  // hidratacao a partir da API local (dados reais do Google Sheets)
+  // hidratação a partir da API local
   hydrate: (payload: Partial<HydratePayload> & { updatedAt?: string | null }) => void;
 }
 
@@ -62,6 +63,7 @@ export interface HydratePayload {
   settings: AppSettings;
   complianceRules?: ComplianceRule[];
   updatedAt?: string | null;
+  dataBackend?: "postgres" | "sheets";
 }
 
 // Estado inicial vazio: os dados reais chegam da API local (hydrate) no load.
@@ -75,6 +77,7 @@ const initial = {
   settings: defaultSettings,
   complianceRules: [] as ComplianceRule[],
   syncedAt: null as string | null,
+  dataBackend: null as "postgres" | "sheets" | null,
 };
 
 const nextStatus: Record<VideoJobStatus, VideoJobStatus | null> = {
@@ -90,6 +93,29 @@ const nextProgresso: Record<VideoJobStatus, number> = {
   pronto: 100,
   erro: 0,
 };
+
+const LOCAL_SCRIPT_WRITE_TTL_MS = 2 * 60 * 1000;
+const localScriptWrites = new Map<string, number>();
+
+function markLocalScriptWrite(id: string) {
+  localScriptWrites.set(id, Date.now());
+}
+
+function hasFreshLocalScriptWrite(id: string) {
+  const writtenAt = localScriptWrites.get(id);
+  if (!writtenAt) return false;
+  if (Date.now() - writtenAt <= LOCAL_SCRIPT_WRITE_TTL_MS) return true;
+  localScriptWrites.delete(id);
+  return false;
+}
+
+function mergeHydratedScripts(incoming: Script[], current: Script[]) {
+  const currentById = new Map(current.map((script) => [script.id, script]));
+  return incoming.map((script) => {
+    const local = currentById.get(script.id);
+    return local && hasFreshLocalScriptWrite(script.id) ? local : script;
+  });
+}
 
 function randomInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -115,15 +141,21 @@ export const useStore = create<State>()(
           ideas: s.ideas.map((i) => (i.id === id ? { ...i, ...patch } : i)),
         })),
       addScript: (sc) =>
-        set((s) => ({
-          scripts: s.scripts.some((script) => script.id === sc.id)
-            ? s.scripts.map((script) => (script.id === sc.id ? sc : script))
-            : [sc, ...s.scripts],
-        })),
+        set((s) => {
+          markLocalScriptWrite(sc.id);
+          return {
+            scripts: s.scripts.some((script) => script.id === sc.id)
+              ? s.scripts.map((script) => (script.id === sc.id ? sc : script))
+              : [sc, ...s.scripts],
+          };
+        }),
       updateScript: (id, patch) =>
-        set((s) => ({
-          scripts: s.scripts.map((sc) => (sc.id === id ? { ...sc, ...patch } : sc)),
-        })),
+        set((s) => {
+          markLocalScriptWrite(id);
+          return {
+            scripts: s.scripts.map((sc) => (sc.id === id ? { ...sc, ...patch } : sc)),
+          };
+        }),
       removeScript: (id) =>
         set((s) => ({
           scripts: s.scripts.filter((script) => script.id !== id),
@@ -149,13 +181,14 @@ export const useStore = create<State>()(
         set((s) => ({
           trends: payload.trends ?? s.trends,
           ideas: payload.ideas ?? s.ideas,
-          scripts: payload.scripts ?? s.scripts,
+          scripts: payload.scripts ? mergeHydratedScripts(payload.scripts, s.scripts) : s.scripts,
           videoJobs: payload.videoJobs ?? s.videoJobs,
           calendarPosts: payload.calendarPosts ?? s.calendarPosts,
           performance: payload.performance ?? s.performance,
           settings: payload.settings ?? s.settings,
           complianceRules: payload.complianceRules ?? s.complianceRules,
           syncedAt: payload.updatedAt ?? s.syncedAt,
+          dataBackend: payload.dataBackend ?? s.dataBackend,
         })),
 
       advanceVideoJob: (id) => {

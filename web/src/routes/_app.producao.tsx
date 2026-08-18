@@ -19,15 +19,15 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { ExternalLink, Film, Layers3, RefreshCcw } from "lucide-react";
+import { ExternalLink, Film, RefreshCcw, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/producao")({
   head: () => ({
     meta: [
-      { title: "Producao de videos | AI Video Creator" },
-      { name: "description", content: "Fila de producao de videos no HeyGen." },
-      { property: "og:title", content: "Producao de videos | AI Video Creator" },
+      { title: "Produção de vídeos | AI Video Creator" },
+      { name: "description", content: "Fila de produção de vídeos no HeyGen." },
+      { property: "og:title", content: "Produção de vídeos | AI Video Creator" },
       { property: "og:description", content: "Fila HeyGen para reels medicos." },
     ],
   }),
@@ -62,11 +62,11 @@ export function ProducaoPage() {
 
   return (
     <AppShell
-      title="Producao de videos"
+      title="Produção de vídeos"
       actions={
-        <Button asChild size="sm" variant="secondary">
+        <Button asChild size="sm">
           <Link to="/kit-local" search={{ videoJobId: undefined, sourceName: undefined }}>
-            <Layers3 className="mr-1.5 h-4 w-4" /> Aplicar kit local
+            <Upload className="mr-1.5 h-4 w-4" /> Editar vídeo do computador
           </Link>
         </Button>
       }
@@ -86,12 +86,19 @@ export function ProducaoPage() {
       {filtered.length === 0 ? (
         <EmptyState
           icon={<Film className="h-4 w-4" />}
-          title="Nenhum video nesta lista"
-          description="Envie um roteiro da tela de Roteiros para iniciar a producao."
+          title="Comece com um vídeo ou roteiro"
+          description="Edite um arquivo do computador agora ou envie um roteiro para produzir no HeyGen."
           action={
-            <Button asChild size="sm" variant="secondary">
-              <Link to="/roteiros">Ir para Roteiros</Link>
-            </Button>
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button asChild size="sm">
+                <Link to="/kit-local" search={{ videoJobId: undefined, sourceName: undefined }}>
+                  <Upload className="mr-1.5 h-4 w-4" /> Editar vídeo
+                </Link>
+              </Button>
+              <Button asChild size="sm" variant="secondary">
+                <Link to="/roteiros">Criar a partir de roteiro</Link>
+              </Button>
+            </div>
           }
         />
       ) : (
@@ -111,14 +118,18 @@ export function ProducaoPage() {
               {filtered.map((j) => {
                 const s = scripts.find((x) => x.id === j.scriptId);
                 const jobLabel = j.isComposed
-                  ? "Vídeo final composto"
-                  : j.isScene
-                    ? `Cena ${j.sceneOrder ?? j.sceneId ?? ""}`.trim()
-                    : j.isPreview
-                      ? "Prévia"
-                      : (jobsByScript.get(j.scriptId)?.length || 0) > 1
-                        ? `Versão ${versions.get(j.id)}`
-                        : "";
+                  ? j.isPodcast
+                    ? "Podcast final composto"
+                    : "Vídeo final composto"
+                  : j.isPodcastScene
+                    ? `${j.speakerName || "Podcast"} · fala ${j.sceneOrder ?? ""}`.trim()
+                    : j.isScene
+                      ? `Cena ${j.sceneOrder ?? j.sceneId ?? ""}`.trim()
+                      : j.isPreview
+                        ? "Prévia"
+                        : (jobsByScript.get(j.scriptId)?.length || 0) > 1
+                          ? `Versão ${versions.get(j.id)}`
+                          : "";
                 return (
                   <TableRow key={j.id}>
                     <TableCell className="font-medium">

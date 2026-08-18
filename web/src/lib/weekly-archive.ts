@@ -32,6 +32,39 @@ export function splitWeekly<T>(items: T[], getDate: (item: T) => string | Date |
   return { current, archive };
 }
 
+export function splitWeeklyUnique<T>(
+  items: T[],
+  getDate: (item: T) => string | Date | null | undefined,
+  getKey: (item: T) => string,
+) {
+  const weekly = splitWeekly(items, getDate);
+  const currentByRecency = [...weekly.current].sort(
+    (left, right) => dateTimestamp(getDate(right)) - dateTimestamp(getDate(left)),
+  );
+  const seen = new Set<string>();
+  const current: T[] = [];
+  const duplicates: T[] = [];
+
+  currentByRecency.forEach((item) => {
+    const key = getKey(item);
+    if (seen.has(key)) {
+      duplicates.push(item);
+      return;
+    }
+    seen.add(key);
+    current.push(item);
+  });
+
+  return { current, archive: [...duplicates, ...weekly.archive] };
+}
+
+function dateTimestamp(value: string | Date | null | undefined) {
+  if (!value) return 0;
+  const date = value instanceof Date ? value : new Date(value);
+  const timestamp = date.getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
 export function currentWeekLabel(reference = new Date()) {
   const start = startOfCurrentWeek(reference);
   const end = new Date(start);

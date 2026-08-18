@@ -11,6 +11,7 @@ import {
 } from "@/lib/api/local";
 import { DEFAULT_OUTRO } from "@/lib/script-quality";
 import type { EditorialTone, Idea, Script } from "@/lib/mock-data";
+import type { DurationPreset } from "@/lib/script-editor";
 
 export const SCRIPT_FLOW_VERSION = "social-to-script-v1";
 
@@ -43,9 +44,9 @@ export interface GenerateScriptOptions {
   idea: Idea;
   articleAnalysis?: ArticleAnalysis | null;
   editorialTone: EditorialTone;
-  durationSeconds?: 10 | 15 | 30 | 45 | 60;
+  durationSeconds?: DurationPreset;
   outro?: string;
-  /** true quando a ideia ainda nao foi salva no Sheets (sugestao de artigo/ideia manual). */
+  /** true quando a ideia ainda não foi persistida (sugestão de artigo/ideia manual). */
   persistIdea?: boolean;
 }
 
@@ -129,7 +130,7 @@ export async function generateAndPersistCaptureScripts(
 
 /**
  * Gera o roteiro + texto falado completo via IA (uma unica chamada paga) e
- * persiste ideia (se necessario) e roteiro no Sheets.
+ * persiste ideia (se necessário) e roteiro no backend configurado.
  */
 export async function generateAndPersistScript(
   options: GenerateScriptOptions,

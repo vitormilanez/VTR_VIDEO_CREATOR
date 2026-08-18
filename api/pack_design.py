@@ -7,11 +7,31 @@ deterministico.
 from __future__ import annotations
 
 import re
+import unicodedata
 from copy import deepcopy
 from typing import Any
 
+from api.services.medical_identity import (
+    MEDICAL_DEFAULT_SAFE_CTA,
+    MEDICAL_EDUCATIONAL_DISCLAIMER,
+    MEDICAL_PROFESSIONAL_IDENTIFICATION,
+    ensure_medical_professional_identification,
+    has_medical_publication_notice,
+    has_prohibited_editorial_cta,
+    safe_editorial_cta,
+)
+
 PACK_SCHEMA_VERSION = "institute-carousel-v2"
 PACK_SLIDE_COUNT = 7
+EDUCATIONAL_FLOW_VERSION = "educational-flow-v1"
+
+# A apresentação é uma preferência local do Pack. Ela nunca participa do
+# prompt/cache de conteúdo e pode mudar sem chamar o Claude.
+PACK_FAMILIES = ("editorial", "didatico", "storytelling", "manifesto", "clinico")
+PACK_THEMES = ("modernist-red", "ocean-deep", "soft-sage", "soft-rose")
+DEFAULT_PACK_FAMILY = "didatico"
+DEFAULT_PACK_THEME = "modernist-red"
+LEGACY_PACK_THEME = "ocean-deep"
 
 PACK_LAYOUTS = (
     "hero_photo",
@@ -55,9 +75,47 @@ PHOTO_LAYOUTS = {"hero_photo", "photo_split", "doctor_quote", "photo_overlay", "
 FULL_BLEED_PHOTO_LAYOUTS = {"hero_photo", "photo_overlay"}
 DARK_LAYOUTS = {"hero_photo", "big_statement", "three_points", "photo_overlay", "cta_photo"}
 
-# Os arquivos vieram no kit de design com nomes semanticos. No projeto eles ja
-# estavam versionados com o nome original do ensaio; o mapeamento evita duplicar
-# 55 MB de fotografias no Git.
+# Todos os Packs novos seguem esta sequência. Ela é usada no prompt, nos
+# metadados de qualidade e em uma validação leve antes de salvar a resposta do
+# Claude. O objetivo é ensinar em progressão, não colecionar frases de efeito.
+EDUCATIONAL_SLIDE_STEPS = (
+    ("Tema e objetivo", "Apresenta o assunto e o que a pessoa vai entender."),
+    ("Contexto", "Organiza uma dúvida comum sem julgamento."),
+    ("Conceito-chave", "Define o ponto central em linguagem simples."),
+    ("Como funciona", "Explica o mecanismo ou contexto em etapas."),
+    ("O que a fonte mostra", "Traduz dado, evidência ou implicação."),
+    ("Cuidados e limites", "Mostra a ressalva necessária com clareza."),
+    ("Resumo e próximo passo", "Retoma o aprendizado e orienta com segurança."),
+)
+EDUCATIONAL_EXPLANATORY_LAYOUTS = {
+    "explainer",
+    "three_points",
+    "myth_fact",
+    "number_stat",
+    "do_dont",
+    "doctor_quote",
+}
+_EDUCATIONAL_TONE_PATTERNS = (
+    (
+        re.compile(r"\bvoc[eê]\s+confunde\b", re.I),
+        "substitua o tom acusatorio por uma comparacao ou explicacao neutra",
+    ),
+    (
+        re.compile(r"\bvoc[eê]\s+(?:esta|está|ta)\s+fazendo\s+(?:tudo\s+)?errado\b", re.I),
+        "retire o julgamento direto sobre quem le",
+    ),
+    (
+        re.compile(r"\bningu[eé]m\s+(?:te\s+)?contou\b", re.I),
+        "troque a frase de efeito por uma explicacao objetiva",
+    ),
+    (
+        re.compile(r"\baquele\s+(?:produto|rem[eé]dio|medicamento|caneta)\s+que\s+(?:achei|vi)\s+por\s+a[ií]\b", re.I),
+        "nomeie a duvida de forma objetiva em vez de usar uma referencia vaga",
+    ),
+)
+
+# Biblioteca canônica de fotos do Pack. Os IDs permanecem estáveis para que
+# carrosséis já salvos continuem apontando para a imagem escolhida.
 PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
     "wide-office": {
         "file": "data/pack_assets/photos/vine8178.jpg",
@@ -107,6 +165,150 @@ PHOTO_LIBRARY: dict[str, dict[str, Any]] = {
         "facePointY": 0.30,
         "brightness": 0.46,
     },
+    "institute-desk-pose": {
+        "file": "data/pack_assets/photos/gui-instituto-escritorio-pose.png",
+        "name": "Escritorio com mao apoiada",
+        "description": "sentado a mesa, com livros e a marca do Instituto ao fundo",
+        "facePointX": 0.46,
+        "facePointY": 0.30,
+        "brightness": 0.40,
+    },
+    "institute-reading-front": {
+        "file": "data/pack_assets/photos/gui-instituto-leitura-frente.png",
+        "name": "Leitura de frente",
+        "description": "de frente a mesa com livro aberto e a marca do Instituto acima",
+        "facePointX": 0.50,
+        "facePointY": 0.34,
+        "brightness": 0.42,
+    },
+    "institute-reading-side": {
+        "file": "data/pack_assets/photos/gui-instituto-leitura-lateral.png",
+        "name": "Leitura lateral",
+        "description": "sentado de lado lendo um livro, com espaco escuro para texto",
+        "facePointX": 0.38,
+        "facePointY": 0.32,
+        "brightness": 0.36,
+    },
+    "white-polo-portrait": {
+        "file": "data/pack_assets/photos/gui-polo-retrato-escuro.jpeg",
+        "name": "Retrato de polo branco",
+        "description": "retrato vertical com mao no queixo e fundo escuro limpo",
+        "facePointX": 0.50,
+        "facePointY": 0.36,
+        "brightness": 0.34,
+    },
+    "vivance-horizontal-portrait": {
+        "file": "data/pack_assets/photos/gui-vivance-retrato-horizontal.png",
+        "name": "Vivance — retrato horizontal",
+        "description": "retrato horizontal externo, com marca parcial e espaco lateral para texto",
+        "facePointX": 0.46,
+        "facePointY": 0.38,
+        "brightness": 0.54,
+    },
+    "vivance-seated-sign": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-placa.png",
+        "name": "Vivance — sentado com placa",
+        "description": "sentado em primeiro plano com a placa do Instituto ao fundo e area livre a direita",
+        "facePointX": 0.31,
+        "facePointY": 0.39,
+        "brightness": 0.48,
+    },
+    "vivance-seated-full-body": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-corpo-inteiro.png",
+        "name": "Vivance — sentado corpo inteiro",
+        "description": "corpo inteiro sentado nos degraus, com fachada e marca do Instituto ao fundo",
+        "facePointX": 0.42,
+        "facePointY": 0.35,
+        "brightness": 0.50,
+    },
+    "vivance-standing-crossed-arms": {
+        "file": "data/pack_assets/photos/gui-vivance-em-pe-bracos-cruzados.png",
+        "name": "Vivance — em pe, bracos cruzados",
+        "description": "corpo inteiro em pe e de bracos cruzados diante da fachada do Instituto",
+        "facePointX": 0.45,
+        "facePointY": 0.25,
+        "brightness": 0.50,
+    },
+    "vivance-seated-close": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-close.png",
+        "name": "Vivance — sentado em close",
+        "description": "retrato vertical sentado, com a marca completa ao fundo e respiro a direita",
+        "facePointX": 0.29,
+        "facePointY": 0.34,
+        "brightness": 0.48,
+    },
+    "vivance-crossed-arms-close": {
+        "file": "data/pack_assets/photos/gui-vivance-bracos-cruzados-close.png",
+        "name": "Vivance — bracos cruzados em close",
+        "description": "retrato frontal de bracos cruzados com o simbolo do Instituto ao fundo",
+        "facePointX": 0.50,
+        "facePointY": 0.25,
+        "brightness": 0.51,
+    },
+    "vivance-office-thoughtful": {
+        "file": "data/pack_assets/photos/gui-vivance-escritorio-pensativo.png",
+        "name": "Vivance — escritorio pensativo",
+        "description": "sentado a mesa com as maos junto ao rosto, notebook e marca iluminada ao fundo",
+        "facePointX": 0.48,
+        "facePointY": 0.40,
+        "brightness": 0.32,
+    },
+    "vivance-office-standing": {
+        "file": "data/pack_assets/photos/gui-vivance-escritorio-em-pe.png",
+        "name": "Vivance — em pe no escritorio",
+        "description": "retrato vertical em pe no escritorio escuro, com a marca iluminada ao fundo",
+        "facePointX": 0.38,
+        "facePointY": 0.24,
+        "brightness": 0.34,
+    },
+    "vivance-outdoor-half-body": {
+        "file": "data/pack_assets/photos/gui-vivance-externo-meio-corpo.png",
+        "name": "Vivance — externo meio corpo",
+        "description": "retrato externo em meio corpo, com fachada, plantas e marca parcial ao fundo",
+        "facePointX": 0.50,
+        "facePointY": 0.24,
+        "brightness": 0.55,
+    },
+    "vivance-seated-portrait": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-retrato.png",
+        "name": "Vivance — sentado retrato",
+        "description": "retrato vertical sentado diante da marca, adequado para composicao central",
+        "facePointX": 0.43,
+        "facePointY": 0.28,
+        "brightness": 0.55,
+    },
+    "vivance-seated-close-alt": {
+        "file": "data/pack_assets/photos/gui-vivance-sentado-close-alternativo.png",
+        "name": "Vivance — sentado em close alternativo",
+        "description": "retrato vertical sentado em primeiro plano, com marca e area livre a direita",
+        "facePointX": 0.29,
+        "facePointY": 0.34,
+        "brightness": 0.48,
+    },
+    "vivance-outdoor-hands-pockets": {
+        "file": "data/pack_assets/photos/gui-vivance-externo-maos-bolsos.png",
+        "name": "Vivance — externo com maos nos bolsos",
+        "description": "retrato externo em pe com as maos nos bolsos e fachada desfocada",
+        "facePointX": 0.50,
+        "facePointY": 0.25,
+        "brightness": 0.55,
+    },
+    "vivance-crossed-arms-portrait": {
+        "file": "data/pack_assets/photos/gui-vivance-bracos-cruzados-retrato.png",
+        "name": "Vivance — bracos cruzados retrato",
+        "description": "retrato vertical frontal de bracos cruzados, com simbolo do Instituto ao fundo",
+        "facePointX": 0.51,
+        "facePointY": 0.25,
+        "brightness": 0.51,
+    },
+    "vivance-outdoor-full-body": {
+        "file": "data/pack_assets/photos/gui-vivance-externo-corpo-inteiro.png",
+        "name": "Vivance — externo corpo inteiro",
+        "description": "corpo inteiro em pe diante da fachada, com a marca do Instituto ao fundo",
+        "facePointX": 0.50,
+        "facePointY": 0.25,
+        "brightness": 0.55,
+    },
 }
 
 EMPTY_ITEM = {"title": "", "text": ""}
@@ -114,6 +316,7 @@ FIELD_NAMES = (
     "eyebrow",
     "headline",
     "subheadline",
+    "coverNote",
     "body",
     "statistic",
     "item1",
@@ -128,18 +331,21 @@ FIELD_NAMES = (
 )
 
 LAYOUT_SPECS: dict[str, dict[str, Any]] = {
-    "hero_photo": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 46, "footer": 48}},
+    "hero_photo": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 46, "coverNote": 180, "footer": 48}},
     "photo_split": {"required": ("headline", "body", "photoId"), "max": {"eyebrow": 22, "headline": 52, "body": 160, "footer": 48}},
     "big_statement": {"required": ("headline",), "max": {"headline": 64, "footer": 90}},
-    "question": {"required": ("headline",), "max": {"eyebrow": 22, "headline": 52, "body": 110, "footer": 48}},
-    "myth_fact": {"required": ("item1", "item2"), "max": {"body": 90}, "item_max": {"title": 12, "text": 38}},
+    "question": {"required": ("headline",), "max": {"eyebrow": 30, "headline": 52, "body": 110, "footer": 48}},
+    # Os dois painéis comportam duas linhas confortáveis. O limite anterior de
+    # 38 caracteres obrigava o modelo (ou o reparo local) a cortar a conclusão
+    # de fatos clínicos, transformando frases corretas em fragmentos.
+    "myth_fact": {"required": ("item1", "item2"), "max": {"body": 90}, "item_max": {"title": 12, "text": 72}},
     "number_stat": {"required": ("statistic", "headline", "caption"), "max": {"eyebrow": 22, "statistic": 6, "headline": 60, "body": 110, "caption": 72}},
     "three_points": {"required": ("headline", "item1", "item2", "item3"), "max": {"headline": 40}, "item_max": {"title": 24, "text": 90}},
-    "explainer": {"required": ("headline", "body"), "max": {"eyebrow": 22, "headline": 56, "body": 280, "disclaimer": 90}, "item_max": {"title": 24, "text": 54}},
+    "explainer": {"required": ("headline", "body"), "max": {"eyebrow": 22, "headline": 56, "body": 320, "disclaimer": 90}, "item_max": {"title": 24, "text": 54}},
     "doctor_quote": {"required": ("quote", "caption"), "max": {"quote": 90, "caption": 48}},
-    "photo_overlay": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 60, "footer": 48}},
+    "photo_overlay": {"required": ("eyebrow", "headline", "photoId"), "max": {"eyebrow": 22, "headline": 60, "coverNote": 180, "footer": 48}},
     "do_dont": {"required": ("item1", "item2"), "max": {"disclaimer": 90}, "item_max": {"title": 34, "text": 34}},
-    "cta_photo": {"required": ("headline", "cta", "photoId", "disclaimer"), "max": {"headline": 62, "body": 70, "cta": 22, "disclaimer": 90}},
+    "cta_photo": {"required": ("headline", "cta", "photoId", "disclaimer", "footer"), "max": {"headline": 62, "body": 70, "cta": 22, "disclaimer": 220, "footer": 100}},
 }
 
 
@@ -235,7 +441,7 @@ def _fit_copy(value: Any, maximum: int) -> str:
     """Encurta copy sem terminar no início de uma nova frase."""
     text = _text(value)
     if len(text) <= maximum:
-        return text
+        return _remove_dangling_words(text)
     clipped = text[:maximum].rstrip()
     # Quando já existe uma frase completa dentro do limite, ela preserva o
     # sentido melhor do que um corte por palavra como "... funcionando. O".
@@ -277,13 +483,74 @@ _DANGLING_WORDS = {
     "sem",
 }
 
+_INCOMPLETE_TAIL_WORDS = _DANGLING_WORDS | {
+    "ainda",
+    "até",
+    "este",
+    "esta",
+    "foi",
+    "mas",
+    "nem",
+    "não",
+    "pode",
+    "podem",
+    "porque",
+    "quando",
+    "são",
+    "seu",
+    "seus",
+    "ser",
+    "sua",
+    "suas",
+    "vem",
+    "é",
+}
+
 
 def _remove_dangling_words(value: str) -> str:
     """Remove conectivos finais que denunciam um corte mecanico de copy."""
     text = _text(value)
-    while text and text.split()[-1].casefold().strip(".,;:") in _DANGLING_WORDS:
+    normalized_incomplete_words = {
+        "".join(
+            char
+            for char in unicodedata.normalize("NFKD", word.casefold())
+            if not unicodedata.combining(char)
+        )
+        for word in _INCOMPLETE_TAIL_WORDS
+    }
+    while text:
+        last_word = text.split()[-1].casefold().strip(".,;:!?()[]{}\"'")
+        normalized_last_word = "".join(
+            char
+            for char in unicodedata.normalize("NFKD", last_word)
+            if not unicodedata.combining(char)
+        )
+        if normalized_last_word not in normalized_incomplete_words:
+            break
         text = " ".join(text.split()[:-1]).rstrip(" ,;:-–—")
     return text
+
+
+def _looks_incomplete(value: Any) -> bool:
+    """Detecta caudas que denunciam fragmento cortado antes do renderer."""
+    text = _text(value)
+    if not text:
+        return False
+    last_word = text.split()[-1].casefold().strip(".,;:!?()[]{}\"'")
+    last_word = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", last_word)
+        if not unicodedata.combining(char)
+    )
+    incomplete_words = {
+        "".join(
+            char
+            for char in unicodedata.normalize("NFKD", word.casefold())
+            if not unicodedata.combining(char)
+        )
+        for word in _INCOMPLETE_TAIL_WORDS
+    }
+    return last_word in incomplete_words
 
 
 _GENERIC_MYTH_FALLBACKS = {
@@ -309,6 +576,49 @@ def pack_slides(pack: dict[str, Any]) -> list[Any]:
         if isinstance(candidate, list):
             return candidate
     return []
+
+
+def educational_flow_issues(pack: dict[str, Any]) -> list[str]:
+    """Aponta quando a resposta foge da trilha educativa do carrossel.
+
+    A verificacao é propositalmente pequena: ela não tenta reescrever medicina
+    de forma determinística, mas impede que a resposta volte ao padrão de
+    confronto, frases vagas e explicação tardia visto em versões antigas.
+    """
+    raw_slides = pack_slides(pack)
+    if len(raw_slides) != PACK_SLIDE_COUNT:
+        return []
+    slides = [
+        normalize_slide(slide, index)
+        for index, slide in enumerate(raw_slides)
+        if isinstance(slide, dict)
+    ]
+    if len(slides) != PACK_SLIDE_COUNT:
+        return []
+
+    issues: list[str] = []
+    layouts = [str(slide.get("layoutId") or "") for slide in slides]
+    if "explainer" not in layouts[2:4]:
+        issues.append("slides 3 ou 4: inclua um explainer para explicar o conceito antes dos dados")
+    explanation_count = sum(
+        layout in EDUCATIONAL_EXPLANATORY_LAYOUTS for layout in layouts[2:6]
+    )
+    if explanation_count < 2:
+        issues.append("slides 3 a 6: inclua pelo menos dois layouts de explicacao educativa")
+
+    for index, slide in enumerate(slides, start=1):
+        fields = slide.get("fields") if isinstance(slide.get("fields"), dict) else {}
+        values: list[str] = []
+        for value in fields.values():
+            if isinstance(value, dict):
+                values.extend(_text(part) for part in value.values())
+            else:
+                values.append(_text(value))
+        slide_copy = " ".join(value for value in values if value)
+        for pattern, guidance in _EDUCATIONAL_TONE_PATTERNS:
+            if pattern.search(slide_copy):
+                issues.append(f"slide {index}: {guidance}")
+    return list(dict.fromkeys(issues))
 
 
 def _repair_layout_semantics(slide: dict[str, Any]) -> None:
@@ -356,9 +666,9 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
         "statistic": "1",
         "quote": fields.get("headline") or fields.get("body") or "Cada caso precisa de avaliacao individual.",
         "caption": fields.get("footer") or "Dr. Guilherme Martins",
-        "cta": "Salve para revisar",
+        "cta": MEDICAL_DEFAULT_SAFE_CTA,
         "footer": "Arraste para o lado",
-        "disclaimer": "Conteudo educativo. Nao substitui avaliacao medica.",
+        "disclaimer": MEDICAL_EDUCATIONAL_DISCLAIMER,
         "photoId": "seated-front",
     }
     if layout_id == "cta_photo":
@@ -366,8 +676,9 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
             {
                 "headline": fields.get("headline") or "Converse com seu medico",
                 "body": fields.get("body") or "Use esta informacao para revisar sintomas e duvidas.",
-                "cta": fields.get("cta") or "Salve para revisar",
-                "disclaimer": fields.get("disclaimer") or "Conteudo educativo. Nao substitui avaliacao medica.",
+                "cta": safe_editorial_cta(fields.get("cta")),
+                "disclaimer": MEDICAL_EDUCATIONAL_DISCLAIMER,
+                "footer": MEDICAL_PROFESSIONAL_IDENTIFICATION,
                 "photoId": fields.get("photoId") or "seated-front",
             }
         )
@@ -422,6 +733,384 @@ def _repair_required_items(fields: dict[str, Any], layout_id: str, spec: dict[st
             "title": _fit_copy(fallback["title"], item_limits.get("title", 34)),
             "text": _fit_copy(fallback["text"], item_limits.get("text", 90)),
         }
+
+
+# Rotulos em portugues de cada layout. Ficam aqui para que interface, arquivo
+# exportado e API falem exatamente a mesma lingua sobre o mesmo componente.
+LAYOUT_LABELS: dict[str, str] = {
+    "hero_photo": "Abertura com foto",
+    "photo_split": "Explicação com foto",
+    "big_statement": "Ideia-chave",
+    "question": "Dúvida comum",
+    "myth_fact": "Mito e fato",
+    "number_stat": "Dado explicado",
+    "three_points": "Pontos para entender",
+    "explainer": "Explicação simples",
+    "doctor_quote": "Orientação profissional",
+    "photo_overlay": "Tema com foto",
+    "do_dont": "Evite e prefira",
+    "cta_photo": "Resumo e próximo passo",
+}
+
+# Rotulo legivel de cada campo, usado no editor por slide e no texto exportado.
+FIELD_LABELS: dict[str, str] = {
+    "eyebrow": "Chapéu",
+    "headline": "Título",
+    "subheadline": "Apoio",
+    "coverNote": "Mensagem na capa",
+    "body": "Texto",
+    "statistic": "Número",
+    "item1": "Bloco 1",
+    "item2": "Bloco 2",
+    "item3": "Bloco 3",
+    "quote": "Citação",
+    "cta": "Chamada",
+    "footer": "Rodapé",
+    "caption": "Legenda do slide",
+    "disclaimer": "Aviso",
+    "photoId": "Foto",
+}
+
+
+def slide_export_text(slide: dict[str, Any]) -> str:
+    """Texto completo do slide para o arquivo entregue ao time.
+
+    A versao anterior exportava apenas ``headline`` e ``body``. Slides de
+    ``three_points``, ``myth_fact``, ``do_dont``, ``number_stat`` e
+    ``doctor_quote`` guardam o conteudo em ``item1..3``, ``statistic`` ou
+    ``quote``, entao o arquivo saia praticamente vazio justamente nas telas com
+    mais informacao.
+    """
+    normalized = normalize_slide(slide)
+    fields = normalized["fields"]
+    lines: list[str] = []
+
+    def add(label: str, value: Any) -> None:
+        text = _text(value)
+        if text:
+            lines.append(f"{label}: {text}" if label else text)
+
+    add("", fields.get("eyebrow"))
+    add("", fields.get("headline") or fields.get("quote"))
+    if _text(fields.get("statistic")):
+        add("Número", fields.get("statistic"))
+    add("", fields.get("subheadline"))
+    add("", fields.get("body"))
+    for name in ("item1", "item2", "item3"):
+        item = fields.get(name)
+        if not isinstance(item, dict):
+            continue
+        title = _text(item.get("title"))
+        text = _text(item.get("text"))
+        if title and text:
+            lines.append(f"- {title}: {text}")
+        elif title or text:
+            lines.append(f"- {title or text}")
+    add("Legenda", fields.get("caption"))
+    add("Mensagem na capa", fields.get("coverNote"))
+    add("Chamada", fields.get("cta"))
+    add("Rodapé", fields.get("footer"))
+    add("Aviso", fields.get("disclaimer"))
+    return "\n".join(lines)
+
+
+def _strip_accents(value: str) -> str:
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFKD", str(value or "").casefold())
+        if not unicodedata.combining(char)
+    )
+
+
+_ORDINAL_STEP_MARKERS = (
+    (("primeiro", "primeira"), "Primeiro"),
+    (("segundo", "segunda"), "Segundo"),
+    (("terceiro", "terceira"), "Terceiro"),
+)
+_ORDINAL_STEP_RE = re.compile(
+    r"^(?:o|a|no|na)?\s*(primeir[oa]|segund[oa]|terceir[oa])\b[\s,:–—-]*",
+    re.I,
+)
+_NUMBERED_STEP_RE = re.compile(r"^([1-3])\s*[.)°º-]\s+")
+
+
+def _sentences(value: Any) -> list[str]:
+    text = _text(value)
+    if not text:
+        return []
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+
+
+def _capitalize_first(value: str) -> str:
+    text = _text(value)
+    return text[:1].upper() + text[1:] if text else text
+
+
+def explainer_steps_from_body(body: Any) -> tuple[str, list[dict[str, str]]]:
+    """Separa uma enumeracao ja escrita no body em passos, sem inventar texto.
+
+    O layout ``explainer`` renderiza tres cartoes de etapa. Quando o Claude
+    escreve a explicacao como um paragrafo enumerado ("O primeiro... O
+    segundo... O terceiro...") e deixa ``item1..item3`` vazios, a grade de
+    etapas sai em branco e o slide exportado fica com metade da tela vazia.
+
+    Esta funcao reaproveita exatamente as frases ja aprovadas: nada e criado,
+    reescrito ou pedido ao Claude. Se a enumeracao nao existir, devolve o body
+    intacto e nenhuma etapa, e o renderer usa o estado de paragrafo.
+    """
+    sentences = _sentences(body)
+    if len(sentences) < 3:
+        return _text(body), []
+
+    lead: list[str] = []
+    tail: list[str] = []
+    steps: list[dict[str, str]] = []
+    expected = 0
+    for sentence in sentences:
+        if len(steps) >= 3:
+            tail.append(sentence)
+            continue
+        title = ""
+        remainder = ""
+        ordinal = _ORDINAL_STEP_RE.match(sentence)
+        if ordinal:
+            word = ordinal.group(1).casefold()
+            for variants, label in _ORDINAL_STEP_MARKERS:
+                if word in variants:
+                    title = label
+                    break
+            remainder = sentence[ordinal.end() :]
+        else:
+            numbered = _NUMBERED_STEP_RE.match(sentence)
+            if numbered:
+                title = _ORDINAL_STEP_MARKERS[int(numbered.group(1)) - 1][1]
+                remainder = sentence[numbered.end() :]
+        if not title or _ORDINAL_STEP_MARKERS[expected][1] != title:
+            (tail if steps else lead).append(sentence)
+            continue
+        remainder = _capitalize_first(remainder)
+        if not remainder:
+            (tail if steps else lead).append(sentence)
+            continue
+        steps.append({"title": title, "text": remainder})
+        expected += 1
+
+    if len(steps) < 2:
+        return _text(body), []
+    return _text(" ".join(lead + tail)), steps
+
+
+def _repair_explainer_steps(fields: dict[str, Any], spec: dict[str, Any]) -> None:
+    """Preenche as etapas do explainer a partir de uma enumeracao ja escrita."""
+    if any(_has_item_content(fields.get(name)) for name in ("item1", "item2", "item3")):
+        return
+    remaining_body, steps = explainer_steps_from_body(fields.get("body"))
+    if not steps:
+        return
+    item_limits = spec.get("item_max", {})
+    for index, step in enumerate(steps, start=1):
+        fields[f"item{index}"] = {
+            "title": _fit_copy(step["title"], item_limits.get("title", 24)),
+            "text": _fit_copy(step["text"], item_limits.get("text", 54)),
+        }
+    fields["body"] = _fit_copy(remaining_body, spec.get("max", {}).get("body", 320))
+
+
+# Sinais locais de clareza. Eles nao chamam o Claude: apenas medem o que ja
+# esta salvo, para que o editor veja antes de exportar quando um slide ficou
+# denso demais, vazio demais ou com um numero sem explicacao.
+_CLARITY_JARGON = (
+    "agonista",
+    "incretina",
+    "farmacocinética",
+    "farmacocinetica",
+    "hipoglicemiante",
+    "termogênese",
+    "termogenese",
+    "lipólise",
+    "lipolise",
+    "resistência insulínica",
+    "resistencia insulinica",
+    "comorbidade",
+    "adiposidade",
+    "metanálise",
+    "metanalise",
+    "randomizado",
+    "placebo-controlado",
+    "biodisponibilidade",
+    "receptor gip",
+    "glp-1",
+)
+_NUMERIC_CLAIM_RE = re.compile(r"\d+(?:[.,]\d+)?\s*%|\b\d{2,}\b")
+
+# Quantidade de texto que cada layout comporta com leitura confortavel. O
+# renderer preenche a tela com esses volumes; muito abaixo disso o PNG sai com
+# area vazia, muito acima ele fica denso para leitura em celular.
+LAYOUT_COMFORT_RANGE: dict[str, tuple[int, int]] = {
+    "hero_photo": (24, 200),
+    "photo_split": (90, 260),
+    "big_statement": (30, 150),
+    "question": (60, 220),
+    "myth_fact": (70, 250),
+    "number_stat": (60, 220),
+    "three_points": (140, 400),
+    "explainer": (140, 480),
+    "doctor_quote": (50, 170),
+    "photo_overlay": (24, 180),
+    "do_dont": (60, 220),
+    "cta_photo": (60, 200),
+}
+
+
+# Campos que cada layout realmente desenha no PNG. Medir densidade sobre o
+# dicionario inteiro contava texto invisivel (por exemplo o ``caption`` do
+# cta_photo, que o renderer troca pelo aviso fixo) e acusava slides densos que
+# na pratica estavam vazios.
+LAYOUT_READER_FIELDS: dict[str, tuple[str, ...]] = {
+    "hero_photo": ("eyebrow", "headline", "coverNote", "footer"),
+    "photo_split": ("eyebrow", "headline", "body", "footer"),
+    "big_statement": ("eyebrow", "headline", "footer"),
+    "question": ("eyebrow", "headline", "body", "footer"),
+    "myth_fact": ("item1", "item2", "body"),
+    "number_stat": ("eyebrow", "statistic", "headline", "body", "caption"),
+    "three_points": ("eyebrow", "headline", "item1", "item2", "item3"),
+    "explainer": ("eyebrow", "headline", "body", "item1", "item2", "item3"),
+    "doctor_quote": ("quote", "caption"),
+    "photo_overlay": ("eyebrow", "headline", "coverNote", "footer"),
+    "do_dont": ("item1", "item2", "item3"),
+    # O disclaimer e o footer do slide final sao textos fixos de compliance:
+    # eles ocupam espaco, mas o editor nao os controla, entao ficam fora da
+    # medida de densidade editavel.
+    "cta_photo": ("headline", "body", "cta"),
+}
+
+
+# Campos que o editor pode alterar em cada layout, na ordem em que aparecem no
+# slide. Sao os campos de ``LAYOUT_READER_FIELDS`` mais os textos de apoio que
+# o renderer desenha mas nao contam para a densidade de leitura.
+LAYOUT_EDITABLE_FIELDS: dict[str, tuple[str, ...]] = {
+    "hero_photo": ("eyebrow", "headline", "coverNote", "footer"),
+    "photo_split": ("eyebrow", "headline", "body", "footer"),
+    "big_statement": ("eyebrow", "headline", "footer"),
+    "question": ("eyebrow", "headline", "body", "footer"),
+    "myth_fact": ("item1", "item2", "body"),
+    "number_stat": ("eyebrow", "statistic", "headline", "body", "caption"),
+    "three_points": ("eyebrow", "headline", "item1", "item2", "item3"),
+    "explainer": ("eyebrow", "headline", "body", "item1", "item2", "item3", "disclaimer"),
+    "doctor_quote": ("quote", "caption"),
+    "photo_overlay": ("eyebrow", "headline", "coverNote", "footer"),
+    "do_dont": ("item1", "item2", "item3", "disclaimer"),
+    # ``disclaimer`` e ``footer`` do slide final sao travados por compliance.
+    "cta_photo": ("headline", "body", "cta"),
+}
+
+
+def slide_reader_text(slide: dict[str, Any]) -> str:
+    """Somente o texto editavel que a pessoa le no PNG deste layout."""
+    fields = slide.get("fields") if isinstance(slide.get("fields"), dict) else {}
+    layout_id = str(slide.get("layoutId") or slide.get("layout") or "")
+    names = LAYOUT_READER_FIELDS.get(
+        layout_id,
+        ("eyebrow", "headline", "subheadline", "body", "statistic", "quote", "caption", "cta"),
+    )
+    parts: list[str] = []
+    for name in names:
+        value = fields.get(name)
+        if isinstance(value, dict):
+            parts.extend(part for part in (_text(value.get("title")), _text(value.get("text"))) if part)
+        elif _text(value):
+            parts.append(_text(value))
+    return " ".join(parts)
+
+
+def slide_clarity(slide: dict[str, Any], index: int = 0) -> dict[str, Any]:
+    """Mede densidade e clareza de um slide de forma local e deterministica."""
+    normalized = normalize_slide(slide, index)
+    layout_id = normalized["layoutId"]
+    fields = normalized["fields"]
+    text = slide_reader_text(normalized)
+    characters = len(text)
+    words = len([word for word in re.split(r"\s+", text) if word])
+    minimum, maximum = LAYOUT_COMFORT_RANGE.get(layout_id, (60, 260))
+
+    if characters < minimum:
+        density = "vazio"
+    elif characters > maximum:
+        density = "denso"
+    else:
+        density = "equilibrado"
+
+    warnings: list[str] = []
+    if density == "vazio":
+        warnings.append("pouco texto para o layout; o PNG sai com area vazia")
+    if density == "denso":
+        warnings.append("texto acima do confortavel para leitura no celular")
+
+    if layout_id == "explainer" and not any(
+        _has_item_content(fields.get(name)) for name in ("item1", "item2", "item3")
+    ):
+        warnings.append("explainer sem etapas: a grade de cartoes fica em branco")
+
+    lowered = _strip_accents(text.casefold()) if text else ""
+    jargon = sorted(
+        {
+            term
+            for term in _CLARITY_JARGON
+            if _strip_accents(term) in lowered
+        }
+    )
+    if jargon:
+        warnings.append("termo tecnico presente: confirme se ele foi explicado")
+
+    # Um numero precisa de uma frase que diga o que ele significa. A checagem
+    # olha o texto que sobra fora da frase onde o numero aparece: se quase nada
+    # sobra, o dado esta isolado na tela.
+    sentences = _sentences(text)
+    numeric_sentences = [sentence for sentence in sentences if _NUMERIC_CLAIM_RE.search(sentence)]
+    if numeric_sentences:
+        context = " ".join(sentence for sentence in sentences if sentence not in numeric_sentences)
+        if len(context) < 45:
+            warnings.append("dado numerico sem explicacao do que ele significa")
+
+    longest_sentence = max((len(sentence.split()) for sentence in _sentences(text)), default=0)
+    if longest_sentence > 28:
+        warnings.append("frase longa demais para leitura rapida")
+
+    return {
+        "slide": index + 1,
+        "layoutId": layout_id,
+        "characters": characters,
+        "words": words,
+        "comfortMin": minimum,
+        "comfortMax": maximum,
+        "density": density,
+        "longestSentenceWords": longest_sentence,
+        "jargon": jargon,
+        "warnings": warnings,
+    }
+
+
+def pack_clarity(pack: dict[str, Any]) -> dict[str, Any]:
+    """Relatorio de clareza do carrossel inteiro. Nenhuma chamada de IA."""
+    slides = [slide for slide in pack_slides(pack) if isinstance(slide, dict)]
+    per_slide = [slide_clarity(slide, index) for index, slide in enumerate(slides)]
+    layouts = [entry["layoutId"] for entry in per_slide]
+    repeated = sorted(
+        {
+            layouts[index]
+            for index in range(1, len(layouts))
+            if layouts[index] == layouts[index - 1]
+        }
+    )
+    return {
+        "slides": per_slide,
+        "balanced": sum(1 for entry in per_slide if entry["density"] == "equilibrado"),
+        "empty": [entry["slide"] for entry in per_slide if entry["density"] == "vazio"],
+        "dense": [entry["slide"] for entry in per_slide if entry["density"] == "denso"],
+        "repeatedAdjacentLayouts": repeated,
+        "distinctLayouts": len(set(layouts)),
+        "warnings": sum(len(entry["warnings"]) for entry in per_slide),
+    }
 
 
 def _legacy_context_slide(raw_slides: list[Any]) -> dict[str, Any]:
@@ -498,6 +1187,7 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
     mais invalide o Pack inteiro por uma diferenca editorial trivial.
     """
     repaired = deepcopy(pack)
+    repaired["caption"] = ensure_medical_professional_identification(repaired.get("caption"))
     raw_slides = pack_slides(repaired)
     if not raw_slides:
         return repaired
@@ -517,6 +1207,10 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
         _repair_layout_semantics(slide)
         spec = LAYOUT_SPECS[slide["layoutId"]]
         fields = slide["fields"]
+        if slide["layoutId"] == "explainer":
+            # Reaproveita a enumeracao que ja existe no body antes de qualquer
+            # fallback: nenhuma chamada de IA e nenhum texto inventado.
+            _repair_explainer_steps(fields, spec)
         _repair_required_items(fields, slide["layoutId"], spec)
         for name, maximum in spec.get("max", {}).items():
             fields[name] = _fit_copy(fields.get(name), maximum)
@@ -547,6 +1241,15 @@ def repair_pack_copy(pack: dict[str, Any]) -> dict[str, Any]:
         slides.append(slide)
 
     _repair_missing_context_slide(slides)
+    if len(slides) >= PACK_SLIDE_COUNT and isinstance(slides[-1], dict):
+        final_slide = slides[-1]
+        if final_slide.get("layoutId") == "cta_photo" and isinstance(final_slide.get("fields"), dict):
+            # Campos bloqueados: aviso integral e CTA editorial seguro no último slide.
+            final_slide["fields"]["cta"] = safe_editorial_cta(
+                final_slide["fields"].get("cta")
+            )
+            final_slide["fields"]["disclaimer"] = MEDICAL_EDUCATIONAL_DISCLAIMER
+            final_slide["fields"]["footer"] = MEDICAL_PROFESSIONAL_IDENTIFICATION
     repaired["slides"] = slides
     repaired["carousel"] = slides
     if migrated_six_slide_pack:
@@ -587,6 +1290,17 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
         errors.append("slide 1 precisa usar hero_photo ou photo_overlay")
     if len(layouts) >= PACK_SLIDE_COUNT and layouts[-1] != "cta_photo":
         errors.append(f"slide {PACK_SLIDE_COUNT} precisa usar cta_photo")
+    elif (
+        len(layouts) >= PACK_SLIDE_COUNT
+        and _text(normalized[-1]["fields"].get("footer")) != MEDICAL_PROFESSIONAL_IDENTIFICATION
+    ):
+        errors.append(f"slide {PACK_SLIDE_COUNT}: footer precisa conter a identificacao profissional obrigatoria")
+    if len(layouts) >= PACK_SLIDE_COUNT and layouts[-1] == "cta_photo":
+        final_fields = normalized[-1]["fields"]
+        if _text(final_fields.get("disclaimer")) != MEDICAL_EDUCATIONAL_DISCLAIMER:
+            errors.append(f"slide {PACK_SLIDE_COUNT}: disclaimer precisa conter o aviso educativo completo")
+        if has_prohibited_editorial_cta(final_fields.get("cta")):
+            errors.append(f"slide {PACK_SLIDE_COUNT}: CTA comercial ou de captacao nao e permitido")
     if len(layouts) >= 4 and "explainer" not in layouts[2:5]:
         errors.append("slides 3 a 5 precisam incluir um explainer com contexto da IA")
     if len(set(layouts)) < 4:
@@ -613,6 +1327,21 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
                     errors.append(f"slide {index}: {name} e obrigatorio para {layout_id}")
             elif not _text(value):
                 errors.append(f"slide {index}: {name} e obrigatorio para {layout_id}")
+
+        for name in ("headline", "body", "quote"):
+            if _looks_incomplete(fields.get(name)):
+                errors.append(f"slide {index}: {name} termina em frase incompleta")
+
+        if layout_id == "myth_fact":
+            expected_labels = (("item1", "mito"), ("item2", "fato"))
+            for item_name, expected_label in expected_labels:
+                item = fields.get(item_name) if isinstance(fields.get(item_name), dict) else {}
+                if _text(item.get("title")).casefold() != expected_label:
+                    errors.append(
+                        f"slide {index}: {item_name}.title precisa ser {expected_label.title()}"
+                    )
+                if _looks_incomplete(item.get("text")):
+                    errors.append(f"slide {index}: {item_name}.text termina em frase incompleta")
 
         for name, maximum in spec.get("max", {}).items():
             value = _text(fields.get(name))
@@ -648,6 +1377,10 @@ def validate_pack_contract(pack: dict[str, Any]) -> list[str]:
     caption = _text(pack.get("caption"))
     if not caption:
         errors.append("caption e obrigatoria")
+    elif not has_medical_publication_notice(caption):
+        errors.append("caption precisa conter o aviso completo e a identificacao profissional")
+    if has_prohibited_editorial_cta(caption):
+        errors.append("caption nao pode conter CTA comercial ou de captacao")
     if _EMOJI_RE.search(caption):
         errors.append("caption nao pode ter emojis")
     return list(dict.fromkeys(errors))

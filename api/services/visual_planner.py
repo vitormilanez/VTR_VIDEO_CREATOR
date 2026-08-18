@@ -9,6 +9,10 @@ import re
 from typing import Any, Callable
 
 from api.post_production_contracts import InteractionType, Transcript, VisualPlan, VisualPlanEvent
+from api.services.medical_identity import (
+    MEDICAL_EDITORIAL_PROMPT,
+    has_prohibited_editorial_cta,
+)
 
 
 PLANNER_MODEL_VERSION = "visual-planner-fallback-v1"
@@ -16,6 +20,8 @@ LOGGER = logging.getLogger(__name__)
 MIN_PLANNED_EVENT_MS = 1600
 MAX_PLANNED_EVENT_MS = 5000
 MAX_PLANNED_OVERLAP_MS = 250
+MIN_CLAUDE_CONFIDENCE = 0.72
+MAX_EVENTS_PER_MINUTE = 5
 
 _TRAILING_FUNCTION_WORDS = {
     "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e",
@@ -47,6 +53,19 @@ def _event_id(transcript: Transcript, start: int, end: int, kind: InteractionTyp
 
 def _tokens(value: str) -> list[str]:
     return re.findall(r"[\wÀ-ÿ]+", value.casefold())
+
+
+def _tokens_are_subsequence(needles: list[str], haystack: list[str]) -> bool:
+    if not needles:
+        return False
+    cursor = 0
+    for needle in needles:
+        while cursor < len(haystack) and haystack[cursor] != needle:
+            cursor += 1
+        if cursor >= len(haystack):
+            return False
+        cursor += 1
+    return True
 
 
 def _trim_function_words(value: str) -> str:
@@ -118,25 +137,87 @@ def _compact_visual_text(kind: InteractionType, spoken: str, proposed: str) -> s
     return _short_visual_text(compact)
 
 
+def _aligned_event_range(
+    transcript: Transcript,
+    event: VisualPlanEvent,
+    original_start: int,
+    original_end: int,
+) -> tuple[int, int] | None:
+    """Localiza dentro do trecho as palavras que realmente aparecem no cartão."""
+    desired_tokens = _tokens(_trim_function_words(event.visualText))
+    if not desired_tokens:
+        return None
+    indexed_tokens: list[tuple[str, int]] = []
+    for word_index in range(original_start, original_end + 1):
+        indexed_tokens.extend((_token, word_index) for _token in _tokens(transcript.words[word_index].text))
+    cursor = 0
+    matched_indices: list[int] = []
+    for desired in desired_tokens:
+        while cursor < len(indexed_tokens) and indexed_tokens[cursor][0] != desired:
+            cursor += 1
+        if cursor >= len(indexed_tokens):
+            return None
+        matched_indices.append(indexed_tokens[cursor][1])
+        cursor += 1
+    return matched_indices[0], matched_indices[-1]
+
+
 def _expanded_event_range(transcript: Transcript, event: VisualPlanEvent) -> tuple[int, int]:
-    start = event.startWordIndex
-    end = event.endWordIndex
-    if end >= len(transcript.words):
-        return start, end
-    start_ms = transcript.words[start].startMs
+    last_word_index = len(transcript.words) - 1
+    original_start = min(max(0, event.startWordIndex), last_word_index)
+    original_end = min(max(original_start, event.endWordIndex), last_word_index)
+    aligned = _aligned_event_range(transcript, event, original_start, original_end)
+    start, end = aligned or (original_start, original_end)
+
+    def duration_ms() -> int:
+        return transcript.words[end].endMs - transcript.words[start].startMs
+
+    # Quando o texto é localizável, o início visual acompanha a primeira palavra
+    # escolhida por Claude, em vez de herdar toda a frase enviada como contexto.
+    while duration_ms() > MAX_PLANNED_EVENT_MS and start < end:
+        if aligned:
+            start += 1
+        else:
+            end -= 1
+
     proposed = _trim_function_words(event.visualText)
-    needs_completion = bool(re.search(r"\b\w+(?:ando|endo|indo)\b\s*$", proposed, flags=re.IGNORECASE))
-    while end + 1 < len(transcript.words):
-        duration = transcript.words[end].endMs - start_ms
-        if duration >= MIN_PLANNED_EVENT_MS and not needs_completion:
-            break
-        next_end = transcript.words[end + 1].endMs
-        if next_end - start_ms > MAX_PLANNED_EVENT_MS:
+    needs_completion = bool(
+        re.search(r"\b\w+(?:ando|endo|indo)\b\s*$", proposed, flags=re.IGNORECASE)
+        or proposed.casefold().endswith(("ao mesmo", "do mesmo", "da mesma"))
+    )
+    if needs_completion and end + 1 < len(transcript.words):
+        if transcript.words[end + 1].endMs - transcript.words[start].startMs <= MAX_PLANNED_EVENT_MS:
+            end += 1
+
+    # Primeiro prolonga dentro do contexto aprovado por Claude. Só cruza a
+    # borda da frase quando isso é necessário para o mínimo de leitura.
+    while end < original_end and duration_ms() < MIN_PLANNED_EVENT_MS:
+        if transcript.words[end + 1].endMs - transcript.words[start].startMs > MAX_PLANNED_EVENT_MS:
             break
         end += 1
-        if needs_completion and re.search(r"[.!?]$", transcript.words[end].text):
+    while start > original_start and duration_ms() < MIN_PLANNED_EVENT_MS:
+        if transcript.words[end].endMs - transcript.words[start - 1].startMs > MAX_PLANNED_EVENT_MS:
             break
+        start -= 1
+    while end + 1 < len(transcript.words) and duration_ms() < MIN_PLANNED_EVENT_MS:
+        if transcript.words[end + 1].endMs - transcript.words[start].startMs > MAX_PLANNED_EVENT_MS:
+            break
+        end += 1
+    while start > 0 and duration_ms() < MIN_PLANNED_EVENT_MS:
+        if transcript.words[end].endMs - transcript.words[start - 1].startMs > MAX_PLANNED_EVENT_MS:
+            break
+        start -= 1
     return start, end
+
+
+def _complete_visual_text_from_spoken(spoken: str, proposed: str) -> str:
+    compact = _trim_function_words(proposed)
+    if compact and compact.casefold().endswith(("ao mesmo", "do mesmo", "da mesma")):
+        spoken_words = spoken.strip(" .,:;!?").split()
+        compact_words = compact.split()
+        if len(spoken_words) > len(compact_words):
+            compact = " ".join(spoken_words[: min(len(spoken_words), len(compact_words) + 1)])
+    return _trim_function_words(compact)
 
 
 def _tighten_event(transcript: Transcript, event: VisualPlanEvent) -> VisualPlanEvent:
@@ -150,7 +231,12 @@ def _tighten_event(transcript: Transcript, event: VisualPlanEvent) -> VisualPlan
         proposed = " ".join(matches[-1].split()[:5]) if matches else event.visualText
     else:
         proposed = event.visualText
-    visual_text = _compact_visual_text(kind, spoken, proposed)
+    if not _tokens_are_subsequence(_tokens(proposed), _tokens(spoken)):
+        proposed = spoken
+    visual_text = _complete_visual_text_from_spoken(
+        spoken,
+        _compact_visual_text(kind, spoken, proposed),
+    )
     asset_ref = event.assetRef
     if kind == InteractionType.supporting_visual:
         if not asset_ref or not asset_ref.startswith("generated:"):
@@ -170,10 +256,15 @@ def _tighten_event(transcript: Transcript, event: VisualPlanEvent) -> VisualPlan
 def normalize_visual_plan(transcript_payload: dict[str, Any], plan_payload: dict[str, Any]) -> dict[str, Any]:
     transcript = Transcript.model_validate(transcript_payload)
     plan = VisualPlan.model_validate(plan_payload)
-    normalized = sorted(
-        (_tighten_event(transcript, event) for event in plan.events),
-        key=lambda event: (event.startWordIndex, event.endWordIndex),
-    )
+    normalized: list[VisualPlanEvent] = []
+    for event in plan.events:
+        if event.interactionType == InteractionType.none or event.confidence < MIN_CLAUDE_CONFIDENCE:
+            continue
+        tightened = _tighten_event(transcript, event)
+        if has_prohibited_editorial_cta(tightened.visualText):
+            continue
+        normalized.append(tightened)
+    normalized.sort(key=lambda event: (event.startWordIndex, event.endWordIndex))
     accepted: list[VisualPlanEvent] = []
     for event in normalized:
         if accepted:
@@ -187,7 +278,14 @@ def normalize_visual_plan(transcript_payload: dict[str, Any], plan_payload: dict
                     accepted[-1] = event
                 continue
         accepted.append(event)
-    plan.events = accepted
+    duration_minutes = max(transcript.durationMs / 60_000, 0.1)
+    maximum_events = min(6, max(1, int(duration_minutes * MAX_EVENTS_PER_MINUTE)))
+    plan.events = accepted[:maximum_events]
+    if not plan.events and not plan.noVisualReason:
+        plan.noVisualReason = (
+            "Nenhuma intervenção superou o limiar de relevância e confiança; "
+            "o vídeo deve permanecer apenas com legendas."
+        )
     return plan.model_dump(mode="json")
 
 
@@ -253,6 +351,7 @@ def deterministic_visual_plan(transcript_payload: dict[str, Any]) -> dict[str, A
 def plan_visuals(
     transcript_payload: dict[str, Any],
     *,
+    require_claude: bool = False,
     cache_get: Callable[[str, Any], dict[str, Any] | None] | None = None,
     cache_put: Callable[[str, Any, dict[str, Any]], None] | None = None,
     record_usage: Callable[[str, str, Any], None] | None = None,
@@ -262,16 +361,27 @@ def plan_visuals(
         "videoFingerprint": transcript_payload.get("videoFingerprint"),
         "transcriptVersion": transcript_payload.get("version"),
         "plannerVersion": PLANNER_MODEL_VERSION,
+        "requireClaude": require_claude,
     }
     if cache_get and (cached := cache_get("post_production.plan", cache_key)):
         VisualPlan.model_validate(cached)
         return normalize_visual_plan(transcript_payload, cached), "cache"
 
-    paid_enabled = os.getenv("POST_PRODUCTION_USE_CLAUDE") == "1"
+    paid_enabled = require_claude or os.getenv("POST_PRODUCTION_USE_CLAUDE") == "1"
     has_key = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))
+    if require_claude and not has_key:
+        raise RuntimeError("Claude não está configurado para analisar este vídeo.")
     if paid_enabled and has_key:
         try:
-            plan, message, model = _anthropic_visual_plan(transcript_payload)
+            requested_model = (
+                os.getenv("ANTHROPIC_LOCAL_VIDEO_MODEL", "claude-sonnet-4-6")
+                if require_claude
+                else None
+            )
+            plan, message, model = _anthropic_visual_plan(
+                transcript_payload,
+                model_name=requested_model,
+            )
             plan = normalize_visual_plan(transcript_payload, plan)
             if cache_put:
                 cache_put("post_production.plan", cache_key, plan)
@@ -279,6 +389,8 @@ def plan_visuals(
                 record_usage("post_production.plan", model, message)
             return plan, "anthropic"
         except Exception as exc:
+            if require_claude:
+                raise RuntimeError(f"Claude não concluiu a direção visual: {exc}") from exc
             # A provider/schema failure must not make local post-production unavailable.
             LOGGER.warning("Post-production planner fallback: %s: %s", type(exc).__name__, exc)
     plan = normalize_visual_plan(transcript_payload, deterministic_visual_plan(transcript_payload))
@@ -287,31 +399,63 @@ def plan_visuals(
     return plan, "fallback"
 
 
-def _anthropic_visual_plan(transcript_payload: dict[str, Any]) -> tuple[dict[str, Any], Any, str]:
+def _anthropic_visual_plan(
+    transcript_payload: dict[str, Any],
+    *,
+    model_name: str | None = None,
+) -> tuple[dict[str, Any], Any, str]:
     import anthropic
 
     transcript = Transcript.model_validate(transcript_payload)
-    indexed_text = "\n".join(f"{word.index}: {word.text}" for word in transcript.words)
-    prompt = f"""Planeje interações visuais para esta fala em português brasileiro.
-Escolha SOMENTE startWordIndex e endWordIndex; nunca produza timestamps.
+    indexed_text = "\n".join(
+        f"{word.index} [{word.startMs / 1000:.2f}s–{word.endMs / 1000:.2f}s]: {word.text}"
+        for word in transcript.words
+    )
+    prompt = f"""Analise esta fala em português brasileiro como um diretor editorial de vídeo.
+Cada palavra vem com índice e intervalo em segundos. Observe esses segundos para
+escolher momentos legíveis, mas devolva SOMENTE startWordIndex e endWordIndex;
+o backend deriva os timestamps exatos desses índices.
 Use apenas estas interações: none, caption_emphasis, kinetic_text, progressive_list,
-supporting_visual e cta_card. Não crie estatísticas, prescrições, diagnósticos,
-promessas ou qualquer alegação ausente na fala. Retorne de 4 a 6 intervenções,
-sem usar none. Varie os tipos conforme o conteúdo e use progressive_list quando
-a fala realmente enumerar pelo menos três itens. visualText deve ter de 2 a 6
+supporting_visual, definition_card, number_card, comparison_card, quote_card,
+evidence_card e cta_card. Não crie estatísticas, prescrições, diagnósticos,
+promessas ou qualquer alegação ausente na fala.
+
+RELEVÂNCIA É O CRITÉRIO PRINCIPAL:
+- Retorne de ZERO a 6 intervenções. Zero é uma resposta correta quando a imagem do
+  apresentador e as legendas já comunicam tudo com clareza.
+- Não use visual apenas para preencher espaço ou variar a tela.
+- Cada intervenção precisa esclarecer uma relação, número, definição, contraste,
+  evidência, lista real ou CTA que ficaria menos compreensível só com legenda.
+- Use number_card somente para um número dito literalmente na fala.
+- Use comparison_card somente quando a fala comparar dois lados explicitamente.
+- Use definition_card somente quando a fala realmente definir um termo.
+- Use quote_card apenas para uma formulação curta e memorável dita no trecho.
+- Use evidence_card apenas para status de estudo, fonte ou nível de evidência dito na fala.
+- Evite qualquer sobreposição e distribua no máximo cinco eventos por minuto.
+
+visualText deve ter de 2 a 8
 palavras, formar uma ideia completa, nunca terminar em artigo/preposição, ser
 popular, usar exclusivamente palavras contidas no intervalo e não repetir a
 legenda inteira. Para supporting_visual, escolha um assetRef entre
-medical_molecule, consultation, science, warning e focus; nos demais use null.
+medical_molecule, consultation, science, warning e focus; nos demais use "none".
 Cada elemento deve permanecer entre 1,5 e 5 segundos. Evite sobreposição.
+
+Também informe contentType, um resumo factual curto, a estratégia editorial e,
+quando não houver eventos, noVisualReason explicando por que nenhum visual ajuda.
+
+{MEDICAL_EDITORIAL_PROMPT}
 
 PALAVRAS INDEXADAS:
 {indexed_text[:90000]}"""
     schema = {
         "type": "object",
         "additionalProperties": False,
-        "required": ["events"],
+        "required": ["contentType", "summary", "strategy", "noVisualReason", "events"],
         "properties": {
+            "contentType": {"type": "string"},
+            "summary": {"type": "string"},
+            "strategy": {"type": "string"},
+            "noVisualReason": {"type": "string"},
             "events": {
                 "type": "array",
                 "items": {
@@ -328,8 +472,8 @@ PALAVRAS INDEXADAS:
                         "visualText": {"type": "string"},
                         "intensity": {"type": "string", "enum": ["low", "medium", "high"]},
                         "assetRef": {
-                            "type": ["string", "null"],
-                            "enum": [None, *_GENERATED_ASSETS],
+                            "type": "string",
+                            "enum": ["none", *_GENERATED_ASSETS],
                         },
                         "reason": {"type": "string"},
                         "confidence": {"type": "number"},
@@ -339,16 +483,23 @@ PALAVRAS INDEXADAS:
             }
         },
     }
-    model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+    model = model_name or os.getenv(
+        "ANTHROPIC_POST_PRODUCTION_MODEL",
+        os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+    )
     message = anthropic.Anthropic().messages.create(
         model=model,
         max_tokens=4000,
-        system="Você é editor de vídeo e revisor responsável de conteúdo médico.",
+        system=(
+            "Você é editor de vídeo e revisor responsável de conteúdo médico.\n\n"
+            + MEDICAL_EDITORIAL_PROMPT
+        ),
         output_config={"format": {"type": "json_schema", "schema": schema}},
         messages=[{"role": "user", "content": prompt}],
     )
     raw = "".join(getattr(block, "text", "") for block in message.content)
-    candidates = json.loads(raw).get("events", [])
+    parsed = json.loads(raw)
+    candidates = parsed.get("events", [])
     events: list[VisualPlanEvent] = []
     for candidate in candidates:
         start = int(candidate["startWordIndex"])
@@ -362,6 +513,14 @@ PALAVRAS INDEXADAS:
         if not proposed_tokens.issubset(spoken_tokens):
             proposed = _short_visual_text(spoken)
         kind = InteractionType(candidate["interactionType"])
+        if kind == InteractionType.none:
+            continue
+        proposed_asset = str(candidate.get("assetRef") or "none")
+        asset_ref = (
+            f"generated:{proposed_asset}"
+            if kind == InteractionType.supporting_visual and proposed_asset in _GENERATED_ASSETS
+            else None
+        )
         events.append(
             VisualPlanEvent(
                 id=_event_id(transcript, start, end, kind),
@@ -370,18 +529,20 @@ PALAVRAS INDEXADAS:
                 interactionType=kind,
                 visualText=proposed,
                 intensity=candidate["intensity"],
-                assetRef=candidate.get("assetRef"),
+                assetRef=asset_ref,
                 reason=str(candidate["reason"])[:180],
                 confidence=float(candidate["confidence"]),
                 fallback=InteractionType(candidate["fallback"]),
             )
         )
-    if not events:
-        raise ValueError("Claude não retornou eventos visuais válidos.")
     plan = VisualPlan(
         modelVersion=f"anthropic:{model}",
         transcriptVersion=transcript.version,
         videoFingerprint=transcript.videoFingerprint,
+        contentType=str(parsed.get("contentType") or "general")[:80],
+        summary=str(parsed.get("summary") or "")[:500],
+        strategy=str(parsed.get("strategy") or "")[:500],
+        noVisualReason=str(parsed.get("noVisualReason") or "")[:500],
         events=events,
     ).model_dump(mode="json")
     return plan, message, model

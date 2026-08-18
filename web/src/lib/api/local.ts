@@ -1,19 +1,27 @@
-// Cliente da API local (FastAPI em api/server.py) que serve os dados reais
-// do Google Sheets. Base configuravel via VITE_API_URL.
+// Cliente da API local (FastAPI em api/server.py). A persistência principal
+// pode ser PostgreSQL ou o backend legado, sem alterar os tipos da interface.
 import type { HydratePayload } from "../store";
 import type { AppSettings, CalendarPost, EditorialTone, Idea, Script, Trend } from "../mock-data";
 import type { VideoJob } from "../mock-data";
 import type {
+  DurationAssessment,
   DurationPreset,
   EditorAssistResult,
   EditorOperation,
   MedicalReviewStatus,
 } from "../script-editor";
+import type {
+  CinematicMediaType,
+  CinematicPresenterMode,
+  CinematicSupportingImages,
+  CinematicVisualStyle,
+} from "../cinematic";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
 
 export interface StatePayload extends HydratePayload {
   updatedAt?: string;
+  dataBackend?: "postgres" | "sheets";
 }
 
 export async function fetchState(): Promise<StatePayload> {
@@ -28,13 +36,19 @@ export async function refreshSnapshot(): Promise<{ ok: boolean }> {
   return (await res.json()) as { ok: boolean };
 }
 
-/** Grava o novo status de um item de volta no Google Sheets. */
+/** Grava o novo status no repositório de domínio configurado. */
 export async function setSheetStatus(
   tab: "radar" | "ideias" | "roteiros" | "calendario",
   itemId: string,
   status: string,
 ): Promise<{ ok: boolean }> {
-  const res = await fetch(`${BASE}/api/sheets/${tab}/${itemId}/status`, {
+  const resources = {
+    radar: "trends",
+    ideias: "ideas",
+    roteiros: "scripts",
+    calendario: "calendar-posts",
+  } as const;
+  const res = await fetch(`${BASE}/api/${resources[tab]}/${itemId}/status`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status }),
@@ -96,22 +110,22 @@ async function postJson<T = { ok: boolean }>(path: string, body: unknown): Promi
   return requestJson<T>(path, { method: "POST", body: JSON.stringify(body) });
 }
 
-/** Persiste uma tendencia cadastrada manualmente na aba Radar Tendencias do Sheets. */
+/** Persiste uma tendência cadastrada manualmente. */
 export async function appendTrend(trend: Trend): Promise<Trend> {
-  const response = await postJson<{ ok: boolean; trend: Trend }>("/api/sheets/radar", trend);
+  const response = await postJson<{ ok: boolean; trend: Trend }>("/api/trends", trend);
   return response.trend;
 }
 
-/** Persiste uma ideia gerada na aba Ideias do Sheets. */
+/** Persiste uma ideia gerada. */
 export async function appendIdea(idea: Idea): Promise<Idea> {
-  const response = await postJson<{ ok: boolean; idea: Idea }>("/api/sheets/ideias", idea);
+  const response = await postJson<{ ok: boolean; idea: Idea }>("/api/ideas", idea);
   return response.idea;
 }
 
-/** Atualiza uma ideia existente no Sheets, preservando ID e vinculo com a tendencia. */
+/** Atualiza uma ideia existente, preservando ID e vínculo com a tendência. */
 export async function saveIdea(idea: Idea): Promise<Idea> {
   const response = await requestJson<{ ok: boolean; idea: Idea }>(
-    `/api/sheets/ideias/${encodeURIComponent(idea.id)}`,
+    `/api/ideas/${encodeURIComponent(idea.id)}`,
     { method: "PUT", body: JSON.stringify(idea) },
   );
   return response.idea;
@@ -257,7 +271,7 @@ export interface GenerateScriptInput {
   };
   articleAnalysis?: ArticleAnalysis | null;
   editorialTone: EditorialTone;
-  durationSeconds?: 10 | 15 | 30 | 45 | 60;
+  durationSeconds?: DurationPreset;
   outro?: string;
   requireClaude?: boolean;
 }
@@ -289,51 +303,83 @@ export async function generateScript(
   return { provider: response.provider, script: response.script };
 }
 
-/** Persiste um roteiro gerado na aba Roteiros do Sheets. */
+export interface CreateScriptFromDraftInput {
+  draftText: string;
+  title?: string;
+  familia: Idea["familia"];
+  editorialTone: EditorialTone;
+  durationSeconds: DurationPreset;
+}
+
+export interface ScriptFromDraftResult {
+  provider: "claude";
+  model: string;
+  promptVersion: string;
+  cacheHit: boolean;
+  deduplicated: boolean;
+  script: Script;
+  scenePlan: ScenePlan;
+  changes: string[];
+}
+
+/** Revisa um texto com Claude, salva o roteiro e cria cenas ainda sem gerar vídeo. */
+export async function createScriptFromDraft(
+  input: CreateScriptFromDraftInput,
+): Promise<ScriptFromDraftResult> {
+  const response = await postJson<{ ok: boolean } & ScriptFromDraftResult>(
+    "/api/scripts/from-draft",
+    input,
+  );
+  return response;
+}
+
+/** Persiste um roteiro gerado. */
 export async function appendScript(script: Script): Promise<Script> {
-  const response = await postJson<{ ok: boolean; script: Script }>("/api/sheets/roteiros", script);
+  const response = await postJson<{ ok: boolean; script: Script }>("/api/scripts", script);
   return response.script;
 }
 
-/** Atualiza o roteiro no Sheets e no snapshot usado para gerar o video. */
+/** Atualiza o roteiro na fonte de verdade usada pela produção. */
 export async function saveScript(script: Script): Promise<Script> {
   const response = await requestJson<{ ok: boolean; script: Script }>(
-    `/api/sheets/roteiros/${encodeURIComponent(script.id)}`,
+    `/api/scripts/${encodeURIComponent(script.id)}`,
     { method: "PUT", body: JSON.stringify(script) },
   );
   return response.script;
 }
 
-/** Exclui o roteiro no Sheets; o backend bloqueia quando existe vídeo ou agendamento vinculado. */
+/** Exclui o roteiro; o backend bloqueia quando existe vídeo ou agendamento vinculado. */
 export async function deleteScript(scriptId: string): Promise<{ id: string; title: string }> {
   const response = await requestJson<{ ok: boolean; id: string; title: string }>(
-    `/api/sheets/roteiros/${encodeURIComponent(scriptId)}`,
+    `/api/scripts/${encodeURIComponent(scriptId)}`,
     { method: "DELETE" },
   );
   return { id: response.id, title: response.title };
 }
 
-/** Cria um agendamento real na aba Calendario do Sheets. */
+/** Cria um agendamento persistente. */
 export async function appendCalendarPost(post: Omit<CalendarPost, "id">): Promise<CalendarPost> {
-  const response = await postJson<{ ok: boolean; post: CalendarPost }>(
-    "/api/sheets/calendario",
-    post,
-  );
+  const response = await postJson<{ ok: boolean; post: CalendarPost }>("/api/calendar-posts", post);
   return response.post;
 }
 
 /** Persiste reagendamento, publicacao e demais alteracoes do calendario. */
 export async function saveCalendarPost(post: CalendarPost): Promise<CalendarPost> {
   const response = await requestJson<{ ok: boolean; post: CalendarPost }>(
-    `/api/sheets/calendario/${encodeURIComponent(post.id)}`,
+    `/api/calendar-posts/${encodeURIComponent(post.id)}`,
     { method: "PUT", body: JSON.stringify(post) },
   );
   return response.post;
 }
 
+export type PackFamily = "editorial" | "didatico" | "storytelling" | "manifesto" | "clinico";
+export type PackTheme = "modernist-red" | "ocean-deep" | "soft-sage" | "soft-rose";
+
 export interface GeneratedPack {
   schemaVersion?: "institute-carousel-v1" | string;
   designDirection?: "institute_carousel_v1" | string;
+  family?: PackFamily;
+  themeId?: PackTheme;
   carousel: PackSlide[];
   slides?: PackSlide[];
   staticPost: {
@@ -355,6 +401,7 @@ export interface GeneratedPack {
   sourcePrimaryAvatarId?: string | null;
   sourceIdentityKey?: string | null;
   packContextVersion?: string | null;
+  educationalFlowVersion?: string | null;
   avatarAsset?: {
     avatarId: string;
     avatarName: string;
@@ -416,6 +463,7 @@ export interface PackSlideFields {
   eyebrow: string;
   headline: string;
   subheadline: string;
+  coverNote: string;
   body: string;
   statistic: string;
   item1: PackSlideItem;
@@ -457,6 +505,7 @@ export interface HeyGenProviderCapabilities {
     supportsBrandKitId: boolean;
     supportsChatMode: boolean;
     supportsAttachments: boolean;
+    supportsIncognitoMode: boolean;
     orientations: string[];
     modes: string[];
   };
@@ -744,7 +793,77 @@ export interface ProductionProfile {
   musicTrackId?: string | null;
   musicVolume?: number;
   cinematicPrompt?: string;
+  styleId?: string | null;
+  brandKitId?: string | null;
+  videoAgentMode?: "generate" | "chat";
+  videoAgentVisualMode?: "standard" | "seedance";
+  videoAgentInstructions?: string;
+  videoAgentAttachments?: VideoAgentAttachment[];
+  videoAgentIncognitoMode?: boolean;
   updatedAt?: string;
+}
+
+export type PodcastSpeakerId = "a" | "b";
+
+export interface PodcastParticipant {
+  id: PodcastSpeakerId;
+  name: string;
+  avatarId: string;
+  voiceId: string;
+}
+
+export interface PodcastTurn {
+  id: string;
+  order: number;
+  speakerId: PodcastSpeakerId;
+  text: string;
+}
+
+export interface PodcastPlan {
+  scriptId: string;
+  title: string;
+  orientation: "portrait" | "landscape";
+  captions: boolean;
+  transitionStyle: "hard_cut";
+  musicTrackId?: string | null;
+  musicVolume?: number;
+  participants: [PodcastParticipant, PodcastParticipant];
+  turns: PodcastTurn[];
+  updatedAt: string;
+}
+
+export interface PodcastDialogueResult {
+  provider: "claude";
+  model: string;
+  promptVersion: string;
+  title: string;
+  turns: Array<Pick<PodcastTurn, "speakerId" | "text">>;
+  turnCount: number;
+  wordCount: number;
+}
+
+export interface PodcastGenerationRequest {
+  turnId: string;
+  order: number;
+  speakerId: PodcastSpeakerId;
+  speakerName: string;
+  avatarId: string;
+  voiceId: string;
+  spokenText: string;
+  speechMode: "natural" | "fiel" | "direto" | "enfatico";
+  voiceMood: VoiceMood;
+  orientation: "portrait" | "landscape";
+}
+
+export interface PodcastGenerationResult {
+  scriptId: string;
+  status: "not_submitted";
+  provider: "heygen";
+  turnCount: number;
+  estimatedCalls: number;
+  requiresExplicitConfirmation: boolean;
+  warning: string;
+  requests: PodcastGenerationRequest[];
 }
 
 export interface MusicTrack {
@@ -756,7 +875,10 @@ export interface MusicTrack {
   url: string;
 }
 
-export type AvatarSetRole = "primary" | "front" | "close" | "three_quarter" | "standing" | "wide";
+export type AvatarSetRole =
+  "primary" | "front" | "close" | "three_quarter" | "standing" | "seated" | "wide";
+
+export type ClaudeSceneModel = "haiku" | "sonnet";
 
 export interface AvatarSetLook {
   avatarId: string;
@@ -794,6 +916,7 @@ export interface ScenePlan {
 export interface SceneGenerationRequest {
   sceneId: string;
   order: number;
+  lookRole: AvatarSetRole;
   avatarId: string;
   voiceId: string;
   spokenText: string;
@@ -817,6 +940,18 @@ export interface SceneDirectionSuggestion {
   text: string;
   lookRole: AvatarSetRole;
   reason: string;
+}
+
+export interface SceneDirectionResult {
+  provider: "claude";
+  promptVersion: string;
+  model: string;
+  modelTier: ClaudeSceneModel;
+  requestedModel?: string;
+  fallbackUsed?: boolean;
+  adjustedScript: string;
+  scriptChanges: string[];
+  scenes: SceneDirectionSuggestion[];
 }
 
 export type VideoVisualType =
@@ -891,56 +1026,84 @@ export interface PackCompliance {
 /** Gera o pack de conteudo real via Claude (server-side) a partir de um roteiro. */
 export async function generatePack(
   script: Script,
-): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+  presentation?: { family: PackFamily; themeId: PackTheme },
+): Promise<PackMutationResult> {
   const res = await fetch(`${BASE}/api/packs/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...script, scriptId: script.id }),
+    body: JSON.stringify({ ...script, scriptId: script.id, ...presentation }),
   });
   if (!res.ok) throw new Error(await errorDetail(res, "Nao foi possivel gerar o pack."));
-  return (await res.json()) as { pack: GeneratedPack; compliance: PackCompliance };
+  return (await res.json()) as PackMutationResult;
+}
+
+/** Salva composição e tema do Pack localmente. Não chama Claude nem altera a copy. */
+export async function updatePackPresentation(
+  scriptId: string,
+  presentation: { family: PackFamily; themeId: PackTheme },
+): Promise<PackMutationResult> {
+  const response = await requestJson<{
+    ok: boolean;
+    pack: GeneratedPack;
+    compliance: PackCompliance;
+    clarity: PackClarity;
+  }>(`/api/packs/${encodeURIComponent(scriptId)}/presentation`, {
+    method: "PUT",
+    body: JSON.stringify(presentation),
+  });
+  return { pack: response.pack, compliance: response.compliance, clarity: response.clarity };
 }
 
 export async function fetchPack(scriptId: string): Promise<{
   pack: GeneratedPack | null;
+  clarity: PackClarity | null;
+  versions: PackVersion[];
   productionProfile: ProductionProfile | null;
   outdatedAvatar: boolean;
   outdatedIdentity?: boolean;
   outdatedPackSchema?: boolean;
+  outdatedEducationalFlow?: boolean;
   requiredSlideCount?: number;
 }> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack | null;
+    clarity?: PackClarity | null;
+    versions?: PackVersion[];
     productionProfile: ProductionProfile | null;
     outdatedAvatar: boolean;
     outdatedIdentity?: boolean;
     outdatedPackSchema?: boolean;
+    outdatedEducationalFlow?: boolean;
     requiredSlideCount?: number;
   }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
   return {
     pack: response.pack,
+    clarity: response.clarity ?? null,
+    versions: response.versions ?? [],
     productionProfile: response.productionProfile,
     outdatedAvatar: response.outdatedAvatar,
     outdatedIdentity: response.outdatedIdentity,
     outdatedPackSchema: response.outdatedPackSchema,
+    outdatedEducationalFlow: response.outdatedEducationalFlow,
     requiredSlideCount: response.requiredSlideCount,
   };
 }
 
-export async function refreshPackAvatar(scriptId: string): Promise<{
-  pack: GeneratedPack;
-  compliance: PackCompliance;
-  productionProfile: ProductionProfile | null;
-  outdatedAvatar: boolean;
-  outdatedIdentity?: boolean;
-}> {
+export async function refreshPackAvatar(scriptId: string): Promise<
+  PackMutationResult & {
+    productionProfile?: ProductionProfile | null;
+    outdatedAvatar?: boolean;
+    outdatedIdentity?: boolean;
+  }
+> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack;
     compliance: PackCompliance;
-    productionProfile: ProductionProfile | null;
-    outdatedAvatar: boolean;
+    clarity: PackClarity;
+    productionProfile?: ProductionProfile | null;
+    outdatedAvatar?: boolean;
     outdatedIdentity?: boolean;
   }>(`/api/packs/${encodeURIComponent(scriptId)}/refresh-avatar`, { method: "POST" });
   return response;
@@ -951,16 +1114,17 @@ export async function updatePackCarouselLayout(
   scriptId: string,
   slideIndex: number,
   layout: PackLayout,
-): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
+): Promise<PackMutationResult> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack;
     compliance: PackCompliance;
+    clarity: PackClarity;
   }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/layout`, {
     method: "PUT",
     body: JSON.stringify({ layout }),
   });
-  return { pack: response.pack, compliance: response.compliance };
+  return { pack: response.pack, compliance: response.compliance, clarity: response.clarity };
 }
 
 export async function fetchPackPhotoAssets(): Promise<PackPhotoAsset[]> {
@@ -975,21 +1139,182 @@ export async function updatePackCarouselPhoto(
   scriptId: string,
   slideIndex: number,
   photoAssetId: string | null,
+): Promise<PackMutationResult> {
+  const response = await requestJson<{
+    ok: boolean;
+    pack: GeneratedPack;
+    compliance: PackCompliance;
+    clarity: PackClarity;
+  }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/photo`, {
+    method: "PUT",
+    body: JSON.stringify({ photoAssetId }),
+  });
+  return { pack: response.pack, compliance: response.compliance, clarity: response.clarity };
+}
+
+/** Salva a mensagem opcional exibida somente na caixa do Slide 1. */
+export async function updatePackCoverNote(
+  scriptId: string,
+  text: string,
 ): Promise<{ pack: GeneratedPack; compliance: PackCompliance }> {
   const response = await requestJson<{
     ok: boolean;
     pack: GeneratedPack;
     compliance: PackCompliance;
-  }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/photo`, {
+  }>(`/api/packs/${encodeURIComponent(scriptId)}/carousel/cover-note`, {
     method: "PUT",
-    body: JSON.stringify({ photoAssetId }),
+    body: JSON.stringify({ text }),
   });
   return { pack: response.pack, compliance: response.compliance };
+}
+
+/** Sinais locais de clareza por slide. Calculados no backend, sem tokens. */
+export interface PackSlideClarity {
+  slide: number;
+  layoutId: PackLayout;
+  characters: number;
+  words: number;
+  comfortMin: number;
+  comfortMax: number;
+  density: "vazio" | "equilibrado" | "denso";
+  longestSentenceWords: number;
+  jargon: string[];
+  warnings: string[];
+}
+
+export interface PackClarity {
+  slides: PackSlideClarity[];
+  balanced: number;
+  empty: number[];
+  dense: number[];
+  repeatedAdjacentLayouts: PackLayout[];
+  distinctLayouts: number;
+  warnings: number;
+}
+
+export interface PackVersion {
+  id: number;
+  origin: string;
+  summary: string;
+  createdAt: string;
+}
+
+export interface PackLayoutSpec {
+  id: PackLayout;
+  label: string;
+  required: string[];
+  maxChars: Record<string, number>;
+  itemMaxChars: Record<string, number>;
+  usesPhoto: boolean;
+  comfort: [number, number];
+  editableFields: Array<keyof PackSlideFields>;
+}
+
+export interface PackDesignSystem {
+  slideCount: number;
+  schemaVersion: string;
+  families: PackFamily[];
+  themes: PackTheme[];
+  fieldLabels: Record<string, string>;
+  layouts: PackLayoutSpec[];
+}
+
+export interface PackMutationResult {
+  pack: GeneratedPack;
+  compliance: PackCompliance;
+  clarity: PackClarity;
+}
+
+/** Vocabulario fechado do Pack: layouts, rotulos e limites reais por campo. */
+export async function fetchPackDesignSystem(): Promise<PackDesignSystem> {
+  const response = await requestJson<{ ok: boolean } & PackDesignSystem>(
+    "/api/packs/design-system",
+    { method: "GET" },
+  );
+  return response;
+}
+
+/** URL do preview: e o mesmo HTML que vira PNG na exportacao. */
+export function packSlidePreviewUrl(scriptId: string, slideIndex: number): string {
+  return `${BASE}/api/packs/${encodeURIComponent(scriptId)}/slides/${slideIndex}/preview`;
+}
+
+/** PNG pequeno em cache. A URL muda junto com copy, família ou tema. */
+export function packSlideThumbnailUrl(
+  scriptId: string,
+  slideIndex: number,
+  pack: Pick<GeneratedPack, "updatedAt" | "family" | "themeId">,
+): string {
+  const version = [pack.updatedAt ?? "legacy", pack.family ?? "", pack.themeId ?? ""].join("|");
+  return `${BASE}/api/packs/${encodeURIComponent(scriptId)}/slides/${slideIndex}/thumb.png?v=${encodeURIComponent(version)}`;
+}
+
+/** Edita o texto de um slide localmente. Nao chama o Claude. */
+export async function updatePackSlideFields(
+  scriptId: string,
+  slideIndex: number,
+  fields: Partial<
+    Pick<
+      PackSlideFields,
+      | "eyebrow"
+      | "headline"
+      | "subheadline"
+      | "coverNote"
+      | "body"
+      | "statistic"
+      | "quote"
+      | "cta"
+      | "footer"
+      | "caption"
+      | "disclaimer"
+      | "item1"
+      | "item2"
+      | "item3"
+    >
+  >,
+): Promise<PackMutationResult> {
+  return requestJson<{ ok: boolean } & PackMutationResult>(
+    `/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/fields`,
+    { method: "PUT", body: JSON.stringify(fields) },
+  );
+}
+
+/** Reescreve um unico slide com o menor contexto possivel. */
+export async function regeneratePackSlide(
+  scriptId: string,
+  slideIndex: number,
+  instruction = "",
+): Promise<PackMutationResult & { regeneratedSlide: number }> {
+  return requestJson<{ ok: boolean } & PackMutationResult & { regeneratedSlide: number }>(
+    `/api/packs/${encodeURIComponent(scriptId)}/carousel/${slideIndex}/regenerate`,
+    { method: "POST", body: JSON.stringify({ instruction }) },
+  );
+}
+
+export async function fetchPackVersions(scriptId: string): Promise<PackVersion[]> {
+  const response = await requestJson<{ ok: boolean; versions: PackVersion[] }>(
+    `/api/packs/${encodeURIComponent(scriptId)}/versions`,
+    { method: "GET" },
+  );
+  return response.versions ?? [];
+}
+
+/** Volta para uma versao anterior do conteudo. Nao chama o Claude. */
+export async function restorePackVersion(
+  scriptId: string,
+  versionId: number,
+): Promise<PackMutationResult> {
+  return requestJson<{ ok: boolean } & PackMutationResult>(
+    `/api/packs/${encodeURIComponent(scriptId)}/versions/${versionId}/restore`,
+    { method: "POST" },
+  );
 }
 
 export interface PackForExport {
   schemaVersion?: GeneratedPack["schemaVersion"];
   designDirection?: GeneratedPack["designDirection"];
+  family?: PackFamily;
+  themeId?: PackTheme;
   carousel: PackSlide[];
   slides?: PackSlide[];
   staticPost: GeneratedPack["staticPost"];
@@ -1060,6 +1385,88 @@ export async function saveProductionProfile(
     { method: "PUT", body: JSON.stringify(profile) },
   );
   return response.profile;
+}
+
+export async function fetchPodcastPlan(scriptId: string): Promise<PodcastPlan | null> {
+  const response = await requestJson<{ ok: boolean; podcastPlan: PodcastPlan | null }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/podcast-plan`,
+    { method: "GET" },
+  );
+  return response.podcastPlan;
+}
+
+export async function savePodcastPlan(
+  scriptId: string,
+  plan: Omit<PodcastPlan, "scriptId" | "updatedAt">,
+): Promise<PodcastPlan> {
+  const response = await requestJson<{ ok: boolean; podcastPlan: PodcastPlan }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/podcast-plan`,
+    { method: "PUT", body: JSON.stringify(plan) },
+  );
+  return response.podcastPlan;
+}
+
+export async function generatePodcastDialogue(
+  scriptId: string,
+  input: {
+    sourceText: string;
+    hostName: string;
+    guestName: string;
+    direction?: string;
+    durationSeconds: 30 | 45 | 60 | 90 | 120 | 180;
+  },
+): Promise<PodcastDialogueResult> {
+  const response = await requestJson<{ ok: boolean } & PodcastDialogueResult>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/podcast-dialogue/generate`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return response;
+}
+
+export async function fetchPodcastGenerationPlan(
+  scriptId: string,
+  options?: {
+    speechMode?: PodcastGenerationRequest["speechMode"];
+    voiceMood?: VoiceMood;
+    orientation?: PodcastGenerationRequest["orientation"];
+  },
+): Promise<PodcastGenerationResult> {
+  const query = new URLSearchParams({
+    speechMode: options?.speechMode || "natural",
+    voiceMood: options?.voiceMood || "confident",
+    orientation: options?.orientation || "portrait",
+  });
+  const response = await requestJson<{ ok: boolean; generation: PodcastGenerationResult }>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/podcast-generation/plan?${query.toString()}`,
+    { method: "GET" },
+  );
+  return response.generation;
+}
+
+export async function submitPodcastGeneration(
+  scriptId: string,
+  input: {
+    orientation: "portrait" | "landscape";
+    durationSeconds: DurationPreset;
+    speechMode: PodcastGenerationRequest["speechMode"];
+    voiceMood: VoiceMood;
+    captions: boolean;
+    forceNewVersion?: boolean;
+    idempotencyKey?: string;
+    expectedScriptRevision?: number;
+    expectedFinalSpeechHash?: string;
+    contractVersion?: string;
+  },
+): Promise<{ generation: PodcastGenerationResult; jobs: VideoJob[] }> {
+  const response = await requestJson<{
+    ok: boolean;
+    generation: PodcastGenerationResult;
+    jobs: VideoJob[];
+  }>(`/api/scripts/${encodeURIComponent(scriptId)}/podcast-generation/submit`, {
+    method: "POST",
+    body: JSON.stringify({ confirmed: true, ...input }),
+  });
+  return { generation: response.generation, jobs: response.jobs };
 }
 
 export async function fetchHeyGenProviderCapabilities(): Promise<HeyGenProviderCapabilities> {
@@ -1317,7 +1724,7 @@ export async function saveScenePlan(
     estimatedStart: number;
     estimatedEnd: number;
   }>,
-  transitionStyle: SceneTransitionStyle = "smooth",
+  transitionStyle: SceneTransitionStyle = "hard_cut",
 ): Promise<ScenePlan> {
   const response = await requestJson<{ ok: boolean; scenePlan: ScenePlan }>(
     `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan`,
@@ -1350,7 +1757,7 @@ export async function submitSceneGeneration(
   scriptId: string,
   input: {
     orientation: "portrait" | "landscape";
-    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    durationSeconds: DurationPreset;
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
     voiceMood: VoiceMood;
     captions: boolean;
@@ -1373,6 +1780,14 @@ export async function submitSceneGeneration(
   return { generation: response.generation, jobs: response.jobs };
 }
 
+export async function regenerateSceneVideo(jobId: string): Promise<VideoJob> {
+  const response = await postJson<{ ok: boolean; job: VideoJob }>(
+    `/api/videos/${encodeURIComponent(jobId)}/regenerate-scene`,
+    { confirmed: true },
+  );
+  return response.job;
+}
+
 export async function generateSceneDirection(
   scriptId: string,
   input: {
@@ -1382,18 +1797,17 @@ export async function generateSceneDirection(
     pace?: string;
     emotion?: string;
     emphasisWords?: string[];
-    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    durationSeconds: DurationPreset;
+    modelTier?: ClaudeSceneModel;
   },
-): Promise<{ provider: "claude"; promptVersion: string; scenes: SceneDirectionSuggestion[] }> {
-  const response = await requestJson<{
-    ok: boolean;
-    provider: "claude";
-    promptVersion: string;
-    scenes: SceneDirectionSuggestion[];
-  }>(`/api/scripts/${encodeURIComponent(scriptId)}/scene-plan/direct`, {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
+): Promise<SceneDirectionResult> {
+  const response = await requestJson<{ ok: boolean } & SceneDirectionResult>(
+    `/api/scripts/${encodeURIComponent(scriptId)}/scene-plan/direct`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
   return response;
 }
 
@@ -1414,7 +1828,7 @@ export async function generateVisualDirection(
     pace?: string;
     emotion?: string;
     emphasisWords?: string[];
-    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    durationSeconds: DurationPreset;
   },
 ): Promise<{ provider: "claude"; visualPlan: VisualPlan }> {
   const response = await requestJson<{ ok: boolean; provider: "claude"; visualPlan: VisualPlan }>(
@@ -1474,6 +1888,54 @@ export interface HuntTrendsResult {
   queries?: string[];
   failedStep?: string;
   detail?: string;
+}
+
+export interface CinematicAdjustInput {
+  sourceText: string;
+  durationSeconds: Exclude<DurationPreset, 10>;
+  supportingImages: CinematicSupportingImages;
+  presenterMode: CinematicPresenterMode;
+  mediaTypes: CinematicMediaType[];
+  visualStyle: CinematicVisualStyle;
+  requiredElements: string;
+  excludedElements: string;
+  criticalOnScreenText: string;
+  directionNotes: string;
+  avatarName?: string;
+  avatarType?: string;
+  avatarOrientation?: "portrait" | "landscape";
+}
+
+export interface CinematicAdjustment {
+  speech: string;
+  durationSeconds: Exclude<DurationPreset, 10>;
+  supportingImages: CinematicSupportingImages;
+  presenterMode: CinematicPresenterMode;
+  mediaTypes: CinematicMediaType[];
+  visualStyle: CinematicVisualStyle;
+  requiredElements: string;
+  excludedElements: string;
+  criticalOnScreenText: string;
+  directionNotes: string;
+  rationale: string;
+}
+
+export interface CinematicAdjustResult {
+  provider: "claude";
+  model: string;
+  adjusted: CinematicAdjustment;
+  assessment: DurationAssessment;
+  retryCount: number;
+  cacheHit: boolean;
+}
+
+export async function adjustCinematicWithClaude(
+  input: CinematicAdjustInput,
+): Promise<CinematicAdjustResult> {
+  return requestJson<CinematicAdjustResult>("/api/cinematic/adjust", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export async function huntTrends(): Promise<HuntTrendsResult> {
@@ -1569,6 +2031,17 @@ export interface HeyGenStyle {
   preview_video_url?: string | null;
 }
 
+export interface HeyGenBrandKit {
+  brand_kit_id: string;
+  name: string;
+}
+
+export interface VideoAgentAttachment {
+  assetId: string;
+  name: string;
+  mimeType: string;
+}
+
 export interface AvatarMediaPayload {
   name: string;
   mimeType: string;
@@ -1603,11 +2076,36 @@ export async function fetchHeyGenAvatars(): Promise<{
   return requestJson("/api/heygen/avatars", { method: "GET" });
 }
 
-export async function fetchHeyGenStyles(tag = "cinematic"): Promise<{
+export async function fetchHeyGenStyles(tag = "all"): Promise<{
   styles: HeyGenStyle[];
   tag: string;
 }> {
   return requestJson(`/api/heygen/styles?tag=${encodeURIComponent(tag)}`, { method: "GET" });
+}
+
+export async function fetchHeyGenBrandKits(): Promise<HeyGenBrandKit[]> {
+  const response = await requestJson<{ brandKits: HeyGenBrandKit[] }>("/api/heygen/brand-kits", {
+    method: "GET",
+  });
+  return response.brandKits;
+}
+
+export async function uploadHeyGenAsset(file: File): Promise<VideoAgentAttachment> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Não foi possível ler ${file.name}.`));
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.readAsDataURL(file);
+  });
+  const response = await postJson<{ ok: boolean; attachment: VideoAgentAttachment }>(
+    "/api/heygen/assets",
+    {
+      name: file.name,
+      mimeType: file.type || "text/plain",
+      data: dataUrl.slice(dataUrl.indexOf(",") + 1),
+    },
+  );
+  return response.attachment;
 }
 
 export async function createHeyGenAvatar(payload: CreateAvatarPayload): Promise<AvatarJob> {
@@ -1655,7 +2153,7 @@ export async function createHeyGenVideo(
     avatarId?: string;
     voiceId?: string;
     orientation: "portrait" | "landscape";
-    durationSeconds: 10 | 15 | 30 | 45 | 60;
+    durationSeconds: DurationPreset;
     speechMode: "natural" | "fiel" | "direto" | "enfatico";
     voiceMood: VoiceMood;
     generationMode: GenerationMode;
@@ -1665,6 +2163,10 @@ export async function createHeyGenVideo(
     styleId?: string;
     brandKitId?: string;
     videoAgentMode?: "generate" | "chat";
+    videoAgentVisualMode?: "standard" | "seedance";
+    videoAgentInstructions?: string;
+    videoAgentAttachments?: VideoAgentAttachment[];
+    videoAgentIncognitoMode?: boolean;
     forceNewVersion?: boolean;
     narrationText?: string;
     displayText?: string;
@@ -1791,7 +2293,7 @@ export async function saveScriptEditorState(
 export async function naturalizeScript(input: {
   text: string;
   medicalCautions: string;
-  durationSeconds: 10 | 15 | 30 | 45 | 60;
+  durationSeconds: DurationPreset;
   outro: string;
   ctaMode?: "auto" | "manual" | "none" | "visual";
   manualCta?: string;
@@ -1876,6 +2378,7 @@ export type PostProductionStatus =
   | "transcribing"
   | "planning"
   | "preflight"
+  | "generating_pack"
   | "rendering_preview"
   | "preview_ready"
   | "failed"
@@ -1886,15 +2389,37 @@ export type PostProductionStatus =
 export interface PostProductionJob {
   id: string;
   kind: "post_production";
-  videoJobId: string;
+  videoJobId?: string | null;
+  uploadId?: string | null;
+  sourceName?: string;
   status: PostProductionStatus;
   progresso: number;
   etapa: string;
+  captionsStatus?: "ready" | "failed";
+  captionsPath?: string;
+  captionCueCount?: number;
   criadoEm: string;
   atualizadoEm: string;
   erro?: string;
   plannerMode?: "cache" | "fallback" | "anthropic";
+  requireClaude?: boolean;
+  generatePack?: boolean;
+  packStatus?: "ready" | "failed";
+  packPath?: string;
+  packImageCount?: number;
+  packError?: string;
 }
+
+export type VisualScreenPosition =
+  | "top_left"
+  | "top_center"
+  | "top_right"
+  | "center_left"
+  | "center"
+  | "center_right"
+  | "bottom_left"
+  | "bottom_center"
+  | "bottom_right";
 
 export interface VisualTimelineEvent {
   id: string;
@@ -1902,6 +2427,10 @@ export interface VisualTimelineEvent {
   endWordIndex: number;
   startMs: number;
   endMs: number;
+  timingSource?: "transcript" | "manual";
+  screenPosition?: VisualScreenPosition;
+  backgroundColor?: string;
+  backgroundOpacity?: number;
   spokenText: string;
   interactionType:
     | "none"
@@ -1909,8 +2438,14 @@ export interface VisualTimelineEvent {
     | "kinetic_text"
     | "progressive_list"
     | "supporting_visual"
-    | "cta_card";
+    | "cta_card"
+    | "definition_card"
+    | "number_card"
+    | "comparison_card"
+    | "quote_card"
+    | "evidence_card";
   visualText: string;
+  assetRef?: string | null;
   enabled: boolean;
   reviewStatus: "pending" | "approved" | "rejected";
   reason: string;
@@ -1929,6 +2464,34 @@ export interface PostProductionArtifacts {
     stale: boolean;
     events: VisualTimelineEvent[];
   };
+  visualPlan?: {
+    modelVersion?: string | null;
+    contentType?: string | null;
+    summary?: string | null;
+    strategy?: string | null;
+    noVisualReason?: string | null;
+  } | null;
+}
+
+export interface GeneratedContentPack {
+  pack: {
+    schemaVersion?: string;
+    caption?: string;
+    hashtags?: string[];
+    family?: string;
+    themeId?: string;
+    carousel?: Array<{
+      layoutId?: string;
+      variant?: string;
+      fields?: Record<string, unknown>;
+    }>;
+    slides?: Array<{
+      layoutId?: string;
+      variant?: string;
+      fields?: Record<string, unknown>;
+    }>;
+  };
+  images: string[];
 }
 
 export interface PreflightReport {
@@ -1945,10 +2508,27 @@ export interface PreflightReport {
 export async function createPostProduction(
   videoJobId: string,
   autoRender = false,
+  options?: { requireClaude?: boolean; generatePack?: boolean },
 ): Promise<PostProductionJob> {
   const response = await postJson<{ job: PostProductionJob }>("/api/post-production", {
     videoJobId,
     autoRender,
+    requireClaude: options?.requireClaude ?? false,
+    generatePack: options?.generatePack ?? false,
+  });
+  return response.job;
+}
+
+export async function createUploadedPostProduction(
+  uploadId: string,
+  sourceName: string,
+): Promise<PostProductionJob> {
+  const response = await postJson<{ job: PostProductionJob }>("/api/post-production", {
+    uploadId,
+    sourceName,
+    autoRender: false,
+    requireClaude: true,
+    generatePack: true,
   });
   return response.job;
 }
@@ -1980,12 +2560,35 @@ export async function fetchPostProductionArtifacts(
   );
 }
 
+export async function fetchPostProductionPack(jobId: string): Promise<GeneratedContentPack> {
+  const response = await requestJson<GeneratedContentPack>(
+    `/api/post-production/${encodeURIComponent(jobId)}/pack`,
+    {},
+  );
+  return {
+    ...response,
+    images: response.images.map((path) => (path.startsWith("http") ? path : `${BASE}${path}`)),
+  };
+}
+
 export async function updatePostProductionEvents(
   jobId: string,
   events: Array<
     Pick<VisualTimelineEvent, "id"> &
       Partial<
-        Pick<VisualTimelineEvent, "enabled" | "visualText" | "reviewStatus" | "interactionType">
+        Pick<
+          VisualTimelineEvent,
+          | "enabled"
+          | "startMs"
+          | "endMs"
+          | "timingSource"
+          | "screenPosition"
+          | "backgroundColor"
+          | "backgroundOpacity"
+          | "visualText"
+          | "reviewStatus"
+          | "interactionType"
+        >
       >
   >,
 ): Promise<{ job: PostProductionJob; timeline: PostProductionArtifacts["timeline"] }> {
@@ -2021,6 +2624,46 @@ export function postProductionPreviewUrl(jobId: string, download = false): strin
   return `${BASE}/api/post-production/${encodeURIComponent(jobId)}/preview${download ? "?download=true" : ""}`;
 }
 
+export interface LocalVideoKitInsert {
+  id: string;
+  uploadId: string;
+  sourceName: string;
+  sourceDurationSeconds: number;
+  timelineStartSeconds: number;
+  timelineEndSeconds: number;
+  sourceStartSeconds: number;
+  sourceEndSeconds: number;
+}
+
+export interface LocalVideoKitInsertAsset {
+  uploadId: string;
+  filename: string;
+  size: number;
+  durationSeconds: number;
+}
+
+export interface LocalVideoKitFiveStack {
+  enabled: boolean;
+  startSeconds?: number | null;
+  durationSeconds?: number | null;
+  lines: string[];
+}
+
+export type LocalVideoKitClaudeModelId =
+  "numberGlass" | "editorialClip" | "mechanismBars" | "evidenceStamp" | "glossarySource";
+
+export interface LocalVideoKitClaudeModel {
+  enabled: boolean;
+  startSeconds?: number | null;
+  durationSeconds?: number | null;
+  fields: string[];
+}
+
+export type LocalVideoKitClaudeInserts = Record<
+  LocalVideoKitClaudeModelId,
+  LocalVideoKitClaudeModel
+>;
+
 export interface LocalVideoKitConfig {
   name: string;
   role: string;
@@ -2048,6 +2691,10 @@ export interface LocalVideoKitConfig {
   includeLowerThird: boolean;
   includeSection: boolean;
   includeOutro: boolean;
+  manualVisualsEnabled?: boolean;
+  inserts: LocalVideoKitInsert[];
+  fiveStack?: LocalVideoKitFiveStack;
+  claudeInserts?: LocalVideoKitClaudeInserts;
 }
 
 export interface LocalVideoKitJob {
@@ -2058,6 +2705,9 @@ export interface LocalVideoKitJob {
   sourceName: string;
   sourcePath: string;
   sourceVideoJobId?: string | null;
+  sourceKitJobId?: string | null;
+  analysisJobId?: string | null;
+  transcriptReused?: boolean;
   outputPath: string;
   coverPath?: string;
   config: LocalVideoKitConfig;
@@ -2068,9 +2718,11 @@ export interface LocalVideoKitJob {
   atualizadoEm: string;
 }
 
-export async function uploadLocalVideoKitSource(
-  file: File,
-): Promise<{ uploadId: string; filename: string; size: number }> {
+export async function uploadLocalVideoKitSource(file: File): Promise<{
+  uploadId: string;
+  filename: string;
+  size: number;
+}> {
   const response = await fetch(`${BASE}/api/local-video-kit/uploads`, {
     method: "POST",
     headers: {
@@ -2082,13 +2734,33 @@ export async function uploadLocalVideoKitSource(
   if (!response.ok) {
     throw new Error(await errorDetail(response, "Não foi possível enviar o vídeo local."));
   }
-  return (await response.json()) as { uploadId: string; filename: string; size: number };
+  return (await response.json()) as {
+    uploadId: string;
+    filename: string;
+    size: number;
+  };
+}
+
+export async function uploadLocalVideoKitInsert(file: File): Promise<LocalVideoKitInsertAsset> {
+  const response = await fetch(`${BASE}/api/local-video-kit/insert-uploads`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "video/mp4",
+      "X-Filename": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, "Não foi possível enviar o clipe de insert."));
+  }
+  return (await response.json()) as LocalVideoKitInsertAsset;
 }
 
 export async function createLocalVideoKit(input: {
   uploadId?: string;
   videoJobId?: string;
   sourceKitJobId?: string;
+  analysisJobId?: string;
   sourceName: string;
   config: LocalVideoKitConfig;
 }): Promise<LocalVideoKitJob> {
@@ -2096,6 +2768,7 @@ export async function createLocalVideoKit(input: {
     uploadId: input.uploadId,
     videoJobId: input.videoJobId,
     sourceKitJobId: input.sourceKitJobId,
+    analysisJobId: input.analysisJobId,
     sourceName: input.sourceName,
     ...input.config,
   });
@@ -2105,6 +2778,14 @@ export async function createLocalVideoKit(input: {
 export async function fetchLocalVideoKit(jobId: string): Promise<LocalVideoKitJob> {
   const response = await requestJson<{ job: LocalVideoKitJob }>(
     `/api/local-video-kit/${encodeURIComponent(jobId)}`,
+    {},
+  );
+  return response.job;
+}
+
+export async function retryLocalVideoKit(jobId: string): Promise<LocalVideoKitJob> {
+  const response = await postJson<{ job: LocalVideoKitJob }>(
+    `/api/local-video-kit/${encodeURIComponent(jobId)}/retry`,
     {},
   );
   return response.job;
@@ -2125,6 +2806,10 @@ export function localVideoKitResultUrl(jobId: string, download = false): string 
 
 export function localVideoKitCoverUrl(jobId: string, download = false): string {
   return `${BASE}/api/local-video-kit/${encodeURIComponent(jobId)}/cover${download ? "?download=true" : ""}`;
+}
+
+export function localVideoKitInsertUrl(uploadId: string): string {
+  return `${BASE}/api/local-video-kit/insert-uploads/${encodeURIComponent(uploadId)}`;
 }
 
 export interface CutClip {

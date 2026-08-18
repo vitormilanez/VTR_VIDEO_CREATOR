@@ -180,7 +180,10 @@ def preflight_timeline(
                 continue
             expected_start = transcript.words[event.startWordIndex].startMs
             expected_end = transcript.words[event.endWordIndex].endMs
-            if event.startMs != expected_start or event.endMs != expected_end:
+            if (
+                event.timingSource == "transcript"
+                and (event.startMs != expected_start or event.endMs != expected_end)
+            ):
                 add("event.time_derivation", "BLOCKER", "Tempos não correspondem aos índices de palavras.", event_id)
             if event.endMs <= event.startMs or event.endMs - event.startMs < MIN_EVENT_MS:
                 add("event.duration", "BLOCKER", "Duração visual insuficiente ou invertida.", event_id)

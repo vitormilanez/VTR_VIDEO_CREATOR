@@ -13,10 +13,13 @@ import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as AppAvataresRouteImport } from './routes/_app.avatares'
 import { Route as AppCalendarioRouteImport } from './routes/_app.calendario'
+import { Route as AppCinematicRouteImport } from './routes/_app.cinematic'
+import { Route as AppCinematic2RouteImport } from './routes/_app.cinematic 2'
 import { Route as AppConfiguracoesRouteImport } from './routes/_app.configuracoes'
 import { Route as AppCortesRouteImport } from './routes/_app.cortes'
 import { Route as AppIdeiasRouteImport } from './routes/_app.ideias'
 import { Route as AppKitLocalRouteImport } from './routes/_app.kit-local'
+import { Route as AppKitLocal2RouteImport } from './routes/_app.kit-local 2'
 import { Route as AppNoticiasRouteImport } from './routes/_app.noticias'
 import { Route as AppPacksRouteImport } from './routes/_app.packs'
 import { Route as AppPerformanceRouteImport } from './routes/_app.performance'
@@ -51,6 +54,16 @@ const AppCalendarioRoute = AppCalendarioRouteImport.update({
   path: '/calendario',
   getParentRoute: () => AppRoute,
 } as any)
+const AppCinematicRoute = AppCinematicRouteImport.update({
+  id: '/cinematic',
+  path: '/cinematic',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppCinematic2Route = AppCinematic2RouteImport.update({
+  id: '/cinematic 2',
+  path: '/cinematic 2',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppConfiguracoesRoute = AppConfiguracoesRouteImport.update({
   id: '/configuracoes',
   path: '/configuracoes',
@@ -69,6 +82,11 @@ const AppIdeiasRoute = AppIdeiasRouteImport.update({
 const AppKitLocalRoute = AppKitLocalRouteImport.update({
   id: '/kit-local',
   path: '/kit-local',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppKitLocal2Route = AppKitLocal2RouteImport.update({
+  id: '/kit-local 2',
+  path: '/kit-local 2',
   getParentRoute: () => AppRoute,
 } as any)
 const AppNoticiasRoute = AppNoticiasRouteImport.update({
@@ -146,10 +164,13 @@ export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/avatares': typeof AppAvataresRoute
   '/calendario': typeof AppCalendarioRoute
+  '/cinematic': typeof AppCinematicRoute
+  '/cinematic 2': typeof AppCinematic2Route
   '/configuracoes': typeof AppConfiguracoesRoute
   '/cortes': typeof AppCortesRoute
   '/ideias': typeof AppIdeiasRouteWithChildren
   '/kit-local': typeof AppKitLocalRoute
+  '/kit-local 2': typeof AppKitLocal2Route
   '/noticias': typeof AppNoticiasRoute
   '/packs': typeof AppPacksRoute
   '/performance': typeof AppPerformanceRoute
@@ -168,9 +189,12 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/avatares': typeof AppAvataresRoute
   '/calendario': typeof AppCalendarioRoute
+  '/cinematic': typeof AppCinematicRoute
+  '/cinematic 2': typeof AppCinematic2Route
   '/configuracoes': typeof AppConfiguracoesRoute
   '/cortes': typeof AppCortesRoute
   '/kit-local': typeof AppKitLocalRoute
+  '/kit-local 2': typeof AppKitLocal2Route
   '/noticias': typeof AppNoticiasRoute
   '/packs': typeof AppPacksRoute
   '/performance': typeof AppPerformanceRoute
@@ -189,10 +213,13 @@ export interface FileRoutesById {
   '/_app': typeof AppRouteWithChildren
   '/_app/avatares': typeof AppAvataresRoute
   '/_app/calendario': typeof AppCalendarioRoute
+  '/_app/cinematic': typeof AppCinematicRoute
+  '/_app/cinematic 2': typeof AppCinematic2Route
   '/_app/configuracoes': typeof AppConfiguracoesRoute
   '/_app/cortes': typeof AppCortesRoute
   '/_app/ideias': typeof AppIdeiasRouteWithChildren
   '/_app/kit-local': typeof AppKitLocalRoute
+  '/_app/kit-local 2': typeof AppKitLocal2Route
   '/_app/noticias': typeof AppNoticiasRoute
   '/_app/packs': typeof AppPacksRoute
   '/_app/performance': typeof AppPerformanceRoute
@@ -215,10 +242,13 @@ export interface FileRouteTypes {
     | '/'
     | '/avatares'
     | '/calendario'
+    | '/cinematic'
+    | '/cinematic 2'
     | '/configuracoes'
     | '/cortes'
     | '/ideias'
     | '/kit-local'
+    | '/kit-local 2'
     | '/noticias'
     | '/packs'
     | '/performance'
@@ -237,9 +267,12 @@ export interface FileRouteTypes {
   to:
     | '/avatares'
     | '/calendario'
+    | '/cinematic'
+    | '/cinematic 2'
     | '/configuracoes'
     | '/cortes'
     | '/kit-local'
+    | '/kit-local 2'
     | '/noticias'
     | '/packs'
     | '/performance'
@@ -257,10 +290,13 @@ export interface FileRouteTypes {
     | '/_app'
     | '/_app/avatares'
     | '/_app/calendario'
+    | '/_app/cinematic'
+    | '/_app/cinematic 2'
     | '/_app/configuracoes'
     | '/_app/cortes'
     | '/_app/ideias'
     | '/_app/kit-local'
+    | '/_app/kit-local 2'
     | '/_app/noticias'
     | '/_app/packs'
     | '/_app/performance'
@@ -312,6 +348,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCalendarioRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/cinematic': {
+      id: '/_app/cinematic'
+      path: '/cinematic'
+      fullPath: '/cinematic'
+      preLoaderRoute: typeof AppCinematicRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/cinematic 2': {
+      id: '/_app/cinematic 2'
+      path: '/cinematic 2'
+      fullPath: '/cinematic 2'
+      preLoaderRoute: typeof AppCinematic2RouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/configuracoes': {
       id: '/_app/configuracoes'
       path: '/configuracoes'
@@ -338,6 +388,13 @@ declare module '@tanstack/react-router' {
       path: '/kit-local'
       fullPath: '/kit-local'
       preLoaderRoute: typeof AppKitLocalRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/kit-local 2': {
+      id: '/_app/kit-local 2'
+      path: '/kit-local 2'
+      fullPath: '/kit-local 2'
+      preLoaderRoute: typeof AppKitLocal2RouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/noticias': {
@@ -500,10 +557,13 @@ const AppRoteirosRouteWithChildren = AppRoteirosRoute._addFileChildren(
 interface AppRouteChildren {
   AppAvataresRoute: typeof AppAvataresRoute
   AppCalendarioRoute: typeof AppCalendarioRoute
+  AppCinematicRoute: typeof AppCinematicRoute
+  AppCinematic2Route: typeof AppCinematic2Route
   AppConfiguracoesRoute: typeof AppConfiguracoesRoute
   AppCortesRoute: typeof AppCortesRoute
   AppIdeiasRoute: typeof AppIdeiasRouteWithChildren
   AppKitLocalRoute: typeof AppKitLocalRoute
+  AppKitLocal2Route: typeof AppKitLocal2Route
   AppNoticiasRoute: typeof AppNoticiasRoute
   AppPacksRoute: typeof AppPacksRoute
   AppPerformanceRoute: typeof AppPerformanceRoute
@@ -516,10 +576,13 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppAvataresRoute: AppAvataresRoute,
   AppCalendarioRoute: AppCalendarioRoute,
+  AppCinematicRoute: AppCinematicRoute,
+  AppCinematic2Route: AppCinematic2Route,
   AppConfiguracoesRoute: AppConfiguracoesRoute,
   AppCortesRoute: AppCortesRoute,
   AppIdeiasRoute: AppIdeiasRouteWithChildren,
   AppKitLocalRoute: AppKitLocalRoute,
+  AppKitLocal2Route: AppKitLocal2Route,
   AppNoticiasRoute: AppNoticiasRoute,
   AppPacksRoute: AppPacksRoute,
   AppPerformanceRoute: AppPerformanceRoute,

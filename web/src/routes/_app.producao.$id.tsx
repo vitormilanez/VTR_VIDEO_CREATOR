@@ -15,6 +15,7 @@ import {
   fetchPostProductionArtifacts,
   postProductionPreviewUrl,
   publishVideoToInstagram,
+  regenerateSceneVideo,
   refreshHeyGenVideo,
   replanPostProduction,
   renderPostProductionPreview,
@@ -55,6 +56,7 @@ import {
   Download,
   ExternalLink,
   Film,
+  FolderOpen,
   Instagram,
   Layers3,
   Loader2,
@@ -63,6 +65,11 @@ import {
   RefreshCcw,
 } from "lucide-react";
 import type { Canal, Script, VideoJobStatus } from "@/lib/mock-data";
+import {
+  ensureMedicalProfessionalIdentification,
+  formatPublicationCaption,
+  safeEditorialCta,
+} from "@/lib/medical-identity";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -99,6 +106,7 @@ function VideoDetalhe() {
   const [preflightReport, setPreflightReport] = useState<PreflightReport | null>(null);
   const [postBusy, setPostBusy] = useState(false);
   const [autoRefreshing, setAutoRefreshing] = useState(false);
+  const [regeneratingScene, setRegeneratingScene] = useState(false);
   const trackedJobId = job?.id;
   const trackedJobProvider = job?.provider;
   const trackedJobStatus = job?.status;
@@ -109,7 +117,9 @@ function VideoDetalhe() {
     if (!script) return;
     const storageKey = reelCaptionStorageKey(job?.id ?? id);
     const savedCaption = window.localStorage.getItem(storageKey);
-    setInstagramCaption(savedCaption || buildReelCaption(script));
+    setInstagramCaption(
+      ensureMedicalProfessionalIdentification(savedCaption || buildReelCaption(script), 2200),
+    );
   }, [id, job?.id, script]);
 
   useEffect(() => {
@@ -236,7 +246,7 @@ function VideoDetalhe() {
   }
 
   function updateInstagramCaption(value: string) {
-    const next = value.slice(0, 2200);
+    const next = ensureMedicalProfessionalIdentification(value, 2200);
     setInstagramCaption(next);
     window.localStorage.setItem(reelCaptionStorageKey(job?.id ?? id), next);
   }
@@ -244,12 +254,31 @@ function VideoDetalhe() {
   async function copyInstagramCaption() {
     if (!instagramCaption.trim()) return;
     try {
-      await navigator.clipboard.writeText(instagramCaption);
+      await navigator.clipboard.writeText(
+        ensureMedicalProfessionalIdentification(instagramCaption, 2200),
+      );
       setCaptionCopied(true);
       toast.success("Legenda copiada. Pronta para colar no Reel.");
       window.setTimeout(() => setCaptionCopied(false), 1800);
     } catch {
       toast.error("Não foi possível copiar a legenda.");
+    }
+  }
+
+  async function regenerateOnlyThisScene() {
+    if (!job?.isScene || job.isPodcastScene) return;
+    setRegeneratingScene(true);
+    try {
+      const replacement = await regenerateSceneVideo(job.id);
+      addVideoJob(replacement);
+      toast.success("Nova versão desta tomada foi enviada. As outras cenas serão mantidas.");
+      navigate({ to: "/producao/$id", params: { id: replacement.id } });
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Não foi possível regenerar esta tomada.",
+      );
+    } finally {
+      setRegeneratingScene(false);
     }
   }
 
@@ -311,6 +340,30 @@ function VideoDetalhe() {
               {autoRefreshing ? "Acompanhando..." : "Atualizar status"}
             </Button>
           </WithTooltip>
+          {job.isScene && !job.isPodcastScene ? (
+            <ConfirmAction
+              title="Regenerar somente esta tomada?"
+              description="O HeyGen receberá apenas esta cena, com o mesmo look, voz, texto e corte seco. As outras tomadas do lote serão preservadas."
+              confirmLabel="Regenerar tomada"
+              onConfirm={regenerateOnlyThisScene}
+              trigger={
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={
+                    regeneratingScene || job.status === "fila" || job.status === "processando"
+                  }
+                >
+                  {regeneratingScene ? (
+                    <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCcw className="mr-1 h-4 w-4" />
+                  )}
+                  Regenerar esta tomada
+                </Button>
+              }
+            />
+          ) : null}
           {script ? (
             <Button size="sm" variant="secondary" asChild>
               <Link to="/roteiros/$id" params={{ id: script.id }}>
@@ -335,7 +388,7 @@ function VideoDetalhe() {
                   sourceName: script?.titulo ?? `Video ${job.id}`,
                 }}
               >
-                <Layers3 className="mr-1 h-4 w-4" /> Editar localmente
+                <Layers3 className="mr-1 h-4 w-4" /> Abrir no editor
               </Link>
             </Button>
           ) : null}
@@ -430,7 +483,10 @@ function VideoDetalhe() {
                       const publication = await publishVideoToInstagram({
                         videoJobId: job.id,
                         mediaType: instagramFormat,
-                        caption: instagramFormat === "REELS" ? instagramCaption : "",
+                        caption:
+                          instagramFormat === "REELS"
+                            ? ensureMedicalProfessionalIdentification(instagramCaption, 2200)
+                            : "",
                         shareToFeed,
                       });
                       toast.success(
@@ -519,7 +575,7 @@ function VideoDetalhe() {
                         formato: script.formatoSugerido,
                       });
                       addCalendarPost(post);
-                      toast.success("Publicacao agendada e salva no Sheets.");
+                      toast.success("Publicação agendada e salva no banco de dados.");
                       setOpen(false);
                       navigate({ to: "/calendario" });
                     } catch (err) {
@@ -568,7 +624,34 @@ function VideoDetalhe() {
                   value={job.isComposed ? "Vídeo final composto" : "Video disponivel"}
                 />
               ) : null}
+              {job.regeneratedFromJobId ? (
+                <Info label="Regeneração" value={`Tomada ${job.regenerationCount || 1}`} />
+              ) : null}
             </div>
+            {job.exportPath ? (
+              <div
+                className="mt-3 rounded-lg border border-status-success/25 bg-status-success/5 p-3"
+                aria-live="polite"
+              >
+                <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                  <FolderOpen className="h-4 w-4 text-status-success" aria-hidden="true" />
+                  Arquivos organizados · versão {job.exportVersion ?? "1.1"}
+                </div>
+                <code className="mt-1.5 block break-all text-[11px] leading-4 text-muted-foreground">
+                  {job.exportPath}
+                </code>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                  A pasta reúne o vídeo final, tomadas, legendas, roteiro e metadados disponíveis.
+                </p>
+              </div>
+            ) : job.exportWarning ? (
+              <p
+                className="mt-3 rounded-lg border border-status-warning/25 bg-status-warning/5 p-3 text-xs text-muted-foreground"
+                role="status"
+              >
+                {job.exportWarning}
+              </p>
+            ) : null}
             {job.videoUrl ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button size="sm" variant="secondary" asChild>
@@ -1027,7 +1110,7 @@ function buildReelCaption(script: Script): string {
   addUnique(script.dorConflito);
   addUnique(script.explicacaoSimples);
   addUnique(script.virada);
-  addUnique(script.cta);
+  addUnique(safeEditorialCta(script.cta, ""));
 
   const familyHashtags: Record<Script["categoria"], string[]> = {
     medicamento: ["#Saude", "#Obesidade", "#GLP1", "#ConteudoMedico"],
@@ -1036,9 +1119,5 @@ function buildReelCaption(script: Script): string {
     obesidade: ["#Obesidade", "#Emagrecimento", "#Saude", "#ConteudoMedico"],
     educativo: ["#Saude", "#BemEstar", "#Informacao", "#ConteudoMedico"],
   };
-  const disclaimer = "Conteúdo educativo. Não substitui avaliação médica individual.";
-  const caption = [...sections, disclaimer, familyHashtags[script.categoria].join(" ")].join(
-    "\n\n",
-  );
-  return caption.slice(0, 2200);
+  return formatPublicationCaption(sections.join("\n\n"), familyHashtags[script.categoria], 2200);
 }

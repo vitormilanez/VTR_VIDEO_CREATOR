@@ -20,6 +20,7 @@ data/heygen_avatar_cache.json
 data/operations.db
 data/operations.db-shm
 data/operations.db-wal
+.local-postgres/
 data/cut_uploads/
 data/cuts/
 data/local_video_kit_uploads/
@@ -41,9 +42,13 @@ tmp/
 
 # Exports gerados pelo botao "Salvar local" (regeneraveis)
 content/packs/
+content/biblioteca/
 
 # Biblioteca local de vídeos produzidos (arquivos finais e artefatos de renderização)
 content/videos/
 
 # Previews de avatar baixados automaticamente pelo catalogo HeyGen (cache local)
 data/pack_assets/avatars/
+
+# Miniaturas regeneraveis da trilha do Estudio de Pack
+data/pack_previews/

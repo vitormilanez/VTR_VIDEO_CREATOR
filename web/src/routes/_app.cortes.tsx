@@ -37,6 +37,7 @@ import {
   type CutProject,
   uploadCutVideo,
 } from "@/lib/api/local";
+import { formatPublicationCaption } from "@/lib/medical-identity";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -672,7 +673,9 @@ function ProjectResult({
                       size="sm"
                       variant="secondary"
                       onClick={() => {
-                        void navigator.clipboard.writeText(`${clip.caption}\n\n${clip.hashtags}`);
+                        void navigator.clipboard.writeText(
+                          formatPublicationCaption(clip.caption, clip.hashtags),
+                        );
                         toast.success("Legenda copiada.");
                       }}
                     >

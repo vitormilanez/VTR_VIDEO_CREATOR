@@ -859,8 +859,8 @@ function AvatarCreator({ onCreated }: { onCreated: (job: AvatarJob) => void }) {
             <div>
               <h3 className="text-sm font-semibold">Privacidade</h3>
               <p className="mt-1 text-xs leading-4 text-muted-foreground">
-                Fotos, vídeo e áudio não vão para o Sheets. O backend os envia diretamente para a
-                criação e salva somente os identificadores e o status.
+                Fotos, vídeo e áudio não ficam no banco relacional. O backend os envia diretamente
+                para a criação e salva somente os identificadores e o status.
               </p>
             </div>
           </div>

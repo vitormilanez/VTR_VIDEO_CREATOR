@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusChips } from "@/components/status-chips";
 import { WeeklyArchiveSwitch } from "@/components/weekly-archive-switch";
 import { ConfirmAction } from "@/components/confirm-action";
+import { CreateScriptFromDraftDialog } from "@/components/create-script-from-draft-dialog";
 import { deleteScript } from "@/lib/api/local";
 import { familiaLabel, scriptStatusLabel } from "@/lib/status";
 import { useStore } from "@/lib/store";
@@ -126,7 +127,7 @@ export function RoteirosPage() {
   }
 
   return (
-    <AppShell title="Roteiros">
+    <AppShell title="Roteiros" actions={<CreateScriptFromDraftDialog />}>
       <WeeklyArchiveSwitch
         className="mb-3"
         value={weeklyView}
@@ -294,7 +295,7 @@ export function RoteirosPage() {
                                 ? hasVideo
                                   ? "Existe um vídeo ou uma prévia vinculada. O roteiro será preservado para manter o histórico da produção."
                                   : "Existe um item do Calendário vinculado. Remova ou altere o agendamento antes de excluir o roteiro."
-                                : `“${s.titulo}” será removido do Google Sheets junto com Scene Plan, slides e Pack locais. Esta ação não pode ser desfeita pelo app.`
+                                : `“${s.titulo}” será removido do banco de dados junto com Scene Plan, slides e Pack locais. Esta ação não pode ser desfeita pelo app.`
                             }
                             confirmLabel="Excluir roteiro"
                             confirmDisabled={deletionProtected || deletingScriptId === s.id}

@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="stylesheet" href="_ds/modernist-3856a42a-a32d-4d22-a8e9-524bda172b99/styles.css">
+<script src="_ds/modernist-3856a42a-a32d-4d22-a8e9-524bda172b99/_ds_bundle.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: var(--color-bg); }
+  a { color: var(--color-accent-700); text-decoration: none; border-bottom: 2px solid var(--color-accent); }
+  a:hover { color: var(--color-accent); }
+  @keyframes insRise { from { opacity: 0; transform: translateY(28px); } to { opacity: 1; transform: none; } }
+  @keyframes insWipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+  @keyframes insLine { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes insPop { from { opacity: 0; transform: translateY(14px) scale(.96); } to { opacity: 1; transform: none; } }
+</style>
+</helmet>
+
+<div style="font-family: 'Archivo', sans-serif; color: var(--color-text); background: var(--color-bg); padding: 56px 64px 96px; display: flex; flex-direction: column; gap: 40px;">
+
+  <div style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="font-size: 13px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--color-accent-700);">Inserts para vídeo vertical · 1080 × 1920 · fundo vazado</div>
+    <h1 style="margin: 0; font-size: 54px; font-weight: 800; letter-spacing: -.03em; line-height: 1.02; max-width: 20ch;">Amycretin — oito modelos de sobreposição</h1>
+    <p style="margin: 0; max-width: 78ch; font-size: 17px; line-height: 1.5; color: var(--color-neutral-700); text-wrap: pretty;">Cada modelo ocupa apenas a sua faixa da tela: o eixo central e o rosto do apresentador permanecem livres. O canvas é transparente — o xadrez abaixo é só prova de alpha. Paleta, tipografia e réguas seguem o sistema Modernist (tinta sobre marfim, vermelho como único acento).</p>
+    <div style="display: flex; gap: 12px; flex-wrap: wrap; padding-top: 8px;">
+      <button class="btn btn-secondary" onClick="{{ cycleBg }}">{{ bgLabel }}</button>
+      <button class="btn btn-secondary" onClick="{{ toggleSafe }}">{{ safeLabel }}</button>
+      <button class="btn btn-secondary" onClick="{{ toggleSide }}">{{ sideLabel }}</button>
+      <button class="btn btn-primary" onClick="{{ replay }}">Reproduzir animações</button>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 18px;">
+    <div style="font-size: 13px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;">Linha do tempo sugerida · narração de ~70 s</div>
+    <div style="position: relative; height: 76px; border: 2px solid var(--color-text); background: var(--color-neutral-100);">
+      <div style="position: absolute; left: 9%; width: 14%; top: 0; bottom: 0; background: var(--color-text); color: var(--color-neutral-100); padding: 10px 12px; font-size: 12px; font-weight: 700; letter-spacing: .08em;">01 · 0:06–0:16</div>
+      <div style="position: absolute; left: 26%; width: 20%; top: 0; bottom: 0; background: var(--color-text); color: var(--color-neutral-100); padding: 10px 12px; font-size: 12px; font-weight: 700; letter-spacing: .08em;">03 · 0:18–0:32</div>
+      <div style="position: absolute; left: 54%; width: 14%; top: 0; bottom: 0; background: var(--color-accent); color: #fff; padding: 10px 12px; font-size: 12px; font-weight: 700; letter-spacing: .08em;">02 · 0:38–0:48</div>
+      <div style="position: absolute; left: 80%; width: 17%; top: 0; bottom: 0; background: var(--color-text); color: var(--color-neutral-100); padding: 10px 12px; font-size: 12px; font-weight: 700; letter-spacing: .08em;">04 · 0:56–1:08</div>
+    </div>
+    <div style="display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; letter-spacing: .1em; color: var(--color-neutral-700);">
+      <span>0:00</span><span>0:20</span><span>0:40</span><span>1:00</span><span>1:10</span>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; line-height: 1.4; color: var(--color-neutral-800); border-top: 2px solid var(--color-divider); padding-top: 14px;">
+      <span><b>05</b> comparativo · 0:20 (alterna com o 03)</span>
+      <span><b>06</b> glossário · 0:14 e 0:24, 4 s cada</span>
+      <span><b>07</b> selo de fonte · 0:00–1:10, permanente</span>
+      <span><b>08</b> fecho · 1:02–1:10</span>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <!-- ============ 01 JORNAL EDITORIAL LATERAL ============ -->
+  <div style="display: grid; grid-template-columns: 300px 1fr; gap: 56px; align-items: start;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div style="width: 281px; height: 499px; border: 2px solid var(--color-text); overflow: hidden; background: {{ stageBg }};">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; inset: 90px; border: 2px dashed var(--color-accent); pointer-events: none;"></div>
+          </sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; inset: 0; display: flex; align-items: flex-end; padding: 90px; justify-content: {{ t1Justify }};">
+              <div style="width: 580px; background: var(--color-bg); border: 2px solid var(--color-text); padding: 36px 36px 30px; display: flex; flex-direction: column; gap: 20px; animation: insRise .6s cubic-bezier(.2,.7,.2,1) both; box-shadow: var(--shadow-md);">
+                <div style="display: flex; justify-content: space-between; align-items: baseline; font-size: 24px; font-weight: 700; letter-spacing: .22em; text-transform: uppercase;">
+                  <span>Boletim clínico</span><span style="color: var(--color-accent);">N.º 04</span>
+                </div>
+                <div style="height: 4px; background: var(--color-text);"></div>
+                <div style="font-size: 24px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--color-accent-700);">Farmacologia</div>
+                <div style="font-size: 62px; font-weight: 800; line-height: 1.02; letter-spacing: -.03em;">Uma molécula, dois receptores</div>
+                <div style="font-size: 32px; line-height: 1.32; color: var(--color-neutral-800);">A Amycretin foi desenvolvida para agir no GLP-1 e na amilina ao mesmo tempo — dois sinais de saciedade em um só tratamento.</div>
+                <div style="height: 2px; background: var(--color-divider);"></div>
+                <div style="font-size: 24px; letter-spacing: .04em; color: var(--color-neutral-700);">Ensaios clínicos iniciais · 2025 · em desenvolvimento</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--color-neutral-700);">Prévia 26% · {{ sideShort }}</div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 22px; padding-top: 4px;">
+      <div style="display: flex; align-items: baseline; gap: 16px;">
+        <span style="font-size: 40px; font-weight: 800; color: var(--color-accent);">01</span>
+        <h2 style="margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em;">Recorte Editorial Lateral</h2>
+      </div>
+      <p style="margin: 0; font-size: 17px; line-height: 1.55; max-width: 70ch; color: var(--color-neutral-800); text-wrap: pretty;">Emula um recorte de jornal contemporâneo. Entra quando a narração apresenta a molécula: dá autoridade e contexto sem transformar a tela em bloco de texto.</p>
+      <div style="display: grid; grid-template-columns: 150px 1fr; gap: 0 24px; font-size: 15px; line-height: 1.5; border-top: 2px solid var(--color-divider);">
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Posição</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Terço inferior lateral, x = 90 px, base a 90 px. Largura 580 px — 54% da tela, deixando o eixo central livre. Variação espelhada à direita pelo botão acima.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Tipografia</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Archivo 800 62 px (manchete) · 700 24 px caixa alta com <i>tracking</i> .22em (masthead e seção) · 400 32 px (subtítulo) · 24 px (crédito).</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Paleta</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider); display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <span style="width: 22px; height: 22px; background: var(--color-bg); border: 2px solid var(--color-text);"></span><span>#F3F2F2 papel</span>
+          <span style="width: 22px; height: 22px; background: var(--color-text);"></span><span>#201E1D tinta</span>
+          <span style="width: 22px; height: 22px; background: var(--color-accent);"></span><span>#EC3013 acento</span>
+        </div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Campos</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">masthead · edição · seção · manchete · subtítulo · crédito/data</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Animação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Entrada de 0,6 s: sobe 28 px com <i>fade</i>, curva (.2,.7,.2,1). Saída: mesmo movimento invertido em 0,35 s.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Exportação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">PNG 1080×1920 com alpha (estático) ou MOV ProRes 4444 / WebM VP9 alpha (animado). Nunca renderize com o fundo do canvas.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <!-- ============ 02 KINETIC TEXT ============ -->
+  <div style="display: grid; grid-template-columns: 300px 1fr; gap: 56px; align-items: start;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div style="width: 281px; height: 499px; border: 2px solid var(--color-text); overflow: hidden; background: {{ stageBg }};">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; inset: 90px; border: 2px dashed var(--color-accent); pointer-events: none;"></div>
+          </sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; right: 90px; bottom: 230px; display: flex; flex-direction: column; align-items: flex-start; gap: 18px;">
+              <div style="background: var(--color-accent); color: #fff; padding: 12px 20px; font-size: 26px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; animation: insPop .4s ease-out both;">Dado clínico</div>
+              <div style="background: var(--color-bg); padding: 8px 22px 14px; animation: insWipe .55s cubic-bezier(.2,.7,.2,1) .12s both;">
+                <div style="font-size: 230px; font-weight: 800; letter-spacing: -.05em; line-height: .9;">24,3%</div>
+              </div>
+              <div style="height: 10px; width: 100%; background: var(--color-accent); transform-origin: left; animation: insLine .5s cubic-bezier(.2,.7,.2,1) .34s both;"></div>
+              <div style="background: var(--color-bg); padding: 14px 22px; max-width: 820px; animation: insRise .5s ease-out .46s both;">
+                <div style="font-size: 42px; font-weight: 600; line-height: 1.24;">de redução de peso em 36 semanas — formulação injetável</div>
+              </div>
+              <div style="background: var(--color-bg); padding: 10px 22px; animation: insRise .5s ease-out .58s both;">
+                <div style="font-size: 26px; letter-spacing: .06em; color: var(--color-neutral-700);">Pesquisa clínica inicial · grupo específico do estudo</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--color-neutral-700);">Prévia 26% · terço inferior</div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 22px; padding-top: 4px;">
+      <div style="display: flex; align-items: baseline; gap: 16px;">
+        <span style="font-size: 40px; font-weight: 800; color: var(--color-accent);">02</span>
+        <h2 style="margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em;">Kinetic Text</h2>
+      </div>
+      <p style="margin: 0; font-size: 17px; line-height: 1.55; max-width: 70ch; color: var(--color-neutral-800); text-wrap: pretty;">O número é o protagonista. Cada camada entra em cascata acompanhando a fala — etiqueta, número, régua vermelha, apoio. Blocos de papel hugam o texto, então o vídeo continua aparecendo em volta.</p>
+      <div style="display: grid; grid-template-columns: 150px 1fr; gap: 0 24px; font-size: 15px; line-height: 1.5; border-top: 2px solid var(--color-divider);">
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Posição</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Terço inferior, base a 230 px (acima de legendas automáticas). Largura útil 900 px, tudo alinhado à esquerda.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Tipografia</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Archivo 800 230 px (número, <i>tracking</i> −.05em) · 600 42 px (apoio) · 700 26 px caixa alta (etiqueta).</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Campos</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">etiqueta · número · frase de apoio · fonte. Troque para <b>13%</b> / “em 12 semanas — versão oral” e o mesmo insert serve o outro dado.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Animação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Cascata: etiqueta 0 s (pop) → número 0,12 s (wipe da esquerda) → régua 0,34 s (scaleX) → apoio 0,46 s → fonte 0,58 s. Opcional: contagem 0 → 24,3 em 0,8 s.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Exportação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">MOV ProRes 4444 com alpha, 10 s, 30/60 fps. Renderize só a camada do insert.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <!-- ============ 03 CINCO LINHAS ============ -->
+  <div style="display: grid; grid-template-columns: 300px 1fr; gap: 56px; align-items: start;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div style="width: 281px; height: 499px; border: 2px solid var(--color-text); overflow: hidden; background: {{ stageBg }};">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; inset: 90px; border: 2px dashed var(--color-accent); pointer-events: none;"></div>
+          </sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; right: 90px; top: 420px; width: 680px; display: flex; flex-direction: column; gap: 16px;">
+              <div style="display: flex; align-items: stretch; animation: insRise .45s ease-out 0s both;">
+                <div style="width: 84px; background: var(--color-accent); color: #fff; font-size: 34px; font-weight: 800; display: flex; align-items: center; justify-content: center;">01</div>
+                <div style="flex: 1; background: var(--color-bg); border: 2px solid var(--color-text); border-left: 0; padding: 20px 24px; font-size: 34px; font-weight: 600; line-height: 1.2;">GLP-1 — sinal de saciedade</div>
+              </div>
+              <div style="display: flex; align-items: stretch; animation: insRise .45s ease-out .1s both;">
+                <div style="width: 84px; background: var(--color-accent); color: #fff; font-size: 34px; font-weight: 800; display: flex; align-items: center; justify-content: center;">02</div>
+                <div style="flex: 1; background: var(--color-bg); border: 2px solid var(--color-text); border-left: 0; padding: 20px 24px; font-size: 34px; font-weight: 600; line-height: 1.2;">Amilina — controle da fome</div>
+              </div>
+              <div style="display: flex; align-items: stretch; animation: insRise .45s ease-out .2s both;">
+                <div style="width: 84px; background: var(--color-accent); color: #fff; font-size: 34px; font-weight: 800; display: flex; align-items: center; justify-content: center;">03</div>
+                <div style="flex: 1; background: var(--color-bg); border: 2px solid var(--color-text); border-left: 0; padding: 20px 24px; font-size: 34px; font-weight: 600; line-height: 1.2;">Esvaziamento gástrico mais lento</div>
+              </div>
+              <div style="display: flex; align-items: stretch; animation: insRise .45s ease-out .3s both;">
+                <div style="width: 84px; background: var(--color-accent); color: #fff; font-size: 34px; font-weight: 800; display: flex; align-items: center; justify-content: center;">04</div>
+                <div style="flex: 1; background: var(--color-bg); border: 2px solid var(--color-text); border-left: 0; padding: 20px 24px; font-size: 34px; font-weight: 600; line-height: 1.2;">Oral: ~13% em 12 semanas</div>
+              </div>
+              <div style="display: flex; align-items: stretch; animation: insRise .45s ease-out .4s both;">
+                <div style="width: 84px; background: var(--color-accent); color: #fff; font-size: 34px; font-weight: 800; display: flex; align-items: center; justify-content: center;">05</div>
+                <div style="flex: 1; background: var(--color-bg); border: 2px solid var(--color-text); border-left: 0; padding: 20px 24px; font-size: 34px; font-weight: 600; line-height: 1.2;">Injetável: 24,3% em 36 semanas</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--color-neutral-700);">Prévia 26% · coluna direita</div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 22px; padding-top: 4px;">
+      <div style="display: flex; align-items: baseline; gap: 16px;">
+        <span style="font-size: 40px; font-weight: 800; color: var(--color-accent);">03</span>
+        <h2 style="margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em;">Cinco Linhas Verticais</h2>
+      </div>
+      <p style="margin: 0; font-size: 17px; line-height: 1.55; max-width: 70ch; color: var(--color-neutral-800); text-wrap: pretty;">Cinco cartelas empilhadas, cada uma com numeral em bloco vermelho e uma linha curta. Só as cartelas existem no PNG — os intervalos de 16 px são vazados, então o vídeo respira entre elas.</p>
+      <div style="display: grid; grid-template-columns: 150px 1fr; gap: 0 24px; font-size: 15px; line-height: 1.5; border-top: 2px solid var(--color-divider);">
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Posição</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Coluna direita, x = 310–990 px, topo a 420 px. Deixa 310 px livres à esquerda para o apresentador. Espelhável para a esquerda.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Tipografia</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Archivo 800 34 px (numeral) · 600 34 px (linha), máx. 2 linhas por cartela.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Campos</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">5 × (numeral + texto). Serve para benefícios, etapas, sintomas ou comparações.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Animação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Escada de 0,1 s entre linhas, cada uma subindo 28 px com <i>fade</i> em 0,45 s. Ao final, o bloco vermelho da linha citada pode pulsar para 105%.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Exportação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">PNG com alpha (ou 5 PNGs separados, um por linha, para revelar no <i>timeline</i> do editor).</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <!-- ============ 04 SELO DE EVIDÊNCIA ============ -->
+  <div style="display: grid; grid-template-columns: 300px 1fr; gap: 56px; align-items: start;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div style="width: 281px; height: 499px; border: 2px solid var(--color-text); overflow: hidden; background: {{ stageBg }};">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; inset: 90px; border: 2px dashed var(--color-accent); pointer-events: none;"></div>
+          </sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; right: 90px; bottom: 170px; background: var(--color-bg); border: 2px solid var(--color-text); animation: insRise .55s cubic-bezier(.2,.7,.2,1) both;">
+              <div style="display: flex; align-items: center; justify-content: space-between; background: var(--color-text); color: var(--color-neutral-100); padding: 18px 26px; font-size: 26px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase;">
+                <span>Status regulatório</span><span style="color: var(--color-accent-300);">Amycretin</span>
+              </div>
+              <div style="padding: 30px 26px 34px; display: flex; flex-direction: column; gap: 24px;">
+                <div style="font-size: 54px; font-weight: 800; letter-spacing: -.02em; line-height: 1.05;">Em desenvolvimento clínico</div>
+                <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px;">
+                  <div style="background: var(--color-accent); color: #fff; padding: 14px 10px; font-size: 22px; font-weight: 700; letter-spacing: .06em; animation: insPop .35s ease-out .1s both;">PRÉ-CLÍN.</div>
+                  <div style="background: var(--color-accent); color: #fff; padding: 14px 10px; font-size: 22px; font-weight: 700; letter-spacing: .06em; animation: insPop .35s ease-out .2s both;">FASE 1</div>
+                  <div style="background: var(--color-accent); color: #fff; padding: 14px 10px; font-size: 22px; font-weight: 700; letter-spacing: .06em; animation: insPop .35s ease-out .3s both;">FASE 2</div>
+                  <div style="background: var(--color-neutral-200); color: var(--color-neutral-700); border: 2px solid var(--color-divider); padding: 12px 10px; font-size: 22px; font-weight: 700; letter-spacing: .06em;">FASE 3</div>
+                  <div style="background: var(--color-neutral-200); color: var(--color-neutral-700); border: 2px solid var(--color-divider); padding: 12px 10px; font-size: 22px; font-weight: 700; letter-spacing: .06em;">APROV.</div>
+                </div>
+                <div style="height: 2px; background: var(--color-divider);"></div>
+                <div style="font-size: 30px; line-height: 1.3; color: var(--color-neutral-800);">Ainda não está disponível comercialmente. Converse com seu médico antes de qualquer decisão de tratamento.</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--color-neutral-700);">Prévia 26% · rodapé</div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 22px; padding-top: 4px;">
+      <div style="display: flex; align-items: baseline; gap: 16px;">
+        <span style="font-size: 40px; font-weight: 800; color: var(--color-accent);">04</span>
+        <h2 style="margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em;">Selo de Evidência <span style="font-weight: 500; color: var(--color-neutral-700);">— o modelo proposto por mim</span></h2>
+      </div>
+      <p style="margin: 0; font-size: 17px; line-height: 1.55; max-width: 70ch; color: var(--color-neutral-800); text-wrap: pretty;">Os três primeiros afirmam; este qualifica. Uma trilha de fases mostra visualmente <i>onde</i> a evidência está e carrega o aviso obrigatório sem quebrar o ritmo — o insert que fecha qualquer vídeo de saúde, ciência ou notícia com responsabilidade editorial. É também o mais reaproveitável: troque a trilha por “consenso / em análise / contestado” e ele serve qualquer pauta científica.</p>
+      <div style="display: grid; grid-template-columns: 150px 1fr; gap: 0 24px; font-size: 15px; line-height: 1.5; border-top: 2px solid var(--color-divider);">
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Posição</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Rodapé, base a 170 px, largura total dentro da margem segura. Cobre só os 500 px inferiores.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Tipografia</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Archivo 800 54 px (status) · 700 26 px caixa alta (barra) · 700 22 px (fases) · 400 30 px (aviso).</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Campos</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">rótulo da barra · nome do composto · status · 5 etapas + etapa atual · aviso.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Animação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Card sobe em 0,55 s; as etapas concluídas preenchem em vermelho uma a uma (0,1 s de intervalo), como uma barra de progresso.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Exportação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">MOV ProRes 4444 alpha (com o preenchimento) ou PNG alpha para uso estático.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <!-- ============ 05 COMPARATIVO ============ -->
+  <div style="display: grid; grid-template-columns: 300px 1fr; gap: 56px; align-items: start;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div style="width: 281px; height: 499px; border: 2px solid var(--color-text); overflow: hidden; background: {{ stageBg }};">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; inset: 90px; border: 2px dashed var(--color-accent); pointer-events: none;"></div>
+          </sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; right: 90px; bottom: 260px; display: flex; flex-direction: column; gap: 26px;">
+              <div style="background: var(--color-text); color: var(--color-neutral-100); padding: 14px 22px; font-size: 26px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; align-self: flex-start; animation: insPop .4s ease-out both;">Um alvo vs. dois</div>
+              <div style="display: flex; flex-direction: column; gap: 12px; animation: insRise .5s ease-out .12s both;">
+                <div style="background: var(--color-bg); padding: 8px 18px; align-self: flex-start; font-size: 32px; font-weight: 600;">Terapias atuais · 1 receptor</div>
+                <div style="height: 74px; width: 46%; background: var(--color-neutral-800); transform-origin: left; animation: insLine .6s cubic-bezier(.2,.7,.2,1) .28s both;"></div>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 12px; animation: insRise .5s ease-out .38s both;">
+                <div style="background: var(--color-bg); padding: 8px 18px; align-self: flex-start; font-size: 32px; font-weight: 700;">Amycretin · GLP-1 + amilina</div>
+                <div style="height: 74px; width: 100%; background: var(--color-accent); transform-origin: left; animation: insLine .7s cubic-bezier(.2,.7,.2,1) .54s both;"></div>
+              </div>
+              <div style="background: var(--color-bg); padding: 10px 18px; align-self: flex-start; font-size: 26px; color: var(--color-neutral-700); animation: insRise .5s ease-out .8s both;">Representação esquemática de mecanismos, não de eficácia</div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--color-neutral-700);">Prévia 26% · entra 0:20</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 22px; padding-top: 4px;">
+      <div style="display: flex; align-items: baseline; gap: 16px;">
+        <span style="font-size: 40px; font-weight: 800; color: var(--color-accent);">05</span>
+        <h2 style="margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em;">Comparativo em Barras</h2>
+      </div>
+      <p style="margin: 0; font-size: 17px; line-height: 1.55; max-width: 70ch; color: var(--color-neutral-800); text-wrap: pretty;">Para o momento “enquanto os medicamentos atuais focam em um caminho só”. Duas barras que crescem da esquerda — o contraste é lido em meio segundo, sem número nenhum. A nota de rodapé evita que a barra seja lida como comparação de eficácia.</p>
+      <div style="display: grid; grid-template-columns: 150px 1fr; gap: 0 24px; font-size: 15px; line-height: 1.5; border-top: 2px solid var(--color-divider);">
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Posição</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Terço inferior, base a 260 px, largura total dentro da margem. As barras sangram até a margem de 90 px.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Campos</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">título · rótulo A + largura · rótulo B + largura · nota. Aceita uma terceira barra sem quebrar o layout.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Animação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Título (pop) → rótulo A → barra A cresce em 0,6 s → rótulo B → barra B em 0,7 s → nota. Total 1,3 s.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Exportação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">MOV ProRes 4444 alpha, 4 s.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <!-- ============ 06 GLOSSÁRIO ============ -->
+  <div style="display: grid; grid-template-columns: 300px 1fr; gap: 56px; align-items: start;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div style="width: 281px; height: 499px; border: 2px solid var(--color-text); overflow: hidden; background: {{ stageBg }};">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; inset: 90px; border: 2px dashed var(--color-accent); pointer-events: none;"></div>
+          </sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; top: 150px; width: 620px; background: var(--color-bg); border: 2px solid var(--color-text); border-top: 12px solid var(--color-accent); padding: 26px 28px 28px; display: flex; flex-direction: column; gap: 14px; animation: insWipe .5s cubic-bezier(.2,.7,.2,1) both; box-shadow: var(--shadow-md);">
+              <div style="font-size: 24px; font-weight: 700; letter-spacing: .22em; text-transform: uppercase; color: var(--color-accent-700);">O termo</div>
+              <div style="font-size: 68px; font-weight: 800; letter-spacing: -.03em; line-height: 1;">Amilina</div>
+              <div style="font-size: 30px; line-height: 1.32; color: var(--color-neutral-800);">Hormônio liberado junto com a insulina. Sinaliza saciedade ao cérebro e desacelera o esvaziamento do estômago.</div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--color-neutral-700);">Prévia 26% · entra 0:14</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 22px; padding-top: 4px;">
+      <div style="display: flex; align-items: baseline; gap: 16px;">
+        <span style="font-size: 40px; font-weight: 800; color: var(--color-accent);">06</span>
+        <h2 style="margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em;">Cartela de Glossário</h2>
+      </div>
+      <p style="margin: 0; font-size: 17px; line-height: 1.55; max-width: 70ch; color: var(--color-neutral-800); text-wrap: pretty;">Toda vez que a narração solta um jargão — amilina, GLP-1, esvaziamento gástrico — esta cartela aparece 4 s no alto e some. Fica <b>acima</b> do rosto, na faixa 150–500 px, então nunca disputa espaço com os inserts do rodapé: os dois podem coexistir na mesma cena.</p>
+      <div style="display: grid; grid-template-columns: 150px 1fr; gap: 0 24px; font-size: 15px; line-height: 1.5; border-top: 2px solid var(--color-divider);">
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Posição</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Alto à esquerda, y = 150 px, largura 620 px. Régua vermelha de 12 px no topo marca a cartela.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Campos</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">rótulo · termo · definição (máx. 3 linhas). Duplique para GLP-1 e para “esvaziamento gástrico”.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Animação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);"><i>Wipe</i> horizontal de 0,5 s na entrada; saída pelo mesmo lado em 0,3 s. Permanência de 4 s.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Exportação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">PNG alpha por termo, animado no editor com máscara de <i>wipe</i>.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <!-- ============ 07 SELO DE FONTE ============ -->
+  <div style="display: grid; grid-template-columns: 300px 1fr; gap: 56px; align-items: start;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div style="width: 281px; height: 499px; border: 2px solid var(--color-text); overflow: hidden; background: {{ stageBg }};">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; inset: 90px; border: 2px dashed var(--color-accent); pointer-events: none;"></div>
+          </sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; bottom: 90px; display: flex; align-items: stretch; animation: insWipe .45s cubic-bezier(.2,.7,.2,1) both;">
+              <div style="background: var(--color-accent); color: #fff; padding: 16px 18px; font-size: 24px; font-weight: 800; letter-spacing: .18em; display: flex; align-items: center;">FONTE</div>
+              <div style="background: var(--color-bg); border: 2px solid var(--color-text); border-left: 0; padding: 14px 22px; display: flex; flex-direction: column; gap: 4px;">
+                <div style="font-size: 26px; font-weight: 700; line-height: 1.15;">Ensaios clínicos iniciais · fase 1/2</div>
+                <div style="font-size: 22px; color: var(--color-neutral-700);">Resultados preliminares, grupos específicos</div>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--color-neutral-700);">Prévia 26% · permanente</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 22px; padding-top: 4px;">
+      <div style="display: flex; align-items: baseline; gap: 16px;">
+        <span style="font-size: 40px; font-weight: 800; color: var(--color-accent);">07</span>
+        <h2 style="margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em;">Selo de Fonte Persistente</h2>
+      </div>
+      <p style="margin: 0; font-size: 17px; line-height: 1.55; max-width: 70ch; color: var(--color-neutral-800); text-wrap: pretty;">O único insert que fica no ar o vídeo inteiro sempre que um número aparece. Baixo, discreto, canto inferior esquerdo — resolve a exigência de citar a origem do dado sem gastar um insert grande para isso, e sustenta a credibilidade quando o espectador entra pelo meio do vídeo.</p>
+      <div style="display: grid; grid-template-columns: 150px 1fr; gap: 0 24px; font-size: 15px; line-height: 1.5; border-top: 2px solid var(--color-divider);">
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Posição</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Canto inferior esquerdo, x/y = 90 px, altura ~96 px. Suba para 260 px se o app cobrir a base.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Campos</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">rótulo (FONTE / ESTUDO / DADO DE) · linha principal · ressalva.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Animação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);"><i>Wipe</i> da esquerda em 0,45 s. Sem loop e sem movimento durante a permanência.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Exportação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">PNG alpha único, esticado por toda a <i>timeline</i>.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <!-- ============ 08 FECHO ============ -->
+  <div style="display: grid; grid-template-columns: 300px 1fr; gap: 56px; align-items: start;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div style="width: 281px; height: 499px; border: 2px solid var(--color-text); overflow: hidden; background: {{ stageBg }};">
+        <div style="width: 1080px; height: 1920px; transform: scale(.26); transform-origin: top left; position: relative;">
+          <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; inset: 90px; border: 2px dashed var(--color-accent); pointer-events: none;"></div>
+          </sc-if>
+          <sc-if value="{{ live }}" hint-placeholder-val="{{ true }}">
+            <div style="position: absolute; left: 90px; right: 90px; bottom: 240px; display: flex; flex-direction: column; align-items: flex-start; gap: 0;">
+              <div style="height: 14px; width: 100%; background: var(--color-accent); transform-origin: left; animation: insLine .5s cubic-bezier(.2,.7,.2,1) both;"></div>
+              <div style="background: var(--color-bg); padding: 28px 26px 30px; width: 100%; display: flex; flex-direction: column; gap: 18px; animation: insRise .55s cubic-bezier(.2,.7,.2,1) .16s both;">
+                <div style="font-size: 88px; font-weight: 800; letter-spacing: -.04em; line-height: .98;">Converse com o seu médico</div>
+                <div style="font-size: 34px; line-height: 1.3; color: var(--color-neutral-800);">Terapias combinadas são a tendência do campo — o acompanhamento continua sendo individual.</div>
+              </div>
+              <div style="background: var(--color-text); color: var(--color-neutral-100); padding: 16px 26px; font-size: 28px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; animation: insPop .4s ease-out .42s both;">Siga para mais ciência</div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--color-neutral-700);">Prévia 26% · entra 1:02</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 22px; padding-top: 4px;">
+      <div style="display: flex; align-items: baseline; gap: 16px;">
+        <span style="font-size: 40px; font-weight: 800; color: var(--color-accent);">08</span>
+        <h2 style="margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em;">Fecho Editorial</h2>
+      </div>
+      <p style="margin: 0; font-size: 17px; line-height: 1.55; max-width: 70ch; color: var(--color-neutral-800); text-wrap: pretty;">O cartaz final: uma frase em tamanho de manchete, a régua vermelha por cima e a chamada de canal por baixo. Entra nos últimos 8 s, quando o apresentador já está estático — é o único insert que pode ocupar quase metade da altura.</p>
+      <div style="display: grid; grid-template-columns: 150px 1fr; gap: 0 24px; font-size: 15px; line-height: 1.5; border-top: 2px solid var(--color-divider);">
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Posição</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Metade inferior, base a 240 px, largura total dentro da margem.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Tipografia</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Archivo 800 88 px (frase) · 400 34 px (apoio) · 700 28 px caixa alta (chamada).</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Campos</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">frase · apoio · chamada/@ do canal.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Animação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">Régua cresce da esquerda → bloco sobe → chamada aparece em 0,42 s. Sem saída: segura até o corte.</div>
+        <div style="padding: 12px 0; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: 12px; border-bottom: 2px solid var(--color-divider);">Exportação</div>
+        <div style="padding: 12px 0; border-bottom: 2px solid var(--color-divider);">MOV ProRes 4444 alpha, 8 s.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hr"></div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px;">
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--color-accent-700);">Áreas seguras</div>
+      <div style="font-size: 15px; line-height: 1.55; color: var(--color-neutral-800);">Margem de 90 px em todos os lados; nada entre y = 300 e y = 1000 px (rosto); base livre a partir de y = 1780 px (interface do app).</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--color-accent-700);">Transparência</div>
+      <div style="font-size: 15px; line-height: 1.55; color: var(--color-neutral-800);">Nenhum modelo usa fundo de tela cheia — só cartelas e faixas próprias. Verifique o alpha com o xadrez antes de exportar.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--color-accent-700);">Nota de paleta</div>
+      <div style="font-size: 15px; line-height: 1.55; color: var(--color-neutral-800);">Em vez do azul-petróleo sugerido, os inserts seguem o sistema Modernist da marca: tinta sobre marfim com vermelho como único acento. Posso refazer em azul se preferir.</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;bgMode&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;xadrez&quot;,&quot;vídeo&quot;,&quot;vazado&quot;],&quot;default&quot;:&quot;xadrez&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Prévia&quot;},&quot;showSafeArea&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Prévia&quot;},&quot;t1Side&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;esquerda&quot;,&quot;direita&quot;],&quot;default&quot;:&quot;esquerda&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Modelo 01&quot;}}">
+class Component extends DCLogic {
+  state = { live: true, bg: null, safe: null, side: null };
+
+  replay = () => {
+    this.setState({ live: false });
+    setTimeout(() => this.setState({ live: true }), 80);
+  };
+
+  renderVals() {
+    const bg = this.state.bg ?? this.props.bgMode ?? 'xadrez';
+    const safe = this.state.safe ?? this.props.showSafeArea ?? false;
+    const side = this.state.side ?? this.props.t1Side ?? 'esquerda';
+    const order = ['xadrez', 'vídeo', 'vazado'];
+    const stageBg = bg === 'xadrez'
+      ? 'repeating-conic-gradient(#ffffff 0% 25%, #dbd8d5 0% 50%) 0 0/56px 56px'
+      : bg === 'vídeo' ? 'linear-gradient(180deg, #4a4744, #6d6a66 55%, #3a3835)' : 'transparent';
+    return {
+      live: this.state.live,
+      safe,
+      stageBg,
+      replay: this.replay,
+      bgLabel: 'Fundo: ' + bg,
+      safeLabel: safe ? 'Margem segura: on' : 'Margem segura: off',
+      sideLabel: 'Recorte 01: ' + side,
+      sideShort: side === 'esquerda' ? 'lateral esquerda' : 'lateral direita',
+      t1Justify: side === 'esquerda' ? 'flex-start' : 'flex-end',
+      cycleBg: () => this.setState({ bg: order[(order.indexOf(bg) + 1) % order.length] }),
+      toggleSafe: () => this.setState({ safe: !safe }),
+      toggleSide: () => this.setState({ side: side === 'esquerda' ? 'direita' : 'esquerda' })
+    };
+  }
+}
+</script>
+</body>
+</html>

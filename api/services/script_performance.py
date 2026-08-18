@@ -4,6 +4,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from api.services.medical_identity import (
+    MEDICAL_DEFAULT_SAFE_CTA,
+    MEDICAL_EDITORIAL_PROMPT,
+    safe_editorial_cta,
+)
 from api.services.script_editor import duration_limits
 from integrations.portuguese_br import prepare_script_for_heygen_voice
 
@@ -13,14 +18,20 @@ VoiceMood = Literal["confident", "upbeat", "warm", "serious", "neutral"]
 CtaMode = Literal["auto", "manual", "none", "visual"]
 
 VARIABLE_CTAS = [
-    "Me siga para acompanhar mais conteúdos como este.",
-    "Quer entender melhor seu corpo? Me acompanhe por aqui.",
-    "Salva este vídeo porque você vai precisar lembrar disso.",
-    "Antes de começar qualquer tratamento, converse com seu médico.",
-    "Se esse conteúdo fez sentido, me acompanha para ver os próximos.",
+    MEDICAL_DEFAULT_SAFE_CTA,
+    "Salve este conteúdo para rever com calma.",
+    "Use esta informação para preparar suas dúvidas para a consulta.",
+    "Antes de qualquer tratamento, converse com o médico responsável pelo seu cuidado.",
 ]
 
 LEGACY_OUTRO = "Me siga para mais dicas, e obrigado."
+LEGACY_CAPTURE_CTAS = (
+    "Me siga para acompanhar mais conteúdos como este.",
+    "Quer entender melhor seu corpo? Me acompanhe por aqui.",
+    "Salva este vídeo porque você vai precisar lembrar disso.",
+    "Se esse conteúdo fez sentido, me acompanha para ver os próximos.",
+    "Quer mais dicas? Siga e acompanhe.",
+)
 
 SPEECH_PRESETS: dict[str, dict[str, Any]] = {
     "natural": {"speed": 0.96, "pitch": 0, "volume": 1, "locale": "pt-BR"},
@@ -138,6 +149,7 @@ def strip_known_outros(text: str, selected_outro: str = "") -> str:
         selected_outro.strip(),
         LEGACY_OUTRO,
         "Veja o contexto no perfil.",
+        *LEGACY_CAPTURE_CTAS,
         *VARIABLE_CTAS,
     }:
         if candidate:
@@ -248,6 +260,8 @@ def normalize_performance_response(
         cta = ""
     elif not cta:
         cta = VARIABLE_CTAS[0]
+    if cta:
+        cta = safe_editorial_cta(cta)
 
     fitted_display = fit_text_to_duration(
         display,
@@ -297,9 +311,10 @@ def build_performance_prompt(
         if video_agent
         else duration_word_limits(duration_seconds)
     )
+    safe_manual_cta = safe_editorial_cta(manual_cta)
     cta_instruction = {
-        "auto": "Escolha um CTA natural e especifico para o conteudo, sem repetir historico.",
-        "manual": f'Use exatamente este CTA, se houver: "{manual_cta.strip()}".',
+        "auto": "Escolha somente um CTA educativo neutro, sem venda, captacao ou pedido para seguir.",
+        "manual": f'Use exatamente este CTA educativo, se houver: "{safe_manual_cta}".',
         "none": "Nao inclua CTA falado.",
         "visual": "Nao inclua CTA falado; considere que o CTA sera apenas visual.",
     }[cta_mode]
@@ -322,7 +337,9 @@ Regras:
 - Prefira "as chamadas canetas para emagrecimento" quando marca especifica nao for essencial.
 - Evite citar repetidamente Mounjaro, Ozempic ou Wegovy.
 - O displayText nunca deve conter grafia fonetica.
-- Retorne somente JSON no schema solicitado."""
+- Retorne somente JSON no schema solicitado.
+
+{MEDICAL_EDITORIAL_PROMPT}"""
     user = "\n".join(
         [
             f"DURACAO: {duration_seconds}s",

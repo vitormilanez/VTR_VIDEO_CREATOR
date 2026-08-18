@@ -84,6 +84,102 @@ class AvatarSetTests(unittest.TestCase):
             finally:
                 server.OPERATIONAL_DB = original_database
 
+    def test_two_camera_profile_removes_background_music(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original_database = server.OPERATIONAL_DB
+            server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+            try:
+                avatar_set = server._save_avatar_set(
+                    name="Dr. Teste — em pé e sentado",
+                    voice_id="voice-1",
+                    looks=[
+                        {"avatarId": "look-standing", "role": "standing", "label": "Em pé"},
+                        {"avatarId": "look-seated", "role": "seated", "label": "Sentado"},
+                    ],
+                )
+                profile = server._save_production_profile(
+                    {
+                        "scriptId": "script-two-camera",
+                        "avatarId": "look-standing",
+                        "primaryAvatarId": "look-standing",
+                        "avatarSetId": avatar_set["id"],
+                        "avatarMode": "set",
+                        "voiceId": "voice-1",
+                        "speechMode": "natural",
+                        "generationMode": "direct",
+                        "musicTrackId": "would-be-music",
+                    }
+                )
+            finally:
+                server.OPERATIONAL_DB = original_database
+
+        self.assertEqual(profile["positionCount"], 2)
+        self.assertIsNone(profile["musicTrackId"])
+
+    def test_two_camera_profile_rejects_a_voice_outside_the_avatar_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original_database = server.OPERATIONAL_DB
+            server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+            try:
+                avatar_set = server._save_avatar_set(
+                    name="Dr. Teste",
+                    voice_id="voice-fixed",
+                    looks=[
+                        {"avatarId": "look-standing", "role": "standing", "label": "Em pé"},
+                        {"avatarId": "look-seated", "role": "seated", "label": "Sentado"},
+                    ],
+                )
+                with self.assertRaises(server.HTTPException) as raised:
+                    server._save_production_profile(
+                        {
+                            "scriptId": "script-two-camera",
+                            "avatarId": "look-standing",
+                            "primaryAvatarId": "look-standing",
+                            "avatarSetId": avatar_set["id"],
+                            "avatarMode": "set",
+                            "voiceId": "other-voice",
+                            "speechMode": "natural",
+                            "generationMode": "direct",
+                        }
+                    )
+            finally:
+                server.OPERATIONAL_DB = original_database
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("voz fixa", str(raised.exception.detail))
+
+    def test_two_camera_profile_rejects_a_single_job_generation_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original_database = server.OPERATIONAL_DB
+            server.OPERATIONAL_DB = Path(temporary) / "operations.db"
+            try:
+                avatar_set = server._save_avatar_set(
+                    name="Dr. Teste",
+                    voice_id="voice-fixed",
+                    looks=[
+                        {"avatarId": "look-standing", "role": "standing", "label": "Em pé"},
+                        {"avatarId": "look-seated", "role": "seated", "label": "Sentado"},
+                    ],
+                )
+                with self.assertRaises(server.HTTPException) as raised:
+                    server._save_production_profile(
+                        {
+                            "scriptId": "script-two-camera",
+                            "avatarId": "look-standing",
+                            "primaryAvatarId": "look-standing",
+                            "avatarSetId": avatar_set["id"],
+                            "avatarMode": "set",
+                            "voiceId": "voice-fixed",
+                            "speechMode": "natural",
+                            "generationMode": "video_agent",
+                        }
+                    )
+            finally:
+                server.OPERATIONAL_DB = original_database
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("uma tomada Direct Avatar por cena", str(raised.exception.detail))
+
 
 if __name__ == "__main__":
     unittest.main()

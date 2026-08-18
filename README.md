@@ -39,6 +39,62 @@ cp .env.example .env
 
 Configure no `.env` as chaves necessarias para o fluxo que pretende usar. Para Google Sheets, veja `docs/setup-google-sheets-api.md`.
 
+## PostgreSQL multi-tenant
+
+O PostgreSQL é a fonte de verdade para radar, ideias, roteiros, calendário e
+performance quando `DATA_BACKEND=postgres`. A API usa repositórios SQLAlchemy
+filtrados por organização; a UI consome as rotas de domínio e os aliases
+`/api/sheets/*` permanecem apenas para compatibilidade temporária.
+
+Instale também as dependências da API:
+
+```bash
+.venv/bin/python -m pip install -r api/requirements.txt
+```
+
+Para desenvolvimento local, configure `.env.database`:
+
+```dotenv
+DATA_BACKEND=postgres
+DATABASE_URL=postgresql+psycopg://seu_usuario@127.0.0.1:55432/ai_video_creator
+```
+
+`./dev.sh` inicia a instância local, aplica as migrations e sobe API e frontend.
+Também é possível controlar apenas o banco:
+
+```bash
+tools/local_postgres.sh start
+tools/local_postgres.sh status
+tools/local_postgres.sh stop
+```
+
+Aplique e inspecione a versão do schema manualmente:
+
+```bash
+.venv/bin/alembic upgrade head
+.venv/bin/alembic current
+```
+
+Valide e importe o snapshot legado de forma idempotente:
+
+```bash
+.venv/bin/python -m tools.migrate_legacy_data --dry-run
+.venv/bin/python -m tools.migrate_legacy_data --apply
+```
+
+O estado da conexão e as contagens estão disponíveis em
+`GET /api/storage/health`.
+
+Para validar schema, upgrade/downgrade e isolamento entre dois clientes em um
+PostgreSQL local temporário:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_database_foundation.py
+```
+
+O desenho da migração, as fases de cutover e o modelo de domínio estão em
+`docs/plano-migracao-sheets-postgres-multitenant.md`.
+
 ## Comandos de operacao
 
 Buscar tendencias:
@@ -47,7 +103,8 @@ Buscar tendencias:
 .venv/bin/python trend_hunter/trend_hunter.py
 ```
 
-Enviar tendencias para a aba `Radar Tendencias`:
+Importar tendências diretamente pelo app é o fluxo recomendado. O comando
+abaixo permanece somente para manutenção da planilha histórica:
 
 ```bash
 .venv/bin/python sync_trends_to_sheets.py --limit 20
@@ -65,7 +122,7 @@ Gerar roteiros a partir das ideias:
 .venv/bin/python generate_scripts_from_ideas.py --limit 10
 ```
 
-Atualizar snapshot local do dashboard:
+Atualizar o snapshot histórico das Sheets:
 
 ```bash
 .venv/bin/python sync_sheets_snapshot.py
@@ -83,17 +140,18 @@ Abra:
 http://127.0.0.1:8501
 ```
 
-## Google Sheets
+## Google Sheets legado
 
-A planilha e a fonte operacional do projeto. As abas principais sao:
+A planilha está preservada como fonte histórica e opção temporária de rollback.
+As abas importadas para o PostgreSQL são:
 
 - `Radar Tendencias`: entrada de sinais, tendencias e dores do publico.
 - `Ideias`: hooks, angulos e CTAs gerados a partir do radar.
 - `Roteiros`: roteiro estruturado para validacao medica e posterior video.
-- `Calendario`: agendamento, reagendamento e publicacao persistidos na planilha.
+- `Calendario`: agendamento, reagendamento e publicação.
 - `Performance`: resultados manuais ou importados depois da publicacao.
 
-Conta dona da planilha: `vtrconsultingbr@gmail.com`.
+Com `DATA_BACKEND=sheets`, a API ainda aceita o fluxo antigo para contingência.
 
 Antes de criar qualquer job pago no HeyGen, o backend valida o texto falado final.
 Falas com doses, promessas proibidas ou instrucoes prescritivas sao bloqueadas,

@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from api.job_store import JobStore
+from api.services.local_video_kit import render_medical_end_card
+from api.services.medical_identity import MEDICAL_MINIMUM_END_CARD_SECONDS
 from api.services.post_production_overlays import render_overlay
 from api.services.transcript_service import (
     TRANSCRIPT_SCHEMA_VERSION,
@@ -21,11 +24,13 @@ from api.services.visual_planner import generated_asset_ref, plan_visuals
 from api.services.visual_timeline import materialize_timeline, preflight_timeline, timeline_is_stale
 
 
-DESIGN_VERSION = "post-production-design-v2"
-RENDER_CONFIG_VERSION = "vertical-1080x1920-v2"
+DESIGN_VERSION = "post-production-design-v3-medical-end-card"
+RENDER_CONFIG_VERSION = "vertical-1080x1920-v3-medical-end-card"
 MAX_CAPTION_WORDS = 10
 MAX_CAPTION_CHARS = 64
 MAX_CAPTION_MS = 2800
+MIN_MANUAL_VISUAL_MS = 1500
+MAX_MANUAL_VISUAL_MS = 5500
 _CAPTION_DANGLING_ENDS = {
     "a", "as", "com", "da", "de", "do", "e", "em", "não", "no", "o", "os",
     "para", "por", "que", "se", "sem", "seu", "sua", "todo", "toda", "um", "uma",
@@ -95,7 +100,13 @@ def analyze_post_production(
     transcript_path = directory / "transcript.json"
     timeline_path = directory / "timeline.json"
     try:
-        _update(store, job_id, status="transcribing", progresso=12, etapa="Transcrevendo vídeo")
+        _update(
+            store,
+            job_id,
+            status="transcribing",
+            progresso=12,
+            etapa="Transcrevendo áudio e sincronizando legendas",
+        )
         if transcript_path.is_file():
             transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
             if (
@@ -114,9 +125,22 @@ def analyze_post_production(
                 project_root=resolved_project_root,
             )
 
-        _update(store, job_id, status="planning", progresso=48, etapa="Planejando interações visuais")
+        captions_path = directory / "captions.srt"
+        caption_count = _write_captions(transcript, captions_path)
+        _update(
+            store,
+            job_id,
+            status="planning",
+            progresso=48,
+            etapa="Claude analisando a transcrição temporizada",
+            captionsStatus="ready",
+            captionsPath=str(captions_path),
+            captionCueCount=caption_count,
+            transcriptPath=str(transcript_path),
+        )
         plan, planner_mode = plan_visuals(
             transcript,
+            require_claude=bool((store.get("post_production", job_id) or {}).get("requireClaude")),
             cache_get=cache_get,
             cache_put=cache_put,
             record_usage=record_usage,
@@ -178,7 +202,28 @@ def save_event_updates(
     transcript, timeline = load_artifacts(output_root, job_id)
     by_id = {str(update.get("id")): update for update in updates}
     allowed_interactions = {
-        "none", "caption_emphasis", "kinetic_text", "progressive_list", "supporting_visual", "cta_card",
+        "none",
+        "caption_emphasis",
+        "kinetic_text",
+        "progressive_list",
+        "supporting_visual",
+        "cta_card",
+        "definition_card",
+        "number_card",
+        "comparison_card",
+        "quote_card",
+        "evidence_card",
+    }
+    allowed_positions = {
+        "top_left",
+        "top_center",
+        "top_right",
+        "center_left",
+        "center",
+        "center_right",
+        "bottom_left",
+        "bottom_center",
+        "bottom_right",
     }
     for event in timeline.get("events", []):
         update = by_id.get(str(event.get("id")))
@@ -197,6 +242,38 @@ def save_event_updates(
                 )
         if update.get("reviewStatus") in {"pending", "approved", "rejected"}:
             event["reviewStatus"] = update["reviewStatus"]
+        if update.get("screenPosition") in allowed_positions:
+            event["screenPosition"] = update["screenPosition"]
+        if "backgroundColor" in update:
+            color = str(update["backgroundColor"]).strip().lower()
+            if not re.fullmatch(r"#[0-9a-f]{6}", color):
+                raise RuntimeError("A cor do visual precisa usar o formato hexadecimal #RRGGBB.")
+            event["backgroundColor"] = color
+        if "backgroundOpacity" in update:
+            opacity = float(update["backgroundOpacity"])
+            if opacity < 0.15 or opacity > 1:
+                raise RuntimeError("A opacidade do visual precisa ficar entre 15% e 100%.")
+            event["backgroundOpacity"] = round(opacity, 2)
+        if update.get("timingSource") == "transcript":
+            words = transcript.get("words") or []
+            start_index = int(event.get("startWordIndex") or 0)
+            end_index = int(event.get("endWordIndex") or 0)
+            if start_index < 0 or end_index < start_index or end_index >= len(words):
+                raise RuntimeError("Não foi possível restaurar o tempo original deste visual.")
+            event["startMs"] = int(words[start_index].get("startMs") or 0)
+            event["endMs"] = int(words[end_index].get("endMs") or 0)
+            event["timingSource"] = "transcript"
+        elif "startMs" in update or "endMs" in update:
+            start_ms = int(update.get("startMs", event.get("startMs") or 0))
+            end_ms = int(update.get("endMs", event.get("endMs") or 0))
+            duration_ms = end_ms - start_ms
+            if duration_ms < MIN_MANUAL_VISUAL_MS or duration_ms > MAX_MANUAL_VISUAL_MS:
+                raise RuntimeError("O visual precisa durar entre 1,5 e 5,5 segundos.")
+            if start_ms < 0 or end_ms > int(transcript.get("durationMs") or 0) + 250:
+                raise RuntimeError("O tempo do visual precisa ficar dentro da duração do vídeo.")
+            event["startMs"] = start_ms
+            event["endMs"] = end_ms
+            event["timingSource"] = "manual"
     # Material source cannot be edited here; stale is recalculated on every save.
     timeline["stale"] = timeline_is_stale(timeline, transcript)
     version_payload = json.dumps(timeline["events"], ensure_ascii=False, sort_keys=True).encode()
@@ -285,11 +362,13 @@ def caption_cues(transcript: dict[str, Any]) -> list[tuple[int, int, str]]:
     return cues
 
 
-def _write_captions(transcript: dict[str, Any], destination: Path) -> None:
+def _write_captions(transcript: dict[str, Any], destination: Path) -> int:
+    cues = caption_cues(transcript)
     blocks = []
-    for index, (start, end, text) in enumerate(caption_cues(transcript), start=1):
+    for index, (start, end, text) in enumerate(cues, start=1):
         blocks.append(f"{index}\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n{text}")
     destination.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    return len(cues)
 
 
 def render_preview(*, store: JobStore, job_id: str, output_root: Path) -> dict[str, Any]:
@@ -316,6 +395,10 @@ def render_preview(*, store: JobStore, job_id: str, output_root: Path) -> dict[s
         manifest_events.append(event)
     captions = directory / "captions.srt"
     _write_captions(transcript, captions)
+    end_card = render_medical_end_card(
+        directory / "medical-end-card.png",
+        project_root=Path(__file__).resolve().parents[2],
+    )
     preview = directory / "preview.mp4"
     composition = compose_video(
         [
@@ -327,6 +410,8 @@ def render_preview(*, store: JobStore, job_id: str, output_root: Path) -> dict[s
             )
         ],
         preview,
+        end_card_path=end_card,
+        end_card_duration_seconds=MEDICAL_MINIMUM_END_CARD_SECONDS,
     )
     manifest = {
         "schemaVersion": "post-production-manifest-v1",
