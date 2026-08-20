@@ -37,9 +37,10 @@ const medicalPatterns: Array<{
 }> = [
   {
     id: "dose",
-    regex: /\b(\d+\s?(mg|mcg|ml|g))|\bdose\b|\bcomprimid|\bampola/i,
-    titulo: "Possivel mencao de dose ou formulacao",
-    detalhe: "Nao citar dose, mg ou formato de administracao. Reforcar avaliacao medica.",
+    regex: /\b\d+(?:[.,]\d+)?\s?(mg|mcg|ml|g)\b/i,
+    titulo: "Possivel mencao de dose especifica",
+    detalhe:
+      "Evitar orientacao de dose numerica individual. Nomes de medicamentos e apresentacoes podem ser explicados de forma educativa.",
     severidade: "alta",
   },
   {

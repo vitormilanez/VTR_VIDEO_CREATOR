@@ -212,6 +212,27 @@ class LocalVideoKitTests(unittest.TestCase):
         self.assertFalse(config["includeSection"])
         self.assertEqual(config["sectionTitle"], "")
 
+    def test_blank_identity_is_optional_and_disables_empty_pieces(self) -> None:
+        from api import server
+
+        payload = server.LocalVideoKitCreateIn(
+            uploadId="upload-123",
+            name="   ",
+            role="",
+            title="",
+            subtitle="   ",
+            includeOpening=True,
+            includeLowerThird=True,
+        )
+        config = server._local_video_kit_config(payload)
+
+        self.assertEqual(config["name"], "")
+        self.assertEqual(config["role"], "")
+        self.assertEqual(config["title"], "")
+        self.assertEqual(config["subtitle"], "")
+        self.assertFalse(config["includeOpening"])
+        self.assertFalse(config["includeLowerThird"])
+
     def test_music_library_exposes_preview_url(self) -> None:
         from api import server
 
@@ -287,6 +308,18 @@ class LocalVideoKitTests(unittest.TestCase):
         self.assertIn(MEDICAL_EDUCATIONAL_DISCLAIMER, documents["outro"][0])
         self.assertIn(MEDICAL_PROFESSIONAL_IDENTIFICATION, documents["outro"][0])
         self.assertNotIn("Quer mais dicas", documents["outro"][0])
+
+    def test_explicitly_blank_identity_does_not_restore_defaults(self) -> None:
+        documents = _kit_documents(
+            {"name": "", "role": "", "title": "", "subtitle": ""},
+            ROOT,
+        )
+
+        for key in ("opening", "lowerThird", "cover"):
+            document = documents[key][0]
+            self.assertNotIn("Dr. Guilherme Martins", document)
+            self.assertNotIn("Saúde e desempenho", document)
+            self.assertNotIn(">Médico<", document)
 
     def test_local_kit_keeps_the_identification_slide_enabled(self) -> None:
         from api import server

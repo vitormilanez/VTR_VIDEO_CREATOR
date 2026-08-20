@@ -448,7 +448,7 @@ def test_editing_still_blocks_a_positive_cure_claim(no_claude: None, stored_pack
     assert "Palavra ou promessa proibida: cura" in str(error.value.detail)
 
 
-def test_editing_can_reduce_a_legacy_compliance_issue_one_slide_at_a_time(
+def test_editing_allows_medication_names_and_formulations_without_a_false_block(
     no_claude: None, stored_pack
 ) -> None:
     from api import server
@@ -462,8 +462,32 @@ def test_editing_can_reduce_a_legacy_compliance_issue_one_slide_at_a_time(
     )
 
     assert response["pack"]["carousel"][0]["fields"]["headline"] == "Nova forma oral aprovada"
-    assert response["compliance"]["blocked"] is True
-    assert response["compliance"]["issues"] == ["Possível menção de dose ou formulação"]
+    assert response["compliance"]["blocked"] is False
+    assert response["compliance"]["issues"] == []
+
+
+def test_pack_compliance_still_blocks_a_specific_numeric_dose() -> None:
+    from api import server
+
+    response = server._pack_compliance(
+        {"text": "A apresentação estudada usou 2,4 mg por semana."}
+    )
+
+    assert response["blocked"] is True
+    assert response["issues"] == ["Possível menção de dose específica"]
+
+
+def test_claude_pack_prompts_require_lay_positive_copy_and_responsible_hype() -> None:
+    from api import server
+
+    for prompt in (
+        server._PACK_SYSTEM,
+        server._TRANSCRIPT_PACK_SYSTEM,
+        server._PACK_SLIDE_SYSTEM,
+    ):
+        assert "pessoas leigas" in prompt
+        assert "positiv" in prompt
+        assert "hype editorial respons" in prompt
 
 
 def test_compliance_fields_of_the_last_slide_cannot_be_edited(no_claude: None, stored_pack) -> None:

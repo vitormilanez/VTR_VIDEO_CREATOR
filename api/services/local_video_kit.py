@@ -247,6 +247,13 @@ def _safe_text(value: Any, fallback: str, limit: int) -> str:
     return html.escape(cleaned[:limit])
 
 
+def _config_text(config: dict[str, Any], key: str, fallback: str, limit: int) -> str:
+    """Keep legacy defaults while respecting an explicitly cleared optional field."""
+    value = config[key] if key in config else fallback
+    cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
+    return html.escape(cleaned[:limit])
+
+
 def _five_stack_data(config: dict[str, Any]) -> dict[str, Any]:
     """Normalize the reusable Claude stack without requiring it in old jobs."""
     raw = config.get("fiveStack")
@@ -388,10 +395,15 @@ def _kit_documents(config: dict[str, Any], project_root: Path) -> dict[str, tupl
     accent = str(config.get("accent") or "#c8e05a")
     if not ACCENT_PATTERN.fullmatch(accent):
         accent = "#c8e05a"
-    name = _safe_text(config.get("name"), "Dr. Guilherme Martins", 80)
-    role = _safe_text(config.get("role"), "Médico", 90)
-    title = _safe_text(config.get("title"), "Saúde e desempenho", 120)
-    subtitle = _safe_text(config.get("subtitle"), "Informação clara, direto ao ponto.", 150)
+    name = _config_text(config, "name", "Dr. Guilherme Martins", 80)
+    role = _config_text(config, "role", "Médico", 90)
+    title = _config_text(config, "title", "Saúde e desempenho", 120)
+    subtitle = _config_text(
+        config,
+        "subtitle",
+        "Informação clara, direto ao ponto.",
+        150,
+    )
     section_title = _safe_text(config.get("sectionTitle"), "", 100)
     medical_disclaimer = html.escape(MEDICAL_EDUCATIONAL_DISCLAIMER)
     medical_identification = html.escape(MEDICAL_PROFESSIONAL_IDENTIFICATION)
@@ -401,19 +413,28 @@ def _kit_documents(config: dict[str, Any], project_root: Path) -> dict[str, tupl
       body{{font-family:'ArchivoLocal',Arial,sans-serif;color:#f5f3ee}}
       .serif{{font-family:'InstrumentLocal',Georgia,serif;font-style:italic}}
     """
+    opening_name = (
+        f"<div class='name'><span class='dot'></span>{name}</div>" if name else ""
+    )
+    opening_title = f"<h1 class='serif'>{title}</h1>" if title else ""
+    opening_subtitle = f"<p>{subtitle}</p>" if subtitle else ""
+    lower_name = f"<h2>{name}</h2>" if name else ""
+    lower_role = f"<p>{role}</p>" if role else ""
+    cover_title = f"<h2 class='serif'>{title}</h2>" if title else ""
+    cover_name = f"<div class='name'>{name}</div>" if name else ""
     opening = f"""<!doctype html><html><head><meta charset='utf-8'><style>{base}
       body{{position:relative;background:#0f0f10;padding:180px 90px 520px;display:flex;flex-direction:column;justify-content:center}}
       body:before{{content:'';position:absolute;inset:0;background:radial-gradient(80% 50% at 50% 26%,rgba(255,255,255,.09),transparent 66%)}}
       .name{{position:absolute;top:180px;left:90px;display:flex;align-items:center;gap:18px;color:#a3a098;font-size:26px;font-weight:650;letter-spacing:.18em;text-transform:uppercase}}
       .dot{{width:14px;height:14px;border-radius:50%;background:{accent}}}.content{{position:relative}}
       .line{{width:220px;height:4px;background:{accent};margin-bottom:44px}}h1{{margin:0;font-size:132px;line-height:.94;font-weight:400;letter-spacing:-.025em;max-width:900px}}
-      p{{margin:38px 0 0;color:#aaa79f;font-size:42px;line-height:1.32;max-width:830px}}
-    </style></head><body><div class='name'><span class='dot'></span>{name}</div><div class='content'><div class='line'></div><h1 class='serif'>{title}</h1><p>{subtitle}</p></div></body></html>"""
+      p{{margin:{"38px 0 0" if title else "0"};color:#aaa79f;font-size:42px;line-height:1.32;max-width:830px}}
+    </style></head><body>{opening_name}<div class='content'><div class='line'></div>{opening_title}{opening_subtitle}</div></body></html>"""
     lower = f"""<!doctype html><html><head><meta charset='utf-8'><style>{base}
       body{{background:transparent;position:relative}}.lower{{position:absolute;left:70px;bottom:570px;display:flex;filter:drop-shadow(0 20px 34px rgba(0,0,0,.34))}}
       .bar{{width:10px;background:{accent}}}.card{{min-width:690px;max-width:900px;background:rgba(15,15,16,.94);padding:32px 52px 34px 40px}}
-      h2{{margin:0;font-size:58px;line-height:1.04;letter-spacing:-.02em}}p{{margin:12px 0 0;color:{accent};font-size:29px;line-height:1.25;letter-spacing:.045em}}
-    </style></head><body><div class='lower'><div class='bar'></div><div class='card'><h2>{name}</h2><p>{role}</p></div></div></body></html>"""
+      h2{{margin:0;font-size:58px;line-height:1.04;letter-spacing:-.02em}}p{{margin:{"12px 0 0" if name else "0"};color:{accent};font-size:29px;line-height:1.25;letter-spacing:.045em}}
+    </style></head><body><div class='lower'><div class='bar'></div><div class='card'>{lower_name}{lower_role}</div></div></body></html>"""
     section = f"""<!doctype html><html><head><meta charset='utf-8'><style>{base}
       body{{background:{accent};color:#0f0f10;display:flex;align-items:center;justify-content:center;padding:120px 90px 520px;text-align:center}}
       h2{{margin:0;font-size:118px;line-height:.98;font-weight:400;letter-spacing:-.02em;max-width:920px}}
@@ -432,7 +453,7 @@ def _kit_documents(config: dict[str, Any], project_root: Path) -> dict[str, tupl
       body:before{{content:'';position:absolute;inset:0;background:radial-gradient(circle at 72% 20%,rgba(200,224,90,.2),transparent 36%),repeating-linear-gradient(135deg,#19191b 0 14px,#121214 14px 28px)}}
       main{{position:relative}}.line{{height:4px;width:170px;background:{accent};margin-bottom:34px}}h2{{margin:0;font-size:108px;line-height:.95;font-weight:400;letter-spacing:-.025em}}
       .name{{margin-top:30px;color:{accent};font-size:28px;letter-spacing:.15em;text-transform:uppercase;font-weight:700}}
-    </style></head><body><main><div class='line'></div><h2 class='serif'>{title}</h2><div class='name'>{name}</div></main></body></html>"""
+    </style></head><body><main><div class='line'></div>{cover_title}{cover_name}</main></body></html>"""
     documents: dict[str, tuple[str, bool]] = {
         "opening": (opening, False),
         "lowerThird": (lower, True),

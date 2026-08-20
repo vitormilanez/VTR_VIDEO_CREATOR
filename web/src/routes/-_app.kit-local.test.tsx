@@ -144,6 +144,23 @@ describe("Local video editor start gate", () => {
     expect(createPostProduction).toHaveBeenCalledTimes(1);
   });
 
+  it("makes the video identity optional", async () => {
+    const user = userEvent.setup();
+    render(<LocalVideoKitPage />);
+
+    expect(await screen.findByText("Identidade do vídeo")).toBeInTheDocument();
+    const identitySwitch = screen.getByRole("switch", { name: "Usar identidade no vídeo" });
+    expect(identitySwitch).toBeChecked();
+    expect(screen.getAllByText("Opcional").length).toBeGreaterThanOrEqual(4);
+
+    await user.click(identitySwitch);
+
+    expect(identitySwitch).not.toBeChecked();
+    expect(screen.getByLabelText("Quem aparece")).toBeDisabled();
+    expect(screen.getByLabelText("Identificação profissional")).toBeDisabled();
+    expect(screen.getByLabelText("Título de abertura")).toBeDisabled();
+  });
+
   it("uploads a local file passively and queues analysis only after confirmation", async () => {
     routeSearch.current = { videoJobId: undefined, sourceName: undefined };
     const user = userEvent.setup();

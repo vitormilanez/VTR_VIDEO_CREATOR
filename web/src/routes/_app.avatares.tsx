@@ -50,6 +50,8 @@ import {
   createHeyGenAvatar,
   fetchHeyGenAvatars,
   fetchHeyGenStyles,
+  readCachedHeyGenAvatars,
+  readCachedHeyGenStyles,
   refreshHeyGenAvatar,
   saveSettings,
   type AvatarJob,
@@ -108,19 +110,25 @@ const creationOptions: Array<{
 ];
 
 function AvataresPage() {
+  const retainedAvatars = readCachedHeyGenAvatars();
+  const retainedStyles = readCachedHeyGenStyles("cinematic");
   const [activeTab, setActiveTab] = useState("library");
-  const [avatars, setAvatars] = useState<HeyGenAvatarGroup[]>([]);
-  const [looks, setLooks] = useState<HeyGenAvatarLook[]>([]);
-  const [jobs, setJobs] = useState<AvatarJob[]>([]);
-  const [styles, setStyles] = useState<HeyGenStyle[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [avatarsFromCache, setAvatarsFromCache] = useState(false);
+  const [avatars, setAvatars] = useState<HeyGenAvatarGroup[]>(() => retainedAvatars?.avatars ?? []);
+  const [looks, setLooks] = useState<HeyGenAvatarLook[]>(() => retainedAvatars?.looks ?? []);
+  const [jobs, setJobs] = useState<AvatarJob[]>(() => retainedAvatars?.jobs ?? []);
+  const [styles, setStyles] = useState<HeyGenStyle[]>(() => retainedStyles?.styles ?? []);
+  const [loading, setLoading] = useState(() => !retainedAvatars);
+  const [refreshing, setRefreshing] = useState(false);
+  const [avatarsFromCache, setAvatarsFromCache] = useState(() =>
+    Boolean(retainedAvatars?.fromCache),
+  );
 
-  async function loadData() {
-    setLoading(true);
+  async function loadData(force = false) {
+    if (!readCachedHeyGenAvatars()) setLoading(true);
+    setRefreshing(true);
     const [avatarResult, styleResult] = await Promise.allSettled([
-      fetchHeyGenAvatars(),
-      fetchHeyGenStyles("cinematic"),
+      fetchHeyGenAvatars({ force }),
+      fetchHeyGenStyles("cinematic", { force }),
     ]);
     if (avatarResult.status === "fulfilled") {
       setAvatars(avatarResult.value.avatars);
@@ -138,6 +146,7 @@ function AvataresPage() {
       setStyles(styleResult.value.styles);
     }
     setLoading(false);
+    setRefreshing(false);
   }
 
   useEffect(() => {
@@ -148,8 +157,8 @@ function AvataresPage() {
     <AppShell
       title="Avatares"
       actions={
-        <Button variant="ghost" size="sm" onClick={() => void loadData()} disabled={loading}>
-          <RefreshCw className={cn("mr-1 h-4 w-4", loading && "animate-spin")} />
+        <Button variant="ghost" size="sm" onClick={() => void loadData(true)} disabled={refreshing}>
+          <RefreshCw className={cn("mr-1 h-4 w-4", refreshing && "animate-spin")} />
           Atualizar
         </Button>
       }
@@ -198,7 +207,7 @@ function AvataresPage() {
             onCreated={(job) => {
               setJobs((current) => [job, ...current]);
               setActiveTab("library");
-              void loadData();
+              void loadData(true);
               if (job.setupWarning) {
                 toast.warning(job.setupWarning);
               } else if (job.consentUrl) {

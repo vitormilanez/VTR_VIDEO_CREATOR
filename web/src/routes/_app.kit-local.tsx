@@ -740,6 +740,17 @@ function LocalVideoKitPage() {
     setConfig((current) => ({ ...current, [key]: value }));
   }
 
+  function updateIdentityEnabled(enabled: boolean) {
+    configTouched.current = true;
+    setVisualReviewConfirmed(false);
+    setRenderConfigDirty(true);
+    setConfig((current) => ({
+      ...current,
+      includeOpening: enabled,
+      includeLowerThird: enabled,
+    }));
+  }
+
   const fiveStack = normalizeFiveStack(config.fiveStack);
   const claudeInserts = normalizeClaudeInserts(config.claudeInserts);
   const manualVisualsEnabled = config.manualVisualsEnabled === true;
@@ -1096,6 +1107,7 @@ function LocalVideoKitPage() {
     !insertErrors.length &&
     !visualTimingIssues.length;
   const hasSectionContent = Boolean(config.sectionTitle.trim());
+  const identityEnabled = config.includeOpening || config.includeLowerThird;
   const selectedMusicTrack = musicTracks.find((track) => track.id === config.musicTrackId) || null;
   const originalUrl =
     sourcePreview ||
@@ -1381,10 +1393,24 @@ function LocalVideoKitPage() {
               <TabsContent value="base" className="mt-4">
                 <Card className="overflow-hidden">
                   <CardHeader className="border-b bg-muted/20 pb-4">
-                    <CardTitle className="text-base">Identidade do vídeo</CardTitle>
-                    <p className="text-xs leading-relaxed text-muted-foreground">
-                      Confira os três itens principais. O restante já vem configurado.
-                    </p>
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <CardTitle className="text-base">Identidade do vídeo</CardTitle>
+                          <span className="rounded-full border bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            Opcional
+                          </span>
+                        </div>
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                          Desative para não aplicar abertura nem identificação durante o vídeo.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={identityEnabled}
+                        onCheckedChange={updateIdentityEnabled}
+                        aria-label="Usar identidade no vídeo"
+                      />
+                    </div>
                   </CardHeader>
                   <CardContent className="space-y-4">
                     <TextField
@@ -1392,18 +1418,24 @@ function LocalVideoKitPage() {
                       label="Quem aparece"
                       value={config.name}
                       onChange={(value) => update("name", value)}
+                      optional
+                      disabled={!identityEnabled}
                     />
                     <TextField
                       id="kit-role"
                       label="Identificação profissional"
                       value={config.role}
                       onChange={(value) => update("role", value)}
+                      optional
+                      disabled={!identityEnabled}
                     />
                     <TextField
                       id="kit-title"
                       label="Título de abertura"
                       value={config.title}
                       onChange={(value) => update("title", value)}
+                      optional
+                      disabled={!identityEnabled}
                     />
                     <details className="group overflow-hidden rounded-xl border bg-muted/10">
                       <summary className="flex min-h-14 cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
@@ -3833,16 +3865,28 @@ function TextField({
   label,
   value,
   onChange,
+  optional = false,
+  disabled = false,
 }: {
   id: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
+  optional?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <Input id={id} value={value} onChange={(event) => onChange(event.target.value)} />
+      <div className="flex items-center justify-between gap-3">
+        <Label htmlFor={id}>{label}</Label>
+        {optional ? <span className="text-[11px] text-muted-foreground">Opcional</span> : null}
+      </div>
+      <Input
+        id={id}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      />
     </div>
   );
 }

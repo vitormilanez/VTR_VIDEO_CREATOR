@@ -3862,9 +3862,9 @@ DEFAULT_SETTINGS = {
 MEDICAL_COMPLIANCE_RULES: list[dict[str, str]] = [
     {
         "id": "dose",
-        "pattern": r"\b\d+\s?(mg|mcg|ml|g)\b|\bdose\b|\bcomprimid|\bampola",
-        "titulo": "Possível menção de dose ou formulação",
-        "detalhe": "Não citar dose, mg ou formato de administração. Reforçar avaliação médica.",
+        "pattern": r"\b\d+(?:[.,]\d+)?\s?(mg|mcg|ml|g)\b",
+        "titulo": "Possível menção de dose específica",
+        "detalhe": "Evitar orientação de dose numérica individual. Nomes de medicamentos e apresentações podem ser explicados de forma educativa.",
         "severidade": "alta",
     },
     {
@@ -11938,12 +11938,11 @@ class LocalVideoKitCreateIn(BaseModel):
     sourceKitJobId: str | None = Field(default=None, min_length=1, max_length=160)
     analysisJobId: str | None = Field(default=None, pattern=r"^post-[a-f0-9]{16}$")
     sourceName: str = Field(default="video-local.mp4", min_length=1, max_length=300)
-    name: str = Field(default="Dr. Guilherme Martins", min_length=1, max_length=80)
-    role: str = Field(default="Médico", min_length=1, max_length=90)
-    title: str = Field(default="Saúde e desempenho", min_length=1, max_length=120)
+    name: str = Field(default="Dr. Guilherme Martins", max_length=80)
+    role: str = Field(default="Médico", max_length=90)
+    title: str = Field(default="Saúde e desempenho", max_length=120)
     subtitle: str = Field(
         default="Informação clara, direto ao ponto.",
-        min_length=1,
         max_length=150,
     )
     sectionNumber: str = Field(default="Ponto 01", min_length=1, max_length=30)
@@ -12177,6 +12176,12 @@ def _local_video_kit_config(payload: LocalVideoKitCreateIn) -> dict[str, Any]:
     config = payload.model_dump(
         exclude={"uploadId", "videoJobId", "sourceKitJobId", "analysisJobId", "sourceName"}
     )
+    for key in ("name", "role", "title", "subtitle"):
+        config[key] = re.sub(r"\s+", " ", str(config.get(key) or "")).strip()
+    if not any(config[key] for key in ("name", "title", "subtitle")):
+        config["includeOpening"] = False
+    if not any(config[key] for key in ("name", "role")):
+        config["includeLowerThird"] = False
     config["sectionTitle"] = str(config.get("sectionTitle") or "").strip()
     if not config["sectionTitle"]:
         config["includeSection"] = False
@@ -16259,6 +16264,10 @@ _PACK_SCHEMA = {
     "required": ["schemaVersion", "caption", "hashtags", "slides"],
 }
 
+
+PACK_COPY_PROMPT_VERSION = "2026-08-19-v1-leigo-positivo-hype"
+
+
 _PACK_SYSTEM = f"""Voce e o editor de carrosseis do Instituto Guilherme Martins.
 Sua unica tarefa e transformar um roteiro medico em um carrossel de 7 slides,
 em portugues do Brasil, usando o schema estruturado fornecido.
@@ -16269,20 +16278,25 @@ IDENTIDADE:
 - Se houver Avatar Set, ele representa a mesma pessoa em posições diferentes; mantenha essa continuidade também nas fotos.
 
 OBJETIVO DE COPY: aprendizagem clara, leitura instantanea e entendimento na primeira passada.
+- Escreva sempre para pessoas leigas: use palavras comuns, explique qualquer termo medico no mesmo slide e nunca pressuponha conhecimento clinico.
+- Mantenha um tom positivo, acolhedor e construtivo. Mesmo ao falar de risco ou limite, mostre o que a pessoa pode compreender, observar ou conversar com o profissional.
+- O texto inicial do slide 1 deve ter hype editorial responsavel: um gancho forte, curioso e energico que mostre por que o tema importa agora e prometa entendimento, nunca resultado clinico.
 - Uma unica ideia por slide, sempre com uma funcao educativa: apresentar, contextualizar, definir, explicar, interpretar, limitar ou resumir.
 - O NARRATIVE BRIEF define a etapa, a funcao e a fonte de cada posicao. Cada slide deve desenvolver apenas o sourceText correspondente, sem trocar de assunto.
 - O roteiro aprovado e a fonte principal de verdade; a ideia vinculada complementa angulo, publico e contexto. Nao crie uma tese nova para preencher espaco.
 - Cada slide precisa fazer sentido sozinho e tambem continuar logicamente o anterior. Evite saltos de assunto e conselhos genericos que poderiam servir para qualquer tema.
 - Headline curta, concreta e com no maximo 11 palavras. Frases ativas; prefira palavras comuns e verbos concretos.
 - Explique termos medicos em linguagem cotidiana antes de usalos como conclusao. Se houver dado, explique o que ele significa; nao deixe numero isolado.
-- Use tom acolhedor e neutro em todos os slides. Transforme duvidas em explicacoes, sem culpar, assustar ou confrontar quem le.
+- Use tom acolhedor, positivo e confiante em todos os slides. Transforme duvidas em explicacoes, sem culpar, assustar ou confrontar quem le.
 - Nunca use frases como "voce confunde", "voce esta fazendo errado", "ninguem te contou" ou referencias vagas como "aquele produto que achei por ai".
-- Corte introducoes, adjetivos vazios, repeticoes e frases de efeito genericas. Nao repita a headline no body.
+- Corte introducoes, adjetivos vazios, repeticoes e hype generico. Na capa, o impacto deve vir de novidade, relevancia ou beneficio de entendimento sustentado pela fonte. Nao repita a headline no body.
 - Nao use emoji, markdown, rotulos como "Slide 1" ou texto sobre o design.
 - A pessoa precisa captar a mensagem central de cada tela em ate 3 segundos.
 
 TOM EDUCATIVO OBRIGATORIO EM TODOS OS SLIDES:
 - Ensine com calma: contextualize antes de concluir, defina antes de comparar e explique antes de orientar.
+- Fale no nivel de quem esta conhecendo o assunto agora, com exemplos e comparacoes simples quando ajudarem.
+- Prefira uma leitura otimista e util, sem esconder incertezas, riscos ou limites da evidencia.
 - Prefira perguntas neutras, exemplos concretos e conclusoes proporcionais à fonte.
 - Uma ressalva clinica deve esclarecer o limite da informacao, nao substituir a explicacao principal.
 
@@ -16300,7 +16314,7 @@ COMPLIANCE:
 
 COMPOSICAO:
 - Exatamente 7 slides.
-- Slide 1: hero_photo ou photo_overlay. Apresente o tema e o que a pessoa vai entender.
+- Slide 1: hero_photo ou photo_overlay. Abra com hype editorial responsavel e apresente o tema e o ganho de entendimento em linguagem leiga.
 - Slide 2: contexto. Use pergunta comum, comparacao neutra ou explicacao curta; nunca uma provocacao isolada.
 - Slides 3 e 4: conceito-chave e como funciona. Inclua obrigatoriamente um explainer em um desses dois slides e use pelo menos mais um layout explicativo entre os slides 3 e 6.
 - Slide 5: dado, evidencia ou implicacao. Use number_stat somente quando a fonte trouxer o dado; caso contrario, explique a implicacao sem inventar numero.
@@ -16334,8 +16348,11 @@ REGRAS DE CONTEÚDO:
   comparações, diagnósticos, prescrições ou conclusões.
 - Uma ideia por slide, com sequência educativa: tema e objetivo, contexto, conceito-chave,
   como funciona, o que a fonte mostra, cuidados e limites, resumo e próximo passo.
-- Todo slide deve ensinar algo de forma acolhedora e fácil de entender. Não confronte quem lê,
-  não use frases de efeito e não deixe dados sem explicação.
+- Escreva sempre para pessoas leigas, explicando termos médicos no mesmo slide em que aparecem.
+- Todo slide deve ensinar algo de forma acolhedora, positiva e fácil de entender. Não confronte quem lê,
+  não use frases de efeito vazias e não deixe dados sem explicação.
+- O texto inicial do slide 1 deve ter hype editorial responsável: forte, curioso e energético,
+  baseado na relevância real da transcrição e sem promessa clínica, exagero ou urgência falsa.
 - Explique termos médicos em palavras comuns e transforme dúvidas em comparações neutras.
 - Se um tipo de layout exigir uma informação que não existe, escolha outro layout.
 - Headline curta, concreta e completa. Não repita a headline no body.
@@ -16370,6 +16387,7 @@ def _generate_post_production_pack(job_id: str) -> dict[str, Any]:
     cache_payload = {
         "transcriptVersion": transcript.get("version"),
         "schemaVersion": PACK_SCHEMA_VERSION,
+        "copyPromptVersion": PACK_COPY_PROMPT_VERSION,
         "slideCount": PACK_SLIDE_COUNT,
         "flow": "local-transcript-pack-v2",
         "educationalFlowVersion": PACK_EDUCATIONAL_FLOW_VERSION,
@@ -16745,7 +16763,8 @@ def _pack_generation_context(script_id: str, script: dict[str, Any]) -> tuple[di
             "Exatamente 7 slides em uma trilha educativa: tema, contexto, conceito, explicacao, evidencia, cuidados e resumo.",
             "Um slide explainer nos slides 3 ou 4 traduz o contexto para linguagem simples.",
             "Fotos sao opcionais e podem ser removidas localmente sem alterar a copy.",
-            "Todo slide usa tom acolhedor, sem julgamento ou frases de impacto vagas.",
+            "Todo slide fala com pessoas leigas, explica termos médicos e usa tom positivo e acolhedor.",
+            "O slide 1 abre com hype editorial responsável, curioso e específico, sem promessa clínica.",
             "O Pack herda a identidade do Roteiro e não escolhe outro avatar.",
         ],
     }
@@ -16841,6 +16860,7 @@ def generate_pack(payload: PackIn) -> dict:
         "context": pack_context,
         "identityKey": pack_context["identityKey"],
         "educationalFlowVersion": PACK_EDUCATIONAL_FLOW_VERSION,
+        "copyPromptVersion": PACK_COPY_PROMPT_VERSION,
         "recentPackContext": recent_context,
         "schemaVersion": PACK_SCHEMA_VERSION,
         "slideCount": PACK_SLIDE_COUNT,
@@ -16934,7 +16954,8 @@ def generate_pack(payload: PackIn) -> dict:
         f"ULTIMOS CARROSSEIS — evite repetir a mesma sequencia e os mesmos ganchos:\n{diversity}\n\n"
         "Entregue exatamente 7 slides seguindo, na mesma ordem, o slidePlan educativo do NARRATIVE BRIEF. "
         "Cada tela deve ser entendida isoladamente e levar naturalmente a proxima. "
-        "Use tom acolhedor e explicativo em todas as telas; nunca confronte quem le. "
+        "Use linguagem para pessoas leigas e tom positivo, acolhedor e explicativo em todas as telas; nunca confronte quem le. "
+        "No slide 1, crie um gancho com hype editorial responsavel, especifico e sustentado pela fonte. "
         "Todo percentual ou estatistica precisa aparecer literalmente na ideia vinculada ou no roteiro aprovado. "
         "Use fields irrelevantes ao layout como string vazia ou item vazio."
     )
@@ -17381,7 +17402,9 @@ _PACK_SLIDE_SYSTEM = """Voce e o editor de carrosseis do Instituto Guilherme Mar
 Reescreva APENAS um slide, em portugues do Brasil, devolvendo somente o objeto ``fields``.
 
 - Mantenha o mesmo assunto e a mesma etapa educativa do slide.
-- Uma unica ideia, frase completa, linguagem cotidiana e tom acolhedor.
+- Escreva para pessoas leigas, explique termos medicos e use tom positivo, acolhedor e construtivo.
+- Uma unica ideia, frase completa e linguagem cotidiana.
+- Se CONTEXTO DO SLIDE indicar slide 1, abra com hype editorial responsavel: gancho forte, curioso e especifico, sem promessa clinica ou exagero.
 - Explique termos tecnicos; se citar um numero, diga o que ele significa.
 - Nao prescreva medicamento, dose ou conduta; nao prometa resultado; sem alarmismo.
 - Nao invente dado, estudo, estatistica ou comparacao que nao esteja no contexto enviado.
@@ -17449,7 +17472,11 @@ def regenerate_pack_slide(
         # aplicados localmente e nao precisam ir para o prompt.
         "compliance": [rule["detalhe"] for rule in MEDICAL_COMPLIANCE_RULES],
     }
-    cache_payload = {"context": compact_context, "schemaVersion": PACK_SCHEMA_VERSION}
+    cache_payload = {
+        "context": compact_context,
+        "schemaVersion": PACK_SCHEMA_VERSION,
+        "copyPromptVersion": PACK_COPY_PROMPT_VERSION,
+    }
     cached = _ai_cache_get("packs.slide.regenerate", cache_payload)
     new_fields = cached.get("fields") if isinstance(cached, dict) else None
 

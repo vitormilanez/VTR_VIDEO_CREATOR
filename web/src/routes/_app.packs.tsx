@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { ConfirmAction } from "@/components/confirm-action";
@@ -30,6 +30,9 @@ import {
   generatePack,
   packSlidePreviewUrl,
   packSlideThumbnailUrl,
+  readCachedPack,
+  readCachedPackDesignSystem,
+  readCachedPackPhotoAssets,
   refreshPackAvatar,
   regeneratePackSlide,
   restorePackVersion,
@@ -37,6 +40,7 @@ import {
   updatePackCarouselPhoto,
   updatePackPresentation,
   updatePackSlideFields,
+  updateCachedPack,
   type GeneratedPack,
   type PackClarity,
   type PackDesignSystem,
@@ -52,6 +56,7 @@ import {
 } from "@/lib/api/local";
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   Copy,
   FileText,
@@ -66,6 +71,7 @@ import {
   RotateCcw,
   Sparkles,
   Wand2,
+  X,
 } from "lucide-react";
 
 export const Route = createFileRoute("/_app/packs")({
@@ -324,31 +330,275 @@ function SlidePreview({
   scriptId,
   slideIndex,
   nonce,
-  width,
 }: {
   scriptId: string;
   slideIndex: number;
   nonce: number;
-  width: number;
 }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const updateWidth = () => setWidth(Math.max(0, Math.floor(container.clientWidth)));
+    updateWidth();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateWidth);
+      return () => window.removeEventListener("resize", updateWidth);
+    }
+
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
   const scale = width / 1080;
   return (
     <div
-      className="overflow-hidden rounded-xl border bg-muted shadow-sm"
-      style={{ width, height: Math.round(1350 * scale) }}
+      ref={containerRef}
+      className="relative mx-auto aspect-[4/5] w-full max-w-[420px] overflow-hidden rounded-xl border bg-muted shadow-sm"
     >
-      <iframe
-        key={`${scriptId}-${slideIndex}-${nonce}`}
-        title={`Preview do slide ${slideIndex + 1}`}
-        src={`${packSlidePreviewUrl(scriptId, slideIndex)}?v=${nonce}`}
-        width={1080}
-        height={1350}
-        loading="lazy"
-        sandbox="allow-scripts"
-        className="origin-top-left border-0"
-        style={{ transform: `scale(${scale})` }}
-      />
+      {width > 0 ? (
+        <iframe
+          key={`${scriptId}-${slideIndex}-${nonce}`}
+          title={`Preview do slide ${slideIndex + 1}`}
+          src={`${packSlidePreviewUrl(scriptId, slideIndex)}?v=${nonce}`}
+          width={1080}
+          height={1350}
+          loading="lazy"
+          sandbox="allow-scripts"
+          className="absolute left-0 top-0 origin-top-left border-0"
+          style={{ transform: `scale(${scale})` }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+const layoutGuides: Record<PackLayout, string> = {
+  hero_photo: "Foto de impacto com título grande.",
+  photo_split: "Texto e foto dividem a tela.",
+  big_statement: "Uma frase ocupa o centro da atenção.",
+  question: "Pergunta forte com resposta curta.",
+  myth_fact: "Mito e fato comparados lado a lado.",
+  number_stat: "Número grande com contexto simples.",
+  three_points: "Três pontos em sequência visual.",
+  explainer: "Explicação em bloco ou pequenas etapas.",
+  doctor_quote: "Fala de autoridade acompanhada de foto.",
+  photo_overlay: "Texto aplicado sobre uma foto ampla.",
+  do_dont: "Evite e prefira em comparação direta.",
+  cta_photo: "Resumo e próximo passo com foto.",
+};
+
+const LayoutMiniature = memo(function LayoutMiniature({ layout }: { layout: PackLayout }) {
+  function content() {
+    switch (layout) {
+      case "hero_photo":
+        return (
+          <>
+            <div className="absolute inset-0 bg-slate-900" />
+            <div className="absolute inset-y-0 right-0 w-1/2 bg-cyan-700/60" />
+            <div className="absolute bottom-2 left-2 right-2 space-y-1">
+              <div className="h-1 w-4 rounded-full bg-cyan-300" />
+              <div className="h-1.5 w-8 rounded-full bg-white" />
+              <div className="h-1.5 w-6 rounded-full bg-white" />
+            </div>
+          </>
+        );
+      case "photo_split":
+        return (
+          <>
+            <div className="absolute inset-y-0 right-0 w-1/2 bg-cyan-800/70" />
+            <div className="absolute left-2 top-3 w-5 space-y-1">
+              <div className="h-1.5 w-full rounded-full bg-slate-800" />
+              <div className="h-1 w-4 rounded-full bg-slate-400" />
+              <div className="h-1 w-5 rounded-full bg-slate-300" />
+            </div>
+          </>
+        );
+      case "big_statement":
+        return (
+          <div className="absolute inset-0 flex flex-col justify-center gap-1.5 bg-slate-900 px-2">
+            <div className="h-2 w-full rounded-full bg-white" />
+            <div className="h-2 w-4/5 rounded-full bg-white" />
+            <div className="h-1 w-1/2 rounded-full bg-cyan-300" />
+          </div>
+        );
+      case "question":
+        return (
+          <div className="absolute inset-0 flex flex-col justify-between p-2">
+            <span className="text-2xl font-black leading-none text-cyan-700">?</span>
+            <div className="space-y-1">
+              <div className="h-1.5 w-full rounded-full bg-slate-800" />
+              <div className="h-1 w-4/5 rounded-full bg-slate-400" />
+            </div>
+          </div>
+        );
+      case "myth_fact":
+        return (
+          <div className="absolute inset-0 grid grid-cols-2 gap-px bg-slate-300">
+            <div className="flex flex-col justify-end gap-1 bg-rose-100 p-1.5">
+              <span className="text-[6px] font-bold text-rose-700">MITO</span>
+              <div className="h-1 w-full rounded-full bg-rose-300" />
+              <div className="h-1 w-4/5 rounded-full bg-rose-300" />
+            </div>
+            <div className="flex flex-col justify-end gap-1 bg-emerald-100 p-1.5">
+              <span className="text-[6px] font-bold text-emerald-700">FATO</span>
+              <div className="h-1 w-full rounded-full bg-emerald-300" />
+              <div className="h-1 w-4/5 rounded-full bg-emerald-300" />
+            </div>
+          </div>
+        );
+      case "number_stat":
+        return (
+          <div className="absolute inset-0 flex flex-col justify-center px-2">
+            <span className="text-lg font-black leading-none text-cyan-700">42%</span>
+            <div className="mt-2 h-1.5 w-full rounded-full bg-slate-700" />
+            <div className="mt-1 h-1 w-4/5 rounded-full bg-slate-300" />
+          </div>
+        );
+      case "three_points":
+        return (
+          <div className="absolute inset-0 flex flex-col justify-center gap-1.5 px-1.5">
+            {["01", "02", "03"].map((number) => (
+              <div key={number} className="flex items-center gap-1 rounded bg-white p-1 shadow-sm">
+                <span className="text-[5px] font-bold text-cyan-700">{number}</span>
+                <div className="h-1 flex-1 rounded-full bg-slate-300" />
+              </div>
+            ))}
+          </div>
+        );
+      case "explainer":
+        return (
+          <div className="absolute inset-0 p-2">
+            <div className="h-1.5 w-4/5 rounded-full bg-slate-800" />
+            <div className="mt-2 space-y-1">
+              <div className="h-1 w-full rounded-full bg-slate-300" />
+              <div className="h-1 w-full rounded-full bg-slate-300" />
+              <div className="h-1 w-5/6 rounded-full bg-slate-300" />
+              <div className="h-1 w-3/4 rounded-full bg-slate-300" />
+            </div>
+          </div>
+        );
+      case "doctor_quote":
+        return (
+          <div className="absolute inset-0 bg-slate-900 p-2">
+            <div className="h-5 w-5 rounded-full border-2 border-cyan-300 bg-slate-700" />
+            <span className="absolute right-2 top-2 text-lg font-serif text-cyan-300">“</span>
+            <div className="absolute bottom-2 left-2 right-2 space-y-1">
+              <div className="h-1.5 w-full rounded-full bg-white" />
+              <div className="h-1 w-4/5 rounded-full bg-slate-400" />
+            </div>
+          </div>
+        );
+      case "photo_overlay":
+        return (
+          <>
+            <div className="absolute inset-0 bg-cyan-800" />
+            <div className="absolute inset-x-0 bottom-0 h-2/3 bg-linear-to-t from-slate-950 to-transparent" />
+            <div className="absolute bottom-2 left-2 right-2 space-y-1">
+              <div className="h-1.5 w-full rounded-full bg-white" />
+              <div className="h-1.5 w-3/4 rounded-full bg-white" />
+            </div>
+          </>
+        );
+      case "do_dont":
+        return (
+          <div className="absolute inset-0 grid grid-cols-2 gap-px bg-slate-300">
+            <div className="bg-rose-50 p-1.5">
+              <X className="h-2.5 w-2.5 text-rose-600" />
+              <div className="mt-2 h-1 w-full rounded-full bg-rose-300" />
+              <div className="mt-1 h-1 w-4/5 rounded-full bg-rose-200" />
+            </div>
+            <div className="bg-emerald-50 p-1.5">
+              <Check className="h-2.5 w-2.5 text-emerald-600" />
+              <div className="mt-2 h-1 w-full rounded-full bg-emerald-300" />
+              <div className="mt-1 h-1 w-4/5 rounded-full bg-emerald-200" />
+            </div>
+          </div>
+        );
+      case "cta_photo":
+        return (
+          <>
+            <div className="absolute inset-y-0 right-0 w-2/5 bg-cyan-800" />
+            <div className="absolute bottom-2 left-2 w-7 space-y-1">
+              <div className="h-1.5 w-full rounded-full bg-slate-800" />
+              <div className="h-1 w-5 rounded-full bg-slate-300" />
+              <div className="mt-1.5 h-2 w-6 rounded-full bg-cyan-600" />
+            </div>
+          </>
+        );
+    }
+  }
+
+  return (
+    <div
+      className="relative aspect-[4/5] w-11 shrink-0 overflow-hidden rounded-md border bg-stone-50 shadow-sm"
+      aria-hidden="true"
+    >
+      {content()}
+    </div>
+  );
+});
+
+function LayoutPicker({
+  layouts,
+  value,
+  disabled,
+  onChange,
+}: {
+  layouts: PackLayoutSpec[];
+  value: PackLayout | undefined;
+  disabled: boolean;
+  onChange: (layout: PackLayout) => void;
+}) {
+  return (
+    <fieldset>
+      <legend className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+        Modelo visual
+      </legend>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+        A miniatura mostra a estrutura do slide antes de aplicar.
+      </p>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        {layouts.map((option) => {
+          const selected = value === option.id;
+          return (
+            <label
+              key={option.id}
+              className={`relative flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border p-2 transition-colors duration-200 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${
+                selected
+                  ? "border-primary bg-primary/5"
+                  : "bg-background hover:border-primary/40 hover:bg-muted/40"
+              } ${disabled ? "cursor-wait opacity-65" : ""}`}
+            >
+              <input
+                className="sr-only"
+                type="radio"
+                name="pack-slide-layout"
+                value={option.id}
+                checked={selected}
+                disabled={disabled}
+                onChange={() => onChange(option.id)}
+              />
+              <LayoutMiniature layout={option.id} />
+              <span className="min-w-0 flex-1 pr-3">
+                <span className="block text-xs font-semibold leading-tight">{option.label}</span>
+                <span className="mt-1 block text-[10px] leading-snug text-muted-foreground">
+                  {layoutGuides[option.id]}
+                </span>
+              </span>
+              {selected ? (
+                <CheckCircle2 className="absolute right-1.5 top-1.5 h-3.5 w-3.5 text-status-success" />
+              ) : null}
+            </label>
+          );
+        })}
+      </div>
+    </fieldset>
   );
 }
 
@@ -367,18 +617,24 @@ function PacksPage() {
   const search = Route.useSearch();
   const navigate = useNavigate();
 
-  const [selectedId, setSelectedId] = useState(search.scriptId ?? scripts[0]?.id ?? "");
-  const [pack, setPack] = useState<Pack | null>(null);
-  const [clarity, setClarity] = useState<PackClarity | null>(null);
-  const [versions, setVersions] = useState<PackVersion[]>([]);
-  const [designSystem, setDesignSystem] = useState<PackDesignSystem | null>(null);
-  const [photoAssets, setPhotoAssets] = useState<PackPhotoAsset[]>([]);
+  const initialSelectedId = search.scriptId ?? scripts[0]?.id ?? "";
+  const retainedPack = initialSelectedId ? readCachedPack(initialSelectedId) : undefined;
+  const [selectedId, setSelectedId] = useState(initialSelectedId);
+  const [pack, setPack] = useState<Pack | null>(() => retainedPack?.pack ?? null);
+  const [clarity, setClarity] = useState<PackClarity | null>(() => retainedPack?.clarity ?? null);
+  const [versions, setVersions] = useState<PackVersion[]>(() => retainedPack?.versions ?? []);
+  const [designSystem, setDesignSystem] = useState<PackDesignSystem | null>(
+    () => readCachedPackDesignSystem() ?? null,
+  );
+  const [photoAssets, setPhotoAssets] = useState<PackPhotoAsset[]>(
+    () => readCachedPackPhotoAssets() ?? [],
+  );
 
   const [activeSlide, setActiveSlide] = useState(0);
   const [draft, setDraft] = useState<SlideDraft>({});
   const [previewNonce, setPreviewNonce] = useState(0);
 
-  const [loadingPack, setLoadingPack] = useState(false);
+  const [loadingPack, setLoadingPack] = useState(() => Boolean(initialSelectedId && !retainedPack));
   const [generating, setGenerating] = useState(false);
   const [savingSlide, setSavingSlide] = useState(false);
   const [regeneratingSlide, setRegeneratingSlide] = useState(false);
@@ -390,9 +646,18 @@ function PacksPage() {
   const [regenerateNote, setRegenerateNote] = useState("");
   const [localStatus, setLocalStatus] = useState("");
 
-  const [outdatedAvatar, setOutdatedAvatar] = useState(false);
-  const [outdatedPackSchema, setOutdatedPackSchema] = useState(false);
-  const [outdatedEducationalFlow, setOutdatedEducationalFlow] = useState(false);
+  const [outdatedAvatar, setOutdatedAvatar] = useState(() =>
+    Boolean(
+      (retainedPack?.outdatedIdentity ?? retainedPack?.outdatedAvatar) &&
+      !retainedPack?.outdatedPackSchema,
+    ),
+  );
+  const [outdatedPackSchema, setOutdatedPackSchema] = useState(
+    () => retainedPack?.outdatedPackSchema ?? false,
+  );
+  const [outdatedEducationalFlow, setOutdatedEducationalFlow] = useState(
+    () => retainedPack?.outdatedEducationalFlow ?? false,
+  );
 
   const script = scripts.find((item) => item.id === selectedId);
   const packIsLegacy =
@@ -420,11 +685,15 @@ function PacksPage() {
   const dirty = !draftsEqual(draft, savedDraft);
 
   /** Recebe o resultado de qualquer mutação local e sincroniza a tela. */
-  const applyMutation = useCallback((next: { pack: Pack; clarity: PackClarity }) => {
-    setPack(next.pack);
-    setClarity(next.clarity);
-    setPreviewNonce((value) => value + 1);
-  }, []);
+  const applyMutation = useCallback(
+    (next: { pack: Pack; clarity: PackClarity }) => {
+      setPack(next.pack);
+      setClarity(next.clarity);
+      setPreviewNonce((value) => value + 1);
+      if (selectedId) updateCachedPack(selectedId, { pack: next.pack, clarity: next.clarity });
+    },
+    [selectedId],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -433,14 +702,14 @@ function PacksPage() {
         if (!cancelled) setDesignSystem(data);
       })
       .catch(() => {
-        if (!cancelled) setDesignSystem(null);
+        if (!cancelled && !readCachedPackDesignSystem()) setDesignSystem(null);
       });
     fetchPackPhotoAssets()
       .then((assets) => {
         if (!cancelled) setPhotoAssets(assets);
       })
       .catch(() => {
-        if (!cancelled) setPhotoAssets([]);
+        if (!cancelled && !readCachedPackPhotoAssets()) setPhotoAssets([]);
       });
     return () => {
       cancelled = true;
@@ -458,8 +727,28 @@ function PacksPage() {
       return;
     }
     let cancelled = false;
-    setLoadingPack(true);
+    const retained = readCachedPack(script.id);
+    setLoadingPack(!retained);
     setActiveSlide(0);
+    if (retained) {
+      setPack(retained.pack);
+      setClarity(retained.clarity);
+      setVersions(retained.versions);
+      setOutdatedAvatar(
+        Boolean(
+          (retained.outdatedIdentity ?? retained.outdatedAvatar) && !retained.outdatedPackSchema,
+        ),
+      );
+      setOutdatedPackSchema(retained.outdatedPackSchema ?? false);
+      setOutdatedEducationalFlow(retained.outdatedEducationalFlow ?? false);
+    } else {
+      setPack(null);
+      setClarity(null);
+      setVersions([]);
+      setOutdatedAvatar(false);
+      setOutdatedPackSchema(false);
+      setOutdatedEducationalFlow(false);
+    }
     fetchPack(script.id)
       .then((data) => {
         if (cancelled) return;
@@ -475,7 +764,7 @@ function PacksPage() {
       })
       .catch((error) => {
         if (cancelled) return;
-        setPack(null);
+        if (!retained) setPack(null);
         toast.error(error instanceof Error ? error.message : "Nao foi possivel carregar o Pack.");
       })
       .finally(() => {
@@ -496,7 +785,10 @@ function PacksPage() {
   const refreshVersions = useCallback(() => {
     if (!script) return;
     fetchPackVersions(script.id)
-      .then(setVersions)
+      .then((nextVersions) => {
+        setVersions(nextVersions);
+        updateCachedPack(script.id, { versions: nextVersions });
+      })
       .catch(() => undefined);
   }, [script]);
 
@@ -527,6 +819,14 @@ function PacksPage() {
       setOutdatedAvatar(false);
       setOutdatedPackSchema(false);
       setOutdatedEducationalFlow(false);
+      updateCachedPack(script.id, {
+        pack: response.pack,
+        clarity: response.clarity,
+        outdatedAvatar: false,
+        outdatedIdentity: false,
+        outdatedPackSchema: false,
+        outdatedEducationalFlow: false,
+      });
       refreshVersions();
       toast.success("Carrossel educativo de 7 slides criado.", { id: notice });
     } catch (error) {
@@ -665,6 +965,11 @@ function PacksPage() {
       applyMutation(response);
       setOutdatedAvatar(false);
       setOutdatedPackSchema(false);
+      updateCachedPack(script.id, {
+        outdatedAvatar: false,
+        outdatedIdentity: false,
+        outdatedPackSchema: false,
+      });
       toast.success("Identidade do Pack atualizada sem nova chamada ao Claude.", { id: notice });
     } catch (error) {
       toast.error(
@@ -913,10 +1218,24 @@ function PacksPage() {
                 </section>
               ) : null}
 
-              <div className="grid items-start gap-4 xl:grid-cols-[196px_minmax(0,392px)_minmax(0,1fr)]">
+              <div className="grid items-start gap-3 xl:h-[calc(100dvh-15.5rem)] xl:min-h-[640px] xl:grid-cols-[184px_minmax(320px,390px)_minmax(0,1fr)] xl:items-stretch">
                 {/* Trilha: PNGs pequenos em cache, sem abrir sete iframes. */}
-                <nav aria-label="Slides do carrossel" className="rounded-xl border bg-card p-2">
-                  <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-1">
+                <nav
+                  aria-label="Slides do carrossel"
+                  className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-card"
+                >
+                  <div className="flex items-center justify-between gap-2 border-b px-3 py-2.5">
+                    <div>
+                      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                        Painel 1
+                      </span>
+                      <h3 className="text-sm font-semibold">Slides</h3>
+                    </div>
+                    <span className="text-xs tabular-nums text-muted-foreground">
+                      {activeSlide + 1}/{pack.carousel.length}
+                    </span>
+                  </div>
+                  <ol className="grid gap-2 p-2 sm:grid-cols-2 lg:grid-cols-4 xl:min-h-0 xl:flex-1 xl:grid-cols-1 xl:overflow-y-auto xl:overscroll-contain">
                     {pack.carousel.map((item, index) => {
                       const entry = clarity?.slides.find((row) => row.slide === index + 1);
                       const step =
@@ -978,330 +1297,359 @@ function PacksPage() {
                 </nav>
 
                 {/* Preview: o mesmo HTML que vira PNG. */}
-                <section className="rounded-xl border bg-card p-3">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <h3 className="text-sm font-semibold">
-                      Slide {activeSlide + 1} · {slideLayout ? labelOf(slideLayout) : ""}
-                    </h3>
+                <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-card">
+                  <div className="flex items-center justify-between gap-2 border-b px-3 py-2.5">
+                    <div className="min-w-0">
+                      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                        Painel 2
+                      </span>
+                      <h3 className="truncate text-sm font-semibold">
+                        Slide {activeSlide + 1} · {slideLayout ? labelOf(slideLayout) : ""}
+                      </h3>
+                    </div>
                     <StatusBadge label="Preview real do PNG" tone="info" />
                   </div>
-                  <SlidePreview
-                    scriptId={script.id}
-                    slideIndex={activeSlide}
-                    nonce={previewNonce}
-                    width={368}
-                  />
-                  <div className="mt-2 flex items-center justify-between gap-2">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setActiveSlide((index) => Math.max(0, index - 1))}
-                      disabled={activeSlide === 0}
-                    >
-                      Anterior
-                    </Button>
-                    <span className="text-xs tabular-nums text-muted-foreground">
-                      {activeSlide + 1} / {pack.carousel.length}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        setActiveSlide((index) => Math.min(pack.carousel.length - 1, index + 1))
-                      }
-                      disabled={activeSlide >= pack.carousel.length - 1}
-                    >
-                      Próximo
-                    </Button>
+                  <div className="p-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain">
+                    <SlidePreview
+                      scriptId={script.id}
+                      slideIndex={activeSlide}
+                      nonce={previewNonce}
+                    />
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setActiveSlide((index) => Math.max(0, index - 1))}
+                        disabled={activeSlide === 0}
+                      >
+                        Anterior
+                      </Button>
+                      <span className="text-xs tabular-nums text-muted-foreground">
+                        {activeSlide + 1} / {pack.carousel.length}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setActiveSlide((index) => Math.min(pack.carousel.length - 1, index + 1))
+                        }
+                        disabled={activeSlide >= pack.carousel.length - 1}
+                      >
+                        Próximo
+                      </Button>
+                    </div>
                   </div>
                 </section>
 
                 {/* Inspetor: clareza, texto, layout e foto do slide selecionado. */}
-                <section className="space-y-3">
-                  {slideClarity ? (
-                    <div className="rounded-xl border bg-card p-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h3 className="text-sm font-semibold">Clareza deste slide</h3>
-                        <ClarityChip density={slideClarity.density} />
-                      </div>
-                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
-                        <div
-                          className={`h-full rounded-full ${
-                            slideClarity.density === "equilibrado"
-                              ? "bg-status-success"
-                              : "bg-status-warn"
-                          }`}
-                          style={{
-                            width: `${Math.min(
-                              100,
-                              Math.round((slideClarity.characters / slideClarity.comfortMax) * 100),
-                            )}%`,
-                          }}
-                        />
-                      </div>
-                      <p className="mt-1.5 text-[11px] tabular-nums text-muted-foreground">
-                        {slideClarity.characters} caracteres · faixa confortável{" "}
-                        {slideClarity.comfortMin}–{slideClarity.comfortMax} · frase mais longa{" "}
-                        {slideClarity.longestSentenceWords} palavras
-                      </p>
-                      {slideClarity.warnings.length ? (
-                        <ul className="mt-2 space-y-1">
-                          {slideClarity.warnings.map((warning) => (
-                            <li
-                              key={warning}
-                              className="flex items-start gap-1.5 text-[11px] leading-relaxed text-status-warn"
-                            >
-                              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                              <span>{warning}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p className="mt-2 text-[11px] text-status-success">
-                          Sem alertas de clareza nesta tela.
-                        </p>
-                      )}
-                    </div>
-                  ) : null}
-
-                  <div className="rounded-xl border bg-card p-3">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                      <h3 className="text-sm font-semibold">Texto do slide</h3>
-                      <StatusBadge label="Edição sem tokens" tone="success" />
-                    </div>
-                    {slideSpec ? (
-                      <div className="space-y-3">
-                        {slideSpec.editableFields.map((name) => {
-                          const label = designSystem?.fieldLabels[name] ?? name;
-                          if (isItemField(name)) {
-                            const item = (draft[name] as PackSlideItem | undefined) ?? {
-                              title: "",
-                              text: "",
-                            };
-                            const titleMax = slideSpec.itemMaxChars.title;
-                            const textMax = slideSpec.itemMaxChars.text;
-                            return (
-                              <fieldset key={name} className="rounded-lg border p-2.5">
-                                <legend className="px-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
-                                  {label}
-                                </legend>
-                                <Input
-                                  className="h-8 text-sm"
-                                  value={item.title}
-                                  aria-label={`${label} — título`}
-                                  placeholder="Título curto"
-                                  onChange={(event) =>
-                                    updateDraftItem(name, "title", event.target.value)
-                                  }
-                                />
-                                {titleMax ? (
-                                  <span className="mt-1 block text-right text-[10px] tabular-nums text-muted-foreground">
-                                    {item.title.length}/{titleMax}
-                                  </span>
-                                ) : null}
-                                <Textarea
-                                  className="mt-1.5 min-h-14 resize-y text-sm"
-                                  value={item.text}
-                                  aria-label={`${label} — texto`}
-                                  placeholder="Frase completa"
-                                  onChange={(event) =>
-                                    updateDraftItem(name, "text", event.target.value)
-                                  }
-                                />
-                                {textMax ? (
-                                  <span
-                                    className={`mt-1 block text-right text-[10px] tabular-nums ${
-                                      item.text.length > textMax
-                                        ? "text-status-danger"
-                                        : "text-muted-foreground"
-                                    }`}
-                                  >
-                                    {item.text.length}/{textMax}
-                                  </span>
-                                ) : null}
-                              </fieldset>
-                            );
-                          }
-                          const value = (draft[name] as string | undefined) ?? "";
-                          const max = slideSpec.maxChars[name];
-                          const over = Boolean(max && value.length > max);
-                          return (
-                            <div key={name}>
-                              <label
-                                htmlFor={`pack-field-${name}`}
-                                className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
-                              >
-                                {label}
-                              </label>
-                              {longFields.has(name) ? (
-                                <Textarea
-                                  id={`pack-field-${name}`}
-                                  className="mt-1 min-h-20 resize-y text-sm"
-                                  value={value}
-                                  onChange={(event) => updateDraftText(name, event.target.value)}
-                                />
-                              ) : (
-                                <Input
-                                  id={`pack-field-${name}`}
-                                  className="mt-1 h-9 text-sm"
-                                  value={value}
-                                  onChange={(event) => updateDraftText(name, event.target.value)}
-                                />
-                              )}
-                              {max ? (
-                                <span
-                                  className={`mt-0.5 block text-right text-[10px] tabular-nums ${
-                                    over ? "text-status-danger" : "text-muted-foreground"
-                                  }`}
-                                >
-                                  {value.length}/{max}
-                                </span>
-                              ) : null}
-                            </div>
-                          );
-                        })}
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Button
-                            size="sm"
-                            onClick={() => void saveSlideText()}
-                            disabled={!dirty || savingSlide}
-                          >
-                            {savingSlide ? (
-                              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                            ) : null}
-                            Salvar texto do slide
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => setDraft(savedDraft)}
-                            disabled={!dirty || savingSlide}
-                          >
-                            <RotateCcw className="mr-1 h-3.5 w-3.5" /> Descartar
-                          </Button>
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">
-                        Carregando os limites deste layout…
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="rounded-xl border bg-card p-3">
-                    <h3 className="mb-2 text-sm font-semibold">Composição deste slide</h3>
-                    <div className="grid gap-2 sm:grid-cols-2">
+                <div className="grid min-w-0 gap-3 xl:min-h-0 xl:grid-rows-2 2xl:grid-cols-2 2xl:grid-rows-1">
+                  <section
+                    aria-labelledby="pack-text-panel-title"
+                    className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-card"
+                  >
+                    <div className="flex items-center justify-between gap-2 border-b px-3 py-2.5">
                       <div>
-                        <label
-                          htmlFor="pack-slide-layout"
-                          className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
-                        >
-                          Layout
-                        </label>
-                        <Select
-                          value={slideLayout}
-                          onValueChange={(value) => void changeLayout(value as PackLayout)}
-                          disabled={savingLayout || !designSystem}
-                        >
-                          <SelectTrigger id="pack-slide-layout" className="mt-1 h-9 text-sm">
-                            <SelectValue placeholder="Escolher layout" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {(designSystem?.layouts ?? []).map((option) => (
-                              <SelectItem key={option.id} value={option.id}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                          Painel 3
+                        </span>
+                        <h3 id="pack-text-panel-title" className="text-sm font-semibold">
+                          Texto e clareza
+                        </h3>
                       </div>
-                      {slideSpec?.usesPhoto ? (
-                        <div>
-                          <label
-                            htmlFor="pack-slide-photo"
-                            className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
-                          >
-                            Foto (opcional)
-                          </label>
-                          <Select
-                            value={slide && photoIdOf(slide) ? photoIdOf(slide) : NO_PHOTO_VALUE}
-                            onValueChange={(value) =>
-                              void choosePhoto(value === NO_PHOTO_VALUE ? null : value)
-                            }
-                            disabled={savingPhoto || photoAssets.length === 0}
-                          >
-                            <SelectTrigger id="pack-slide-photo" className="mt-1 h-9 text-sm">
-                              <SelectValue placeholder="Foto do acervo" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value={NO_PHOTO_VALUE}>Sem foto</SelectItem>
-                              {photoAssets.map((asset) => (
-                                <SelectItem key={asset.id} value={asset.id}>
-                                  {asset.name}
-                                </SelectItem>
+                      <StatusBadge label="Sem tokens" tone="success" />
+                    </div>
+                    <div className="space-y-3 p-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain">
+                      {slideClarity ? (
+                        <div className="rounded-lg border bg-background p-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <h3 className="text-sm font-semibold">Clareza deste slide</h3>
+                            <ClarityChip density={slideClarity.density} />
+                          </div>
+                          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+                            <div
+                              className={`h-full rounded-full ${
+                                slideClarity.density === "equilibrado"
+                                  ? "bg-status-success"
+                                  : "bg-status-warn"
+                              }`}
+                              style={{
+                                width: `${Math.min(
+                                  100,
+                                  Math.round(
+                                    (slideClarity.characters / slideClarity.comfortMax) * 100,
+                                  ),
+                                )}%`,
+                              }}
+                            />
+                          </div>
+                          <p className="mt-1.5 text-[11px] tabular-nums text-muted-foreground">
+                            {slideClarity.characters} caracteres · faixa confortável{" "}
+                            {slideClarity.comfortMin}–{slideClarity.comfortMax} · frase mais longa{" "}
+                            {slideClarity.longestSentenceWords} palavras
+                          </p>
+                          {slideClarity.warnings.length ? (
+                            <ul className="mt-2 space-y-1">
+                              {slideClarity.warnings.map((warning) => (
+                                <li
+                                  key={warning}
+                                  className="flex items-start gap-1.5 text-[11px] leading-relaxed text-status-warn"
+                                >
+                                  <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                                  <span>{warning}</span>
+                                </li>
                               ))}
-                            </SelectContent>
-                          </Select>
+                            </ul>
+                          ) : (
+                            <p className="mt-2 text-[11px] text-status-success">
+                              Sem alertas de clareza nesta tela.
+                            </p>
+                          )}
                         </div>
                       ) : null}
-                    </div>
-                    <p className="mt-2 text-[11px] text-muted-foreground">
-                      Layout, foto opcional e tema são decisões locais: o texto aprovado é
-                      preservado e nenhuma chamada ao Claude é feita.
-                    </p>
-                  </div>
 
-                  <div className="rounded-xl border bg-card p-3">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                      <h3 className="flex items-center gap-2 text-sm font-semibold">
-                        <Sparkles className="h-4 w-4 text-status-info" /> Reescrever só este slide
-                      </h3>
-                      <StatusBadge label="1 chamada, contexto mínimo" tone="warn" />
-                    </div>
-                    <Textarea
-                      className="min-h-16 resize-y text-sm"
-                      maxLength={400}
-                      value={regenerateNote}
-                      placeholder="O que melhorar? Ex.: explique o número em linguagem simples."
-                      onChange={(event) => setRegenerateNote(event.target.value)}
-                      aria-label="Instrução para reescrever o slide"
-                    />
-                    <ConfirmAction
-                      trigger={
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          className="mt-2"
-                          disabled={regeneratingSlide}
-                        >
-                          {regeneratingSlide ? (
-                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Sparkles className="mr-1 h-3.5 w-3.5" />
-                          )}
-                          Reescrever slide {activeSlide + 1}
-                        </Button>
-                      }
-                      title={`Reescrever apenas o slide ${activeSlide + 1}?`}
-                      description={
-                        <div className="space-y-2 text-sm">
-                          <p>
-                            O pedido leva só a etapa educativa desta posição, o texto atual do slide
-                            e os limites do layout. Os outros seis slides não são reenviados nem
-                            alterados.
-                          </p>
-                          <p>A versão atual fica salva no histórico e pode voltar sem custo.</p>
+                      <div className="rounded-lg border bg-background p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="text-sm font-semibold">Texto do slide</h3>
+                          <StatusBadge label="Edição sem tokens" tone="success" />
                         </div>
-                      }
-                      confirmLabel="Reescrever este slide"
-                      onConfirm={() => void regenerateSlide()}
-                    />
-                  </div>
+                        {slideSpec ? (
+                          <div className="space-y-3">
+                            {slideSpec.editableFields.map((name) => {
+                              const label = designSystem?.fieldLabels[name] ?? name;
+                              if (isItemField(name)) {
+                                const item = (draft[name] as PackSlideItem | undefined) ?? {
+                                  title: "",
+                                  text: "",
+                                };
+                                const titleMax = slideSpec.itemMaxChars.title;
+                                const textMax = slideSpec.itemMaxChars.text;
+                                return (
+                                  <fieldset key={name} className="rounded-lg border p-2.5">
+                                    <legend className="px-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+                                      {label}
+                                    </legend>
+                                    <Input
+                                      className="h-8 text-sm"
+                                      value={item.title}
+                                      aria-label={`${label} — título`}
+                                      placeholder="Título curto"
+                                      onChange={(event) =>
+                                        updateDraftItem(name, "title", event.target.value)
+                                      }
+                                    />
+                                    {titleMax ? (
+                                      <span className="mt-1 block text-right text-[10px] tabular-nums text-muted-foreground">
+                                        {item.title.length}/{titleMax}
+                                      </span>
+                                    ) : null}
+                                    <Textarea
+                                      className="mt-1.5 min-h-14 resize-y text-sm"
+                                      value={item.text}
+                                      aria-label={`${label} — texto`}
+                                      placeholder="Frase completa"
+                                      onChange={(event) =>
+                                        updateDraftItem(name, "text", event.target.value)
+                                      }
+                                    />
+                                    {textMax ? (
+                                      <span
+                                        className={`mt-1 block text-right text-[10px] tabular-nums ${
+                                          item.text.length > textMax
+                                            ? "text-status-danger"
+                                            : "text-muted-foreground"
+                                        }`}
+                                      >
+                                        {item.text.length}/{textMax}
+                                      </span>
+                                    ) : null}
+                                  </fieldset>
+                                );
+                              }
+                              const value = (draft[name] as string | undefined) ?? "";
+                              const max = slideSpec.maxChars[name];
+                              const over = Boolean(max && value.length > max);
+                              return (
+                                <div key={name}>
+                                  <label
+                                    htmlFor={`pack-field-${name}`}
+                                    className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
+                                  >
+                                    {label}
+                                  </label>
+                                  {longFields.has(name) ? (
+                                    <Textarea
+                                      id={`pack-field-${name}`}
+                                      className="mt-1 min-h-20 resize-y text-sm"
+                                      value={value}
+                                      onChange={(event) =>
+                                        updateDraftText(name, event.target.value)
+                                      }
+                                    />
+                                  ) : (
+                                    <Input
+                                      id={`pack-field-${name}`}
+                                      className="mt-1 h-9 text-sm"
+                                      value={value}
+                                      onChange={(event) =>
+                                        updateDraftText(name, event.target.value)
+                                      }
+                                    />
+                                  )}
+                                  {max ? (
+                                    <span
+                                      className={`mt-0.5 block text-right text-[10px] tabular-nums ${
+                                        over ? "text-status-danger" : "text-muted-foreground"
+                                      }`}
+                                    >
+                                      {value.length}/{max}
+                                    </span>
+                                  ) : null}
+                                </div>
+                              );
+                            })}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Button
+                                size="sm"
+                                onClick={() => void saveSlideText()}
+                                disabled={!dirty || savingSlide}
+                              >
+                                {savingSlide ? (
+                                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                                ) : null}
+                                Salvar texto do slide
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => setDraft(savedDraft)}
+                                disabled={!dirty || savingSlide}
+                              >
+                                <RotateCcw className="mr-1 h-3.5 w-3.5" /> Descartar
+                              </Button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Carregando os limites deste layout…
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </section>
 
-                  <p className="min-h-4 text-xs text-muted-foreground" aria-live="polite">
-                    {localStatus}
-                  </p>
-                </section>
+                  <section
+                    aria-labelledby="pack-visual-panel-title"
+                    className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-card"
+                  >
+                    <div className="flex items-center justify-between gap-2 border-b px-3 py-2.5">
+                      <div>
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                          Painel 4
+                        </span>
+                        <h3 id="pack-visual-panel-title" className="text-sm font-semibold">
+                          Visual e Claude
+                        </h3>
+                      </div>
+                      <Palette className="h-4 w-4 text-status-info" />
+                    </div>
+                    <div className="space-y-3 p-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain">
+                      <div className="rounded-lg border bg-background p-3">
+                        <h3 className="mb-2 text-sm font-semibold">Composição deste slide</h3>
+                        <LayoutPicker
+                          layouts={designSystem?.layouts ?? []}
+                          value={slideLayout}
+                          disabled={savingLayout || !designSystem}
+                          onChange={(layout) => void changeLayout(layout)}
+                        />
+                        {slideSpec?.usesPhoto ? (
+                          <div className="mt-3 border-t pt-3">
+                            <label
+                              htmlFor="pack-slide-photo"
+                              className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
+                            >
+                              Foto (opcional)
+                            </label>
+                            <Select
+                              value={slide && photoIdOf(slide) ? photoIdOf(slide) : NO_PHOTO_VALUE}
+                              onValueChange={(value) =>
+                                void choosePhoto(value === NO_PHOTO_VALUE ? null : value)
+                              }
+                              disabled={savingPhoto || photoAssets.length === 0}
+                            >
+                              <SelectTrigger id="pack-slide-photo" className="mt-1 h-9 text-sm">
+                                <SelectValue placeholder="Foto do acervo" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value={NO_PHOTO_VALUE}>Sem foto</SelectItem>
+                                {photoAssets.map((asset) => (
+                                  <SelectItem key={asset.id} value={asset.id}>
+                                    {asset.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        ) : null}
+                        <p className="mt-2 text-[11px] text-muted-foreground">
+                          Layout, foto opcional e tema são decisões locais: o texto aprovado é
+                          preservado e nenhuma chamada ao Claude é feita.
+                        </p>
+                      </div>
+
+                      <div className="rounded-lg border bg-background p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="flex items-center gap-2 text-sm font-semibold">
+                            <Sparkles className="h-4 w-4 text-status-info" /> Reescrever só este
+                            slide
+                          </h3>
+                          <StatusBadge label="1 chamada, contexto mínimo" tone="warn" />
+                        </div>
+                        <Textarea
+                          className="min-h-16 resize-y text-sm"
+                          maxLength={400}
+                          value={regenerateNote}
+                          placeholder="O que melhorar? Ex.: explique o número em linguagem simples."
+                          onChange={(event) => setRegenerateNote(event.target.value)}
+                          aria-label="Instrução para reescrever o slide"
+                        />
+                        <ConfirmAction
+                          trigger={
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="mt-2"
+                              disabled={regeneratingSlide}
+                            >
+                              {regeneratingSlide ? (
+                                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Sparkles className="mr-1 h-3.5 w-3.5" />
+                              )}
+                              Reescrever slide {activeSlide + 1}
+                            </Button>
+                          }
+                          title={`Reescrever apenas o slide ${activeSlide + 1}?`}
+                          description={
+                            <div className="space-y-2 text-sm">
+                              <p>
+                                O pedido leva só a etapa educativa desta posição, o texto atual do
+                                slide e os limites do layout. Os outros seis slides não são
+                                reenviados nem alterados.
+                              </p>
+                              <p>A versão atual fica salva no histórico e pode voltar sem custo.</p>
+                            </div>
+                          }
+                          confirmLabel="Reescrever este slide"
+                          onConfirm={() => void regenerateSlide()}
+                        />
+                      </div>
+
+                      <p className="min-h-4 text-xs text-muted-foreground" aria-live="polite">
+                        {localStatus}
+                      </p>
+                    </div>
+                  </section>
+                </div>
               </div>
 
               <Tabs defaultValue="caption" className="space-y-3">

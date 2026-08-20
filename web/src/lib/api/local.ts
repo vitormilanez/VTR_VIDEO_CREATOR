@@ -16,8 +16,23 @@ import type {
   CinematicSupportingImages,
   CinematicVisualStyle,
 } from "../cinematic";
+import {
+  expireSessionResource,
+  loadSessionResource,
+  readSessionResource,
+  writeSessionResource,
+} from "../session-resource-cache";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
+const SESSION_RESOURCE_TTL_MS = 5 * 60 * 1000;
+const STATIC_RESOURCE_TTL_MS = 30 * 60 * 1000;
+
+export interface SessionFetchOptions {
+  force?: boolean;
+}
+
+const packResourceKey = (scriptId: string) => `pack:${scriptId}`;
+const heyGenStylesResourceKey = (tag: string) => `heygen:styles:${tag}`;
 
 export interface StatePayload extends HydratePayload {
   updatedAt?: string;
@@ -1056,7 +1071,7 @@ export async function updatePackPresentation(
   return { pack: response.pack, compliance: response.compliance, clarity: response.clarity };
 }
 
-export async function fetchPack(scriptId: string): Promise<{
+export interface PackStudioData {
   pack: GeneratedPack | null;
   clarity: PackClarity | null;
   versions: PackVersion[];
@@ -1066,30 +1081,62 @@ export async function fetchPack(scriptId: string): Promise<{
   outdatedPackSchema?: boolean;
   outdatedEducationalFlow?: boolean;
   requiredSlideCount?: number;
-}> {
-  const response = await requestJson<{
-    ok: boolean;
-    pack: GeneratedPack | null;
-    clarity?: PackClarity | null;
-    versions?: PackVersion[];
-    productionProfile: ProductionProfile | null;
-    outdatedAvatar: boolean;
-    outdatedIdentity?: boolean;
-    outdatedPackSchema?: boolean;
-    outdatedEducationalFlow?: boolean;
-    requiredSlideCount?: number;
-  }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
-  return {
-    pack: response.pack,
-    clarity: response.clarity ?? null,
-    versions: response.versions ?? [],
-    productionProfile: response.productionProfile,
-    outdatedAvatar: response.outdatedAvatar,
-    outdatedIdentity: response.outdatedIdentity,
-    outdatedPackSchema: response.outdatedPackSchema,
-    outdatedEducationalFlow: response.outdatedEducationalFlow,
-    requiredSlideCount: response.requiredSlideCount,
-  };
+}
+
+export function readCachedPack(scriptId: string): PackStudioData | undefined {
+  return readSessionResource<PackStudioData>(packResourceKey(scriptId));
+}
+
+export function updateCachedPack(scriptId: string, patch: Partial<PackStudioData>): void {
+  const current = readCachedPack(scriptId);
+  writeSessionResource<PackStudioData>(
+    packResourceKey(scriptId),
+    {
+      pack: null,
+      clarity: null,
+      versions: [],
+      productionProfile: null,
+      outdatedAvatar: false,
+      ...current,
+      ...patch,
+    },
+    SESSION_RESOURCE_TTL_MS,
+  );
+}
+
+export async function fetchPack(
+  scriptId: string,
+  options: SessionFetchOptions = {},
+): Promise<PackStudioData> {
+  return loadSessionResource(
+    packResourceKey(scriptId),
+    async () => {
+      const response = await requestJson<{
+        ok: boolean;
+        pack: GeneratedPack | null;
+        clarity?: PackClarity | null;
+        versions?: PackVersion[];
+        productionProfile: ProductionProfile | null;
+        outdatedAvatar: boolean;
+        outdatedIdentity?: boolean;
+        outdatedPackSchema?: boolean;
+        outdatedEducationalFlow?: boolean;
+        requiredSlideCount?: number;
+      }>(`/api/packs/${encodeURIComponent(scriptId)}`, { method: "GET" });
+      return {
+        pack: response.pack,
+        clarity: response.clarity ?? null,
+        versions: response.versions ?? [],
+        productionProfile: response.productionProfile,
+        outdatedAvatar: response.outdatedAvatar,
+        outdatedIdentity: response.outdatedIdentity,
+        outdatedPackSchema: response.outdatedPackSchema,
+        outdatedEducationalFlow: response.outdatedEducationalFlow,
+        requiredSlideCount: response.requiredSlideCount,
+      };
+    },
+    { ttlMs: SESSION_RESOURCE_TTL_MS, force: options.force },
+  );
 }
 
 export async function refreshPackAvatar(scriptId: string): Promise<
@@ -1129,12 +1176,24 @@ export async function updatePackCarouselLayout(
   return { pack: response.pack, compliance: response.compliance, clarity: response.clarity };
 }
 
-export async function fetchPackPhotoAssets(): Promise<PackPhotoAsset[]> {
-  const response = await requestJson<{ ok: boolean; assets: PackPhotoAsset[] }>(
-    "/api/packs/photo-assets",
-    { method: "GET" },
+export function readCachedPackPhotoAssets(): PackPhotoAsset[] | undefined {
+  return readSessionResource<PackPhotoAsset[]>("packs:photo-assets");
+}
+
+export async function fetchPackPhotoAssets(
+  options: SessionFetchOptions = {},
+): Promise<PackPhotoAsset[]> {
+  return loadSessionResource(
+    "packs:photo-assets",
+    async () => {
+      const response = await requestJson<{ ok: boolean; assets: PackPhotoAsset[] }>(
+        "/api/packs/photo-assets",
+        { method: "GET" },
+      );
+      return response.assets;
+    },
+    { ttlMs: SESSION_RESOURCE_TTL_MS, force: options.force },
   );
-  return response.assets;
 }
 
 export async function updatePackCarouselPhoto(
@@ -1231,12 +1290,21 @@ export interface PackMutationResult {
 }
 
 /** Vocabulario fechado do Pack: layouts, rotulos e limites reais por campo. */
-export async function fetchPackDesignSystem(): Promise<PackDesignSystem> {
-  const response = await requestJson<{ ok: boolean } & PackDesignSystem>(
-    "/api/packs/design-system",
-    { method: "GET" },
+export function readCachedPackDesignSystem(): PackDesignSystem | undefined {
+  return readSessionResource<PackDesignSystem>("packs:design-system");
+}
+
+export async function fetchPackDesignSystem(
+  options: SessionFetchOptions = {},
+): Promise<PackDesignSystem> {
+  return loadSessionResource(
+    "packs:design-system",
+    () =>
+      requestJson<{ ok: boolean } & PackDesignSystem>("/api/packs/design-system", {
+        method: "GET",
+      }),
+    { ttlMs: STATIC_RESOURCE_TTL_MS, force: options.force },
   );
-  return response;
 }
 
 /** URL do preview: e o mesmo HTML que vira PNG na exportacao. */
@@ -1479,12 +1547,20 @@ export async function submitPodcastGeneration(
   return { generation: response.generation, jobs: response.jobs };
 }
 
-export async function fetchHeyGenProviderCapabilities(): Promise<HeyGenProviderCapabilities> {
-  const response = await requestJson<{
-    ok: boolean;
-    capabilities: HeyGenProviderCapabilities;
-  }>("/api/providers/heygen/capabilities", { method: "GET" });
-  return response.capabilities;
+export async function fetchHeyGenProviderCapabilities(
+  options: SessionFetchOptions = {},
+): Promise<HeyGenProviderCapabilities> {
+  return loadSessionResource(
+    "heygen:capabilities",
+    async () => {
+      const response = await requestJson<{
+        ok: boolean;
+        capabilities: HeyGenProviderCapabilities;
+      }>("/api/providers/heygen/capabilities", { method: "GET" });
+      return response.capabilities;
+    },
+    { ttlMs: STATIC_RESOURCE_TTL_MS, force: options.force },
+  );
 }
 
 export async function fetchStoryProject(scriptId: string): Promise<{
@@ -1680,21 +1756,35 @@ export function storyCompositionMediaUrl(composition: StoryComposition, download
   return /^https?:\/\//.test(path) ? path : `${BASE}${path}`;
 }
 
-export async function fetchMusicTracks(): Promise<MusicTrack[]> {
-  const response = await requestJson<{ ok: boolean; tracks: MusicTrack[] }>("/api/music-tracks", {
-    method: "GET",
-  });
-  return response.tracks.map((track) => ({
-    ...track,
-    url: /^https?:\/\//.test(track.url) ? track.url : `${BASE}${track.url}`,
-  }));
+export async function fetchMusicTracks(options: SessionFetchOptions = {}): Promise<MusicTrack[]> {
+  return loadSessionResource(
+    "library:music-tracks",
+    async () => {
+      const response = await requestJson<{ ok: boolean; tracks: MusicTrack[] }>(
+        "/api/music-tracks",
+        { method: "GET" },
+      );
+      return response.tracks.map((track) => ({
+        ...track,
+        url: /^https?:\/\//.test(track.url) ? track.url : `${BASE}${track.url}`,
+      }));
+    },
+    { ttlMs: SESSION_RESOURCE_TTL_MS, force: options.force },
+  );
 }
 
-export async function fetchAvatarSets(): Promise<AvatarSet[]> {
-  const response = await requestJson<{ ok: boolean; avatarSets: AvatarSet[] }>("/api/avatar-sets", {
-    method: "GET",
-  });
-  return response.avatarSets;
+export async function fetchAvatarSets(options: SessionFetchOptions = {}): Promise<AvatarSet[]> {
+  return loadSessionResource(
+    "library:avatar-sets",
+    async () => {
+      const response = await requestJson<{ ok: boolean; avatarSets: AvatarSet[] }>(
+        "/api/avatar-sets",
+        { method: "GET" },
+      );
+      return response.avatarSets;
+    },
+    { ttlMs: SESSION_RESOURCE_TTL_MS, force: options.force },
+  );
 }
 
 export async function saveAvatarSet(
@@ -1708,6 +1798,16 @@ export async function saveAvatarSet(
       body: JSON.stringify(avatarSet),
     },
   );
+  const retained = readSessionResource<AvatarSet[]>("library:avatar-sets");
+  if (retained) {
+    writeSessionResource(
+      "library:avatar-sets",
+      retained.some((item) => item.id === response.avatarSet.id)
+        ? retained.map((item) => (item.id === response.avatarSet.id ? response.avatarSet : item))
+        : [response.avatarSet, ...retained],
+      SESSION_RESOURCE_TTL_MS,
+    );
+  }
   return response.avatarSet;
 }
 
@@ -1715,6 +1815,14 @@ export async function deleteAvatarSet(id: string): Promise<void> {
   await requestJson<{ ok: boolean }>(`/api/avatar-sets/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
+  const retained = readSessionResource<AvatarSet[]>("library:avatar-sets");
+  if (retained) {
+    writeSessionResource(
+      "library:avatar-sets",
+      retained.filter((item) => item.id !== id),
+      SESSION_RESOURCE_TTL_MS,
+    );
+  }
 }
 
 export async function fetchScenePlan(scriptId: string): Promise<ScenePlan | null> {
@@ -2069,35 +2177,84 @@ export interface CreateAvatarPayload {
   consentAccepted: boolean;
 }
 
-export async function fetchHeyGenCatalog(): Promise<HeyGenCatalog> {
-  const res = await fetch(`${BASE}/api/heygen/catalog`);
-  if (!res.ok)
-    throw new Error(await errorDetail(res, "Nao foi possivel carregar avatares e vozes."));
-  return (await res.json()) as HeyGenCatalog;
+export function readCachedHeyGenCatalog(): HeyGenCatalog | undefined {
+  return readSessionResource<HeyGenCatalog>("heygen:catalog");
 }
 
-export async function fetchHeyGenAvatars(): Promise<{
+export async function fetchHeyGenCatalog(
+  options: SessionFetchOptions = {},
+): Promise<HeyGenCatalog> {
+  return loadSessionResource(
+    "heygen:catalog",
+    async () => {
+      const res = await fetch(`${BASE}/api/heygen/catalog`);
+      if (!res.ok)
+        throw new Error(await errorDetail(res, "Nao foi possivel carregar avatares e vozes."));
+      return (await res.json()) as HeyGenCatalog;
+    },
+    { ttlMs: SESSION_RESOURCE_TTL_MS, force: options.force },
+  );
+}
+
+export interface HeyGenAvatarLibrary {
   avatars: HeyGenAvatarGroup[];
   looks: HeyGenAvatarLook[];
   jobs: AvatarJob[];
   /** true quando a HeyGen estava indisponivel e a lista veio do cache local. */
   fromCache?: boolean;
-}> {
-  return requestJson("/api/heygen/avatars", { method: "GET" });
 }
 
-export async function fetchHeyGenStyles(tag = "all"): Promise<{
+export function readCachedHeyGenAvatars(): HeyGenAvatarLibrary | undefined {
+  return readSessionResource<HeyGenAvatarLibrary>("heygen:avatars");
+}
+
+export async function fetchHeyGenAvatars(
+  options: SessionFetchOptions = {},
+): Promise<HeyGenAvatarLibrary> {
+  return loadSessionResource(
+    "heygen:avatars",
+    () => requestJson<HeyGenAvatarLibrary>("/api/heygen/avatars", { method: "GET" }),
+    { ttlMs: SESSION_RESOURCE_TTL_MS, force: options.force },
+  );
+}
+
+export interface HeyGenStylesResult {
   styles: HeyGenStyle[];
   tag: string;
-}> {
-  return requestJson(`/api/heygen/styles?tag=${encodeURIComponent(tag)}`, { method: "GET" });
 }
 
-export async function fetchHeyGenBrandKits(): Promise<HeyGenBrandKit[]> {
-  const response = await requestJson<{ brandKits: HeyGenBrandKit[] }>("/api/heygen/brand-kits", {
-    method: "GET",
-  });
-  return response.brandKits;
+export function readCachedHeyGenStyles(tag = "all"): HeyGenStylesResult | undefined {
+  return readSessionResource<HeyGenStylesResult>(heyGenStylesResourceKey(tag));
+}
+
+export async function fetchHeyGenStyles(
+  tag = "all",
+  options: SessionFetchOptions = {},
+): Promise<HeyGenStylesResult> {
+  return loadSessionResource(
+    heyGenStylesResourceKey(tag),
+    () =>
+      requestJson<HeyGenStylesResult>(`/api/heygen/styles?tag=${encodeURIComponent(tag)}`, {
+        method: "GET",
+      }),
+    { ttlMs: STATIC_RESOURCE_TTL_MS, force: options.force },
+  );
+}
+
+export async function fetchHeyGenBrandKits(
+  options: SessionFetchOptions = {},
+): Promise<HeyGenBrandKit[]> {
+  return loadSessionResource(
+    "heygen:brand-kits",
+    async () => {
+      const response = await requestJson<{ brandKits: HeyGenBrandKit[] }>(
+        "/api/heygen/brand-kits",
+        { method: "GET" },
+      );
+      return response.brandKits;
+    },
+    { ttlMs: SESSION_RESOURCE_TTL_MS, force: options.force },
+  );
 }
 
 export async function uploadHeyGenAsset(file: File): Promise<VideoAgentAttachment> {
@@ -2120,6 +2277,16 @@ export async function uploadHeyGenAsset(file: File): Promise<VideoAgentAttachmen
 
 export async function createHeyGenAvatar(payload: CreateAvatarPayload): Promise<AvatarJob> {
   const response = await postJson<{ ok: boolean; job: AvatarJob }>("/api/heygen/avatars", payload);
+  const retained = readCachedHeyGenAvatars();
+  if (retained) {
+    writeSessionResource(
+      "heygen:avatars",
+      { ...retained, jobs: [response.job, ...retained.jobs] },
+      SESSION_RESOURCE_TTL_MS,
+    );
+    expireSessionResource("heygen:avatars");
+  }
+  expireSessionResource("heygen:catalog");
   return response.job;
 }
 
@@ -2128,6 +2295,17 @@ export async function refreshHeyGenAvatar(jobId: string): Promise<AvatarJob> {
     `/api/heygen/avatars/${encodeURIComponent(jobId)}/refresh`,
     {},
   );
+  const retained = readCachedHeyGenAvatars();
+  if (retained) {
+    writeSessionResource(
+      "heygen:avatars",
+      {
+        ...retained,
+        jobs: retained.jobs.map((job) => (job.id === response.job.id ? response.job : job)),
+      },
+      SESSION_RESOURCE_TTL_MS,
+    );
+  }
   return response.job;
 }
 
